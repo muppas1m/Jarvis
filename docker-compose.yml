@@ -1,4 +1,22 @@
 services:
+  backend:
+    build: ./backend
+    container_name: jarvis-backend
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    # NOTE: until Phase 1 Turn 4+ creates app/main.py the container will crash on
+    # `uvicorn app.main:app`. Build is the only thing that's expected to succeed
+    # in Turn 2. Bring this service up only after Turn 13 / Phase 1 wiring.
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: jarvis-postgres
