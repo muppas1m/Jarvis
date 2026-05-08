@@ -4,6 +4,17 @@ services:
     container_name: jarvis-backend
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Override the .env URLs so the container reaches sibling services via the
+      # docker-compose DNS names (`postgres`, `redis`) instead of `localhost`.
+      # The host-side .env keeps `localhost` URLs for any future host-run
+      # scripts that talk to the same containers via the published ports.
+      DATABASE_URL: postgresql+asyncpg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      DATABASE_URL_SYNC: postgresql+psycopg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://host.docker.internal:11434  # Ollama runs on the Mac host, not in compose
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -13,9 +24,10 @@ services:
       - ./backend:/app
     ports:
       - "8000:8000"
-    # NOTE: until Phase 1 Turn 4+ creates app/main.py the container will crash on
-    # `uvicorn app.main:app`. Build is the only thing that's expected to succeed
-    # in Turn 2. Bring this service up only after Turn 13 / Phase 1 wiring.
+    # NOTE: until app/main.py exists in a later turn the container crashes on
+    # `uvicorn app.main:app`. `docker compose build` works; `docker compose up`
+    # is intentionally not run yet. Migrations use `docker compose run --rm`
+    # which overrides the CMD.
 
   postgres:
     image: pgvector/pgvector:pg16
