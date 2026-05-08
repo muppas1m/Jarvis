@@ -13,6 +13,10 @@ services:
       DATABASE_URL_SYNC: postgresql+psycopg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://host.docker.internal:11434  # Ollama runs on the Mac host, not in compose
+      # Langfuse runs in the same docker network — reach it via service DNS
+      # rather than the host's localhost:3002, which inside this container
+      # resolves to the container itself and 502s on every callback.
+      LANGFUSE_HOST: http://langfuse-web:3000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

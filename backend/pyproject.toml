@@ -37,7 +37,11 @@ dependencies = [
     "langchain-litellm>=0.2.0",               # ChatLiteLLM — bridges LiteLLM into LangGraph
 
     # Observability
-    "langfuse>=2.50.0",
+    # Pinned to the v2 line. LiteLLM 1.83.x's integration calls
+    # `Langfuse(sdk_integration=...)` which was removed in v3 SDK; v4 also
+    # renamed the `langfuse.version` module path. Stays on 2.x until LiteLLM
+    # ships v3+ compatibility upstream.
+    "langfuse>=2.50.0,<3.0.0",
     "cachetools>=5.3.0",                      # Public-key cache for Pub/Sub JWT verifier (Task 4.16)
 
     # Memory
