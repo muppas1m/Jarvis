@@ -164,189 +164,230 @@ async def agent_node(state: AgentState) -> dict:
 
 
 # ============================================================================
-# Node 3 — tool_executor (safety + rate limits + interrupt for APPROVE)
+# Node 3 — tool_executor (one tool call per invocation; loops via the graph)
 # ============================================================================
 async def tool_executor_node(state: AgentState) -> dict:
-    """Execute every tool call from the most recent AIMessage.
+    """Execute exactly ONE pending tool call from the most recent AIMessage.
 
-    Each call goes through:
-      1. Skip if a ToolMessage with this tool_call_id already exists (resume-safety).
-      2. Per-turn rate-limit check.
-      3. Safety classification (SAFE / NOTIFY / APPROVE / BLOCKED).
-      4. APPROVE → write a PendingApproval row, send Telegram, interrupt().
-      5. Execute the tool (catching JarvisError family for friendly messages).
-      6. Sanitize + optionally archive the result.
-      7. Audit-log the row.
+    Single-call-per-invocation is deliberate. LangGraph's `interrupt()` does
+    NOT commit the function's partial return value — it just snapshots state
+    and exits. So if we processed multiple tool calls in a loop and hit
+    interrupt() halfway, on resume the loop would restart and earlier tool
+    calls would re-execute (gmail_send sends twice — catastrophic). Doing one
+    call per invocation makes each invocation atomically idempotent: state
+    is committed BETWEEN invocations, not within one.
+
+    Routing: `should_continue_tools` after this node loops back here if the
+    most recent AIMessage still has un-processed tool calls; otherwise the
+    graph routes back to `agent`.
+
+    For each call:
+      1. Per-turn rate-limit check.
+      2. Safety classification (SAFE / NOTIFY / APPROVE / BLOCKED).
+      3. APPROVE → write a PendingApproval row, ping master, interrupt().
+      4. Execute the tool (catching JarvisError family for friendly messages).
+      5. Sanitize + optionally archive the result.
+      6. Audit-log the row.
+      7. NOTIFY → ping master that the tool ran.
     """
-    # Lazy imports — these modules don't exist until later turns.
+    # Lazy imports — these modules don't exist as module attributes; the
+    # imports run at call time so test patches via `patch.object(...)` work.
     from app.agent.tools.registry import tool_registry
-    # NOTE for Turn 11: failure_alerter doesn't expose `notify_tool_executed`
-    # yet (plan oversight). Add it when building messaging/failure_alerter.py.
-    from app.messaging.failure_alerter import (  # noqa: E402
+    from app.messaging.failure_alerter import (
         notify_tool_executed,
         send_approval_request_to_master,
     )
 
-    last_msg = state["messages"][-1]
-    if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+    # Walk BACK to the most recent AIMessage with tool_calls. We can't just
+    # look at state["messages"][-1] because once we've processed at least one
+    # tool call, the last message is the ToolMessage we just emitted — not
+    # the AIMessage carrying the tool_calls list.
+    last_ai_with_tools = next(
+        (m for m in reversed(state["messages"])
+         if isinstance(m, AIMessage) and m.tool_calls),
+        None,
+    )
+    if last_ai_with_tools is None:
         return {}
 
-    thread_id = state["thread_id"]
-    turn_id = state.get("turn_started_at", "no-turn")
-
-    # Resume-safety: tool calls whose ToolMessage is already in state were
-    # processed in a previous invocation of this node. Skip them so we don't
-    # double-execute side effects on resume from interrupt().
+    # Find the FIRST tool call without a matching ToolMessage already in state.
     already_processed = {
         m.tool_call_id
         for m in state["messages"]
         if isinstance(m, ToolMessage)
     }
+    next_tc = next(
+        (tc for tc in last_ai_with_tools.tool_calls if tc["id"] not in already_processed),
+        None,
+    )
+    if next_tc is None:
+        # All tool calls in the last AIMessage have been processed — nothing
+        # to do. The conditional edge after this node will route to agent.
+        return {}
 
-    tool_messages: list[ToolMessage] = []
+    tool_call_id = next_tc["id"]
+    tool_name = next_tc["name"]
+    tool_args = next_tc.get("args") or {}
 
-    for tc in last_msg.tool_calls:
-        tool_call_id = tc["id"]
-        tool_name = tc["name"]
-        tool_args = tc.get("args") or {}
+    thread_id = state["thread_id"]
+    turn_id = state.get("turn_started_at", "no-turn")
 
-        if tool_call_id in already_processed:
-            continue
-
-        # ---- per-turn rate limit ------------------------------------------
-        ok = await rate_limiter.check_and_increment_tool(thread_id, turn_id, tool_name)
-        if not ok:
-            tool_messages.append(
+    # ---- per-turn rate limit ------------------------------------------------
+    ok = await rate_limiter.check_and_increment_tool(thread_id, turn_id, tool_name)
+    if not ok:
+        await _log_audit(
+            thread_id, tool_name, SafetyLevel.SAFE, tool_args,
+            success=False, error="RATE_LIMITED",
+        )
+        return {
+            "messages": [
                 ToolMessage(
                     content=f"[RATE-LIMITED] Tool '{tool_name}' exceeded per-turn limit.",
                     tool_call_id=tool_call_id,
                 )
-            )
-            await _log_audit(
-                thread_id, tool_name, SafetyLevel.SAFE, tool_args,
-                success=False, error="RATE_LIMITED",
-            )
-            continue
+            ]
+        }
 
-        # ---- classify ------------------------------------------------------
-        level = safety.classify(tool_name, tool_args)
+    # ---- classify -----------------------------------------------------------
+    level = safety.classify(tool_name, tool_args)
 
-        if level == SafetyLevel.BLOCKED:
-            tool_messages.append(
+    if level == SafetyLevel.BLOCKED:
+        await _log_audit(
+            thread_id, tool_name, level, tool_args,
+            success=False, error="BLOCKED",
+        )
+        return {
+            "messages": [
                 ToolMessage(
                     content=f"[BLOCKED] Tool '{tool_name}' is not permitted.",
                     tool_call_id=tool_call_id,
                 )
-            )
+            ]
+        }
+
+    # ---- APPROVE → pause via interrupt --------------------------------------
+    if level == SafetyLevel.APPROVE:
+        approval_id = await _create_pending_approval(
+            thread_id=thread_id,
+            interrupt_id=tool_call_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+        await send_approval_request_to_master(
+            approval_id=str(approval_id),
+            tool_name=tool_name,
+            description=_describe_action(tool_name, tool_args),
+        )
+        # interrupt() snapshots state and exits. On resume, this same call
+        # returns the resume value. Resume payload shape:
+        #   {"approved": True}              -> proceed to execution below
+        #   {"approved": False, "reason": ...} -> emit a [REJECTED] ToolMessage
+        decision = interrupt(
+            {
+                "type": "approval_required",
+                "approval_id": str(approval_id),
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "description": _describe_action(tool_name, tool_args),
+            }
+        )
+        if not isinstance(decision, dict) or not decision.get("approved"):
+            reason = (decision or {}).get("reason", "rejected by master")
             await _log_audit(
                 thread_id, tool_name, level, tool_args,
-                success=False, error="BLOCKED",
+                success=False, error=f"REJECTED: {reason}",
             )
-            continue
-
-        # ---- APPROVE — pause via interrupt ---------------------------------
-        if level == SafetyLevel.APPROVE:
-            approval_id = await _create_pending_approval(
-                thread_id=thread_id,
-                interrupt_id=tool_call_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-            )
-
-            # Out-of-band ping to the master so they know there's something
-            # to act on. This does NOT block the interrupt itself.
-            await send_approval_request_to_master(
-                approval_id=str(approval_id),
-                tool_name=tool_name,
-                description=_describe_action(tool_name, tool_args),
-            )
-
-            # interrupt() snapshots state and exits. Resume payload is what
-            # Command(resume=...) sends back, expected shape:
-            #   {"approved": True}              -> proceed
-            #   {"approved": False, "reason": ...} -> reject
-            decision = interrupt(
-                {
-                    "type": "approval_required",
-                    "approval_id": str(approval_id),
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                    "description": _describe_action(tool_name, tool_args),
-                }
-            )
-
-            if not isinstance(decision, dict) or not decision.get("approved"):
-                reason = (decision or {}).get("reason", "rejected by master")
-                tool_messages.append(
+            return {
+                "messages": [
                     ToolMessage(
                         content=f"[REJECTED] Master rejected: {reason}",
                         tool_call_id=tool_call_id,
                     )
-                )
-                await _log_audit(
-                    thread_id, tool_name, level, tool_args,
-                    success=False, error=f"REJECTED: {reason}",
-                )
-                continue
-            # Approved — fall through to execution.
+                ]
+            }
+        # Approved — fall through to execution below.
 
-        # ---- execute (covers SAFE, NOTIFY, approved-APPROVE) --------------
-        try:
-            raw_result = await tool_registry.execute(tool_name, tool_args)
-            success = True
-            err: str | None = None
-        except RateLimitedError as exc:
-            logger.warning("tool_rate_limited", tool=tool_name, error=str(exc))
-            raw_result = (
-                f"[RATE-LIMITED] Hit hourly cap on `{tool_name}`. Try again later. ({exc})"
-            )
-            success = False
-            err = f"RATE_LIMITED: {exc}"
-        except SafetyBlockedError as exc:
-            logger.warning("tool_safety_blocked_runtime", tool=tool_name, error=str(exc))
-            raw_result = f"[BLOCKED] Safety layer rejected `{tool_name}`: {exc}"
-            success = False
-            err = f"SAFETY_BLOCKED: {exc}"
-        except ApprovalExpiredError as exc:
-            logger.warning("tool_approval_expired", tool=tool_name, error=str(exc))
-            raw_result = f"[EXPIRED] Approval window for `{tool_name}` lapsed: {exc}"
-            success = False
-            err = f"APPROVAL_EXPIRED: {exc}"
-        except CostCapExceededError as exc:
-            logger.error("tool_cost_cap_exceeded", tool=tool_name, error=str(exc))
-            raw_result = (
-                f"[BUDGET] Daily LLM spend cap reached — `{tool_name}` deferred until tomorrow."
-            )
-            success = False
-            err = f"COST_CAP_EXCEEDED: {exc}"
-        except Exception as exc:  # noqa: BLE001 — keep one tool failure from killing the turn
-            logger.error("tool_execution_failed", tool=tool_name, error=str(exc))
-            raw_result = f"[ERROR] Tool '{tool_name}' failed: {exc}"
-            success = False
-            err = str(exc)
-
-        # ---- sanitize + archive if oversized ------------------------------
-        sanitized, archived_full = sanitize_tool_result(
-            tool_name=tool_name,
-            raw_result=raw_result,
-            max_chars=settings.TOOL_RESULT_MAX_CHARS,
+    # ---- execute (SAFE, NOTIFY, or approved-APPROVE) -----------------------
+    try:
+        raw_result = await tool_registry.execute(tool_name, tool_args)
+        success = True
+        err: str | None = None
+    except RateLimitedError as exc:
+        logger.warning("tool_rate_limited", tool=tool_name, error=str(exc))
+        raw_result = (
+            f"[RATE-LIMITED] Hit hourly cap on `{tool_name}`. Try again later. ({exc})"
         )
-        if archived_full is not None:
-            archive_id = await _archive_tool_result(
-                thread_id=thread_id,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                full_result=archived_full,
-            )
-            sanitized += f"\n[archived:{archive_id}]"
+        success = False
+        err = f"RATE_LIMITED: {exc}"
+    except SafetyBlockedError as exc:
+        logger.warning("tool_safety_blocked_runtime", tool=tool_name, error=str(exc))
+        raw_result = f"[BLOCKED] Safety layer rejected `{tool_name}`: {exc}"
+        success = False
+        err = f"SAFETY_BLOCKED: {exc}"
+    except ApprovalExpiredError as exc:
+        logger.warning("tool_approval_expired", tool=tool_name, error=str(exc))
+        raw_result = f"[EXPIRED] Approval window for `{tool_name}` lapsed: {exc}"
+        success = False
+        err = f"APPROVAL_EXPIRED: {exc}"
+    except CostCapExceededError as exc:
+        logger.error("tool_cost_cap_exceeded", tool=tool_name, error=str(exc))
+        raw_result = (
+            f"[BUDGET] Daily LLM spend cap reached — `{tool_name}` deferred until tomorrow."
+        )
+        success = False
+        err = f"COST_CAP_EXCEEDED: {exc}"
+    except Exception as exc:  # noqa: BLE001 — keep one tool failure from killing the turn
+        logger.error("tool_execution_failed", tool=tool_name, error=str(exc))
+        raw_result = f"[ERROR] Tool '{tool_name}' failed: {exc}"
+        success = False
+        err = str(exc)
 
-        tool_messages.append(ToolMessage(content=sanitized, tool_call_id=tool_call_id))
-        await _log_audit(thread_id, tool_name, level, tool_args, success=success, error=err)
+    # ---- sanitize + archive if oversized -----------------------------------
+    sanitized, archived_full = sanitize_tool_result(
+        tool_name=tool_name,
+        raw_result=raw_result,
+        max_chars=settings.TOOL_RESULT_MAX_CHARS,
+    )
+    if archived_full is not None:
+        archive_id = await _archive_tool_result(
+            thread_id=thread_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            full_result=archived_full,
+        )
+        sanitized += f"\n[archived:{archive_id}]"
 
-        if level == SafetyLevel.NOTIFY:
-            await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
+    await _log_audit(thread_id, tool_name, level, tool_args, success=success, error=err)
 
-    return {"messages": tool_messages}
+    if level == SafetyLevel.NOTIFY:
+        await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
+
+    return {
+        "messages": [ToolMessage(content=sanitized, tool_call_id=tool_call_id)]
+    }
+
+
+def should_continue_tools(state: AgentState) -> str:
+    """Routing after `tool_executor`. Loop back to itself if the latest
+    AIMessage still has unprocessed tool calls; otherwise return to the
+    agent so it can react to the tool results."""
+    # Walk back to find the most recent AIMessage with tool_calls (skip any
+    # ToolMessages we just emitted).
+    last_ai_msg = None
+    for m in reversed(state["messages"]):
+        if isinstance(m, AIMessage) and m.tool_calls:
+            last_ai_msg = m
+            break
+    if last_ai_msg is None:
+        return "agent"   # no tool calls anywhere — odd, but safe default
+
+    already_processed = {
+        m.tool_call_id
+        for m in state["messages"]
+        if isinstance(m, ToolMessage)
+    }
+    pending = [tc for tc in last_ai_msg.tool_calls if tc["id"] not in already_processed]
+    return "tool_executor" if pending else "agent"
 
 
 # ============================================================================

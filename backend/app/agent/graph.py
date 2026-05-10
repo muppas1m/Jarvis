@@ -33,6 +33,7 @@ from app.agent.nodes import (
     memory_load_node,
     persist_node,
     should_continue,
+    should_continue_tools,
     tool_executor_node,
 )
 from app.agent.state import AgentState
@@ -87,7 +88,22 @@ def get_checkpointer() -> AsyncPostgresSaver:
 
 
 def build_graph():
-    """Compile the agent StateGraph. Call AFTER init_checkpointer()."""
+    """Compile the agent StateGraph. Call AFTER init_checkpointer().
+
+    Topology:
+        START -> memory_load -> agent -> [should_continue]
+                                  ^       ├─ tool_calls? -> tool_executor
+                                  |       └─ no          -> persist -> END
+                                  |
+                                  |     [should_continue_tools after tool_executor]
+                                  |       ├─ more pending? -> tool_executor
+                                  └───────└─ all done     -> agent
+
+    The tool_executor node processes ONE tool call per invocation; the
+    conditional edge after it loops back to itself until every tool call
+    in the most recent AIMessage has produced a ToolMessage. This is what
+    makes the resume-from-interrupt path safe — see nodes.py docstring.
+    """
     builder = StateGraph(AgentState)
 
     builder.add_node("memory_load", memory_load_node)
@@ -105,7 +121,14 @@ def build_graph():
             "persist": "persist",
         },
     )
-    builder.add_edge("tool_executor", "agent")
+    builder.add_conditional_edges(
+        "tool_executor",
+        should_continue_tools,
+        {
+            "tool_executor": "tool_executor",
+            "agent": "agent",
+        },
+    )
     builder.add_edge("persist", END)
 
     return builder.compile(checkpointer=get_checkpointer())
