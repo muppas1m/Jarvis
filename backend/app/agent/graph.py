@@ -1,12 +1,9 @@
 """
 StateGraph wiring + AsyncPostgresSaver checkpointer.
 
-Topology:
-
-    START -> memory_load -> agent ──┐
-                              ▲     │  conditional: should_continue()
-                              │     ├─ tool_calls?  yes -> tool_executor -> agent
-                              │     └─ no          -> persist -> END
+Topology lives in `build_graph()`'s docstring below — keeping it in one
+place so the diagram doesn't drift across files. nodes.py also references
+the same picture from the consumer side.
 
 The checkpointer persists state to Postgres after each node, so a turn that
 hits `interrupt()` (in tool_executor for an APPROVE-level call) survives

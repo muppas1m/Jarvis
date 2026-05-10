@@ -24,7 +24,7 @@ Both compile the graph lazily (build_graph() reads the checkpointer singleton).
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from app.agent.graph import build_graph
@@ -76,13 +76,25 @@ async def run_turn(
         result = await graph().ainvoke(initial_state, config=config)
     except Exception as exc:
         logger.exception("graph_invoke_failed", thread_id=thread_id, error=str(exc))
+        logger.info(
+            "turn_complete", thread_id=thread_id, status="error", tool_calls=None
+        )
         return {
             "status": "error",
             "response": "I hit an internal error. Please try again.",
             "interrupt": None,
         }
 
-    return await _shape_result(result, config)
+    shaped = await _shape_result(result, config)
+    logger.info(
+        "turn_complete",
+        thread_id=thread_id,
+        status=shaped["status"],
+        tool_calls=sum(
+            1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
+        ),
+    )
+    return shaped
 
 
 async def resume_turn(

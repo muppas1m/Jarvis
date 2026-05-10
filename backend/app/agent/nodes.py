@@ -1,31 +1,34 @@
 """
 Graph nodes — the four steps of an agent turn.
 
-Topology (linear with one self-loop):
+Topology (driven by graph.py's `build_graph`):
 
-    START -> memory_load -> agent ──┐
-                              ▲     │ has tool_calls?
-                              │     │   yes -> tool_executor -> agent
-                              │     │   no  -> persist -> END
-                              │
-                       (interrupt() inside
-                       tool_executor pauses
-                       here for APPROVE)
+    START -> memory_load -> agent -> [should_continue]
+                              ^       ├─ tool_calls?  -> tool_executor
+                              |       └─ no           -> persist -> END
+                              |
+                              |     [should_continue_tools after tool_executor]
+                              |       ├─ more pending? -> tool_executor
+                              └───────└─ all done      -> agent
 
 Each node receives the AgentState dict and returns a partial-state dict
 that LangGraph merges via the per-field reducers declared in state.py.
 
-Resume safety:
-  When the graph pauses on interrupt() inside tool_executor and later
-  resumes, LangGraph re-runs the entire node body from the top. The for
-  loop iterates from index 0 again, so any side effects of EARLIER tool
-  calls (rate-limit increments, audit rows, actual tool execution) would
-  re-execute. For email_send that's catastrophic.
+Resume safety (the load-bearing design choice, see test_resume_dedup.py):
+  `tool_executor` processes exactly ONE tool call per invocation. The
+  conditional edge `should_continue_tools` loops it back to itself until
+  every tool call in the most recent AIMessage has produced a ToolMessage,
+  then routes to `agent`. State commits BETWEEN invocations, not within
+  one — so when an APPROVE-tier call hits `interrupt()` and pauses, any
+  tool calls processed in earlier invocations are already durable. On
+  resume only the interrupted call re-runs.
 
-  Defense: on entry we collect tool_call_ids for which a ToolMessage already
-  exists in state["messages"]. The reducer keeps those messages around
-  across invocations — they are the durable record of what's been processed.
-  Tool calls already in that set are skipped on re-entry.
+  An older loop-inside-node design tried to dedup via "skip if a
+  ToolMessage with this tool_call_id is already in state". That doesn't
+  work because `interrupt()` does NOT commit the node's partial return
+  value — it just snapshots state and exits. So earlier-iteration
+  ToolMessages built up in a local list never reached the reducer, and
+  resume re-executed them.
 """
 import json
 import uuid

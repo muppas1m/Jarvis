@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -62,20 +63,59 @@ class TelegramChannel(Channel):
             raw=raw_payload,
         )
 
+    async def _send_with_markdown_fallback(
+        self,
+        chat_id: str,
+        text: str,
+        parse_mode: str | None,
+        **extra: Any,
+    ) -> None:
+        """Telegram's MarkdownV1 parser is finicky and the bot's replies
+        come from an LLM that doesn't always produce well-balanced markup
+        (unmatched underscores, asterisks inside URLs, code-block fences
+        without language tags, etc.). A parse failure raises BadRequest
+        and — because the call originates inside python-telegram-bot's
+        polling callback, NOT under route_inbound's try/except — silently
+        swallows the reply.
+
+        Always retry once with parse_mode=None so the master never sees a
+        silent drop. Plain text is strictly worse formatting but strictly
+        better than no reply at all."""
+        try:
+            await self.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=parse_mode, **extra
+            )
+        except BadRequest as exc:
+            if "parse" not in str(exc).lower():
+                raise
+            logger.warning(
+                "telegram_markdown_parse_failed",
+                chat_id=chat_id,
+                error=str(exc),
+                text_preview=text[:120],
+            )
+            await self.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=None, **extra
+            )
+
     async def send_reply(
         self,
         msg: NormalizedMessage,
         text: str,
         parse_mode: str = "Markdown",
     ) -> None:
-        await self.bot.send_message(
+        await self._send_with_markdown_fallback(
+            chat_id=msg.channel_user_id, text=text, parse_mode=parse_mode
+        )
+        logger.info(
+            "telegram_send_reply",
             chat_id=msg.channel_user_id,
-            text=text,
-            parse_mode=parse_mode,
+            thread_id=msg.thread_id,
+            text_len=len(text or ""),
         )
 
     async def send_alert(self, text: str) -> None:
-        await self.bot.send_message(
+        await self._send_with_markdown_fallback(
             chat_id=settings.TELEGRAM_MASTER_CHAT_ID,
             text=text,
             parse_mode="Markdown",
@@ -94,11 +134,11 @@ class TelegramChannel(Channel):
                 ),
             ]
         ])
-        await self.bot.send_message(
+        await self._send_with_markdown_fallback(
             chat_id=settings.TELEGRAM_MASTER_CHAT_ID,
             text=f"🔔 *Approval Required*\n\n{description}",
-            reply_markup=keyboard,
             parse_mode="Markdown",
+            reply_markup=keyboard,
         )
 
     async def show_typing(self, msg: NormalizedMessage) -> None:

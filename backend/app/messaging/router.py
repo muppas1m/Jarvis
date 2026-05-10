@@ -34,6 +34,13 @@ session_mgr = SessionManager()
 
 async def route_inbound(msg: NormalizedMessage) -> None:
     """Drive a single inbound message through the agent and send the reply."""
+    logger.info(
+        "route_inbound",
+        platform=msg.platform,
+        thread_id=msg.thread_id,
+        is_master=msg.is_master,
+        text_len=len(msg.text or ""),
+    )
     ch = channel_registry.get(msg.platform)
 
     if not msg.is_master:
