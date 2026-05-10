@@ -18,7 +18,6 @@ Responsibilities:
 The single `llm_gateway` singleton at the bottom is what the rest of the
 codebase imports.
 """
-import os
 import time
 import uuid
 
@@ -29,6 +28,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import LLMUsageLog
+from app.llm.bootstrap import wire_all
 from app.llm.cost_tracker import CostTracker
 from app.llm.models import TASK_ROUTING, get_models
 from app.utils.exceptions import CostCapExceededError
@@ -36,49 +36,9 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-def _wire_provider_keys() -> None:
-    """Push API keys + base URLs into env vars LiteLLM expects.
-
-    LiteLLM reads provider creds from the environment, not from kwargs, so we
-    set them once at import time. Empty values are skipped — providers without
-    keys simply aren't reachable, which is the right behavior.
-    """
-    if settings.ANTHROPIC_API_KEY:
-        os.environ["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
-    if settings.OPENAI_API_KEY:
-        os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
-    if settings.GROQ_API_KEY:
-        os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
-    if settings.GOOGLE_GEMINI_API_KEY:
-        os.environ["GEMINI_API_KEY"] = settings.GOOGLE_GEMINI_API_KEY
-    if settings.OLLAMA_BASE_URL:
-        os.environ["OLLAMA_API_BASE"] = settings.OLLAMA_BASE_URL
-
-
-def _wire_langfuse_callback() -> None:
-    """Tell LiteLLM to trace every call to Langfuse.
-
-    LiteLLM dynamically imports the langfuse SDK on first callback fire and
-    sends spans to LANGFUSE_HOST. We don't need to construct a Langfuse client
-    here — that's done in observability.langfuse_client() if direct traces
-    are needed elsewhere.
-    """
-    if not (settings.LANGFUSE_ENABLED and settings.LANGFUSE_PUBLIC_KEY):
-        logger.info("langfuse_callback_disabled", reason="missing keys or LANGFUSE_ENABLED=false")
-        return
-
-    litellm.success_callback = ["langfuse"]
-    litellm.failure_callback = ["langfuse"]
-    os.environ["LANGFUSE_PUBLIC_KEY"] = settings.LANGFUSE_PUBLIC_KEY
-    os.environ["LANGFUSE_SECRET_KEY"] = settings.LANGFUSE_SECRET_KEY
-    os.environ["LANGFUSE_HOST"] = settings.LANGFUSE_HOST
-    logger.info("langfuse_callback_wired", host=settings.LANGFUSE_HOST)
-
-
-# Run once at import.
-_wire_provider_keys()
-_wire_langfuse_callback()
+# Wire provider creds + Langfuse callback. Both are idempotent — see
+# app.llm.bootstrap for why this lives in a separate module.
+wire_all()
 
 
 class LLMGateway:

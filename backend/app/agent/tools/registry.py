@@ -1,41 +1,248 @@
 """
-Tool registry — STUB.
+Tool registry with dynamic embedding-based selection.
 
-This is a minimum-viable shim so `app.agent.nodes` can import and call
-`tool_registry.select_relevant_tools(...)` and `tool_registry.execute(...)`
-without crashing while the full registry (Task 1.11 / Turn 10) is still
-to be written.
+What this gives us:
+  - Tools register a name, an async or sync handler, a one-paragraph
+    description, and a Pydantic args schema. We wrap them as LangChain
+    StructuredTool objects so LangGraph's `bind_tools()` can hand them to
+    any provider's chat model.
+  - On startup the orchestrator calls `index_all_tools()` which embeds every
+    registered tool's description (BGE-M3 via Ollama, 1024 dims) and upserts
+    a row into `tool_embeddings`. Re-embedding only happens for descriptions
+    that changed, so restarts are cheap.
+  - On every agent turn `select_relevant_tools(query, top_k)` does a cosine
+    search over `tool_embeddings` and returns the top-k most relevant tools
+    plus all `always_loaded=True` tools. The agent binds only those, which
+    keeps the LLM's tool list small even when the codebase has hundreds of
+    registered tools.
 
-Behavior:
-  - select_relevant_tools(...) returns [] — no tools are bound to the LLM,
-    so the agent always replies in plain text. This lets us smoke-test the
-    graph + checkpointer path without needing real tool implementations.
-  - execute(...) raises NotImplementedError. If something tries to call it
-    in this state we want a loud failure, not silent no-op.
-
-Turn 10 replaces this entire file with the real registry: Pydantic-validated
-tool registration, BGE-M3 embedded tool descriptions stored in
-tool_embeddings, top-k cosine search on every turn, always-loaded bypass.
+Tools that should bypass ranking — memory_search, anything that's relevant on
+nearly every turn — register with `always_loaded=True`.
 """
+import inspect
+from collections.abc import Callable
 from typing import Any
 
+import litellm
+from langchain_core.tools import BaseTool, StructuredTool
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from app.config import settings
+from app.db.engine import async_session
+from app.db.models import ToolEmbedding
+from app.llm.bootstrap import wire_litellm_providers
 from app.utils.logging import get_logger
+
+# Push OLLAMA_API_BASE etc. into env so litellm.aembedding can reach the
+# Ollama daemon. Idempotent — gateway.py also calls wire_all() which does
+# the same thing, so whichever module loads first wins and the second is a no-op.
+wire_litellm_providers()
 
 logger = get_logger(__name__)
 
 
-class _ToolRegistryStub:
-    """Returns no tools; raises on execution. Real impl arrives in Turn 10."""
+class _ToolEntry:
+    __slots__ = ("name", "tool", "always_loaded", "description")
 
-    async def select_relevant_tools(self, query: str, top_k: int = 15) -> list:  # noqa: ARG002
-        logger.debug("tool_registry_stub_select", query_len=len(query), top_k=top_k)
-        return []
+    def __init__(
+        self,
+        name: str,
+        tool: BaseTool,
+        always_loaded: bool,
+        description: str,
+    ) -> None:
+        self.name = name
+        self.tool = tool
+        self.always_loaded = always_loaded
+        self.description = description
 
-    async def execute(self, tool_name: str, tool_args: dict[str, Any]) -> Any:  # noqa: ARG002
-        raise NotImplementedError(
-            f"tool_registry stub cannot execute {tool_name!r} — "
-            "real registry implementation arrives in Turn 10."
+
+class ToolRegistry:
+    """Singleton — holds every registered tool plus its embedding metadata."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _ToolEntry] = {}
+
+    # ------------------------------------------------------------------
+    # Registration + execution
+    # ------------------------------------------------------------------
+    def register(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        description: str,
+        args_schema: type[BaseModel] | None = None,
+        always_loaded: bool = False,
+    ) -> None:
+        """Register a tool. `handler` may be sync or async — StructuredTool
+        supports both via `func=` vs `coroutine=`."""
+        if inspect.iscoroutinefunction(handler):
+            tool = StructuredTool.from_function(
+                coroutine=handler,
+                name=name,
+                description=description,
+                args_schema=args_schema,
+            )
+        else:
+            tool = StructuredTool.from_function(
+                func=handler,
+                name=name,
+                description=description,
+                args_schema=args_schema,
+            )
+
+        self._entries[name] = _ToolEntry(
+            name=name,
+            tool=tool,
+            always_loaded=always_loaded,
+            description=description,
         )
+        logger.info("tool_registered", name=name, always_loaded=always_loaded)
+
+    async def execute(self, name: str, args: dict[str, Any]) -> str:
+        """Run a registered tool by name. Used by tool_executor_node."""
+        entry = self._entries.get(name)
+        if entry is None:
+            raise ValueError(f"Unknown tool: {name!r}")
+        # ainvoke handles both sync + async tools uniformly.
+        result = await entry.tool.ainvoke(args)
+        return str(result)
+
+    # ------------------------------------------------------------------
+    # Introspection helpers (used by tests + dashboard)
+    # ------------------------------------------------------------------
+    def all_names(self) -> list[str]:
+        return list(self._entries.keys())
+
+    def get_tool_object(self, name: str) -> BaseTool | None:
+        entry = self._entries.get(name)
+        return entry.tool if entry else None
+
+    def is_registered(self, name: str) -> bool:
+        return name in self._entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    # ------------------------------------------------------------------
+    # Embedding-based dynamic selection
+    # ------------------------------------------------------------------
+    async def index_all_tools(self) -> None:
+        """Embed every registered tool's description and upsert into
+        `tool_embeddings`. Idempotent — only re-embeds rows whose description
+        actually changed since last run, so restarts skip the Ollama work
+        when nothing has moved."""
+        if not self._entries:
+            logger.warning("index_all_tools_called_with_empty_registry")
+            return
+
+        async with async_session() as session:
+            for entry in self._entries.values():
+                existing = await session.execute(
+                    select(ToolEmbedding).where(ToolEmbedding.tool_name == entry.name)
+                )
+                row = existing.scalar_one_or_none()
+
+                # Skip re-embedding if description unchanged.
+                if row is not None and row.description == entry.description:
+                    if row.is_always_loaded != entry.always_loaded:
+                        row.is_always_loaded = entry.always_loaded
+                    if row.embedding_model != settings.EMBEDDING_MODEL:
+                        # Embedding model changed — force re-embed even though
+                        # the description didn't, so we don't mix dimensions.
+                        row.embedding = await _embed_text(entry.description)
+                        row.embedding_model = settings.EMBEDDING_MODEL
+                    continue
+
+                emb = await _embed_text(entry.description)
+                if row is None:
+                    session.add(
+                        ToolEmbedding(
+                            tool_name=entry.name,
+                            description=entry.description,
+                            embedding=emb,
+                            embedding_model=settings.EMBEDDING_MODEL,
+                            is_always_loaded=entry.always_loaded,
+                        )
+                    )
+                else:
+                    row.description = entry.description
+                    row.embedding = emb
+                    row.embedding_model = settings.EMBEDDING_MODEL
+                    row.is_always_loaded = entry.always_loaded
+
+            await session.commit()
+            logger.info("tool_embeddings_indexed", count=len(self._entries))
+
+    async def select_relevant_tools(
+        self,
+        query: str,
+        top_k: int = 15,
+    ) -> list[BaseTool]:
+        """Return the top-k tools by cosine similarity against `query`,
+        plus every always-loaded tool (which bypass the ranking)."""
+        always = [e.tool for e in self._entries.values() if e.always_loaded]
+
+        # If the registry is empty (or only has always-loaded tools), the
+        # cosine search would return nothing — short-circuit.
+        rankable = [e for e in self._entries.values() if not e.always_loaded]
+        if not rankable:
+            logger.debug("dynamic_tools_selected", query_len=len(query), only_always=True, count=len(always))
+            return always
+
+        q_emb = await _embed_text(query)
+        async with async_session() as session:
+            # pgvector cosine distance operator (smaller = more similar).
+            stmt = (
+                select(ToolEmbedding.tool_name)
+                .where(ToolEmbedding.is_always_loaded == False)  # noqa: E712 — SQL needs literal False
+                .order_by(ToolEmbedding.embedding.cosine_distance(q_emb))
+                .limit(top_k)
+            )
+            result = await session.execute(stmt)
+            ranked_names = [r[0] for r in result.all()]
+
+        ranked_tools = [
+            self._entries[n].tool
+            for n in ranked_names
+            if n in self._entries
+        ]
+
+        # Always-loaded first, then ranked, dedup by name.
+        seen = {t.name for t in always}
+        merged = list(always)
+        for t in ranked_tools:
+            if t.name not in seen:
+                merged.append(t)
+                seen.add(t.name)
+
+        logger.debug(
+            "dynamic_tools_selected",
+            query_len=len(query),
+            top_k=top_k,
+            always=len(always),
+            ranked=len(ranked_tools),
+            total=len(merged),
+        )
+        return merged
 
 
-tool_registry = _ToolRegistryStub()
+async def _embed_text(text: str) -> list[float]:
+    """Embed a string via LiteLLM (which routes to Ollama for `ollama/bge-m3`).
+
+    Defensive on the response shape — LiteLLM versions differ on whether
+    `response.data[0]` is a dict or an object with `.embedding`.
+    """
+    response = await litellm.aembedding(
+        model=settings.EMBEDDING_MODEL,
+        input=[text],
+    )
+    item = response.data[0]
+    if hasattr(item, "embedding"):
+        return list(item.embedding)
+    return list(item["embedding"])
+
+
+# Module-level singleton — every other module imports this.
+tool_registry = ToolRegistry()

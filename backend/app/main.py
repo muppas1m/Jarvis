@@ -15,6 +15,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.graph import close_checkpointer, init_checkpointer
+from app.agent.tools import register_all_tools
+from app.agent.tools.registry import tool_registry
 from app.api.router import api_router
 from app.config import settings
 from app.db.engine import close_db, init_db
@@ -29,7 +31,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
       - DB engine first (cheap; needed by everything else).
       - Checkpointer second (depends on DB pool; opens its own pg connection
         for AsyncPostgresSaver and is what the agent graph builds against).
-    Shutdown reverses that order.
+      - Tool registration third (needs the registry module imported and the
+        memory layer reachable; index_all_tools writes to pgvector).
+    Shutdown reverses that order, except registry has no resources to close.
     """
     configure_logging()
     logger = get_logger(__name__)
@@ -40,6 +44,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     await init_checkpointer()
     logger.info("checkpointer_ready")
+
+    register_all_tools()
+    await tool_registry.index_all_tools()
+    logger.info("tools_indexed", count=len(tool_registry))
 
     yield
 
