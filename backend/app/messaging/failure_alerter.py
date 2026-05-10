@@ -1,26 +1,44 @@
 """
-Channel-routed system alerts — STUB.
+Channel-routed system alerts.
 
-Turn 11 builds the proper version: it looks up the master's primary channel
-(Telegram by default) via the channel registry and pushes a system message
-prefixed with `[🚨 SYSTEM]` for failures or `[ℹ NOTIFY]` for tool-executed
-notifications. Approval requests get inline approve/reject buttons.
+Every "system needs to ping master" path goes through here:
+  - tool_executor_node calls `notify_tool_executed` after a NOTIFY-tier tool
+    runs (ping master "I just sent that email").
+  - tool_executor_node calls `send_approval_request_to_master` for
+    APPROVE-tier tools (push the inline-button approval prompt).
+  - Phase 2's `@critical_task` Celery decorator calls `send_system_alert`
+    after 3 consecutive failures of a scheduled job.
 
-For now the agent graph (`app.agent.nodes.tool_executor_node`) imports two
-helpers from here. We provide no-op implementations that just log so the
-import works and the rest of the agent flow is testable end-to-end.
+All three resolve through the channel registry to the master's primary
+channel — Telegram in Phase 1. If/when we make the alert channel
+configurable per master preference, swap the constant for a Settings field.
 
-When Turn 11 lands:
-  - `send_approval_request_to_master` should send a Telegram message with
-    inline approve/reject buttons whose callback_data carries `approval_id`.
-  - `notify_tool_executed` should send a brief Telegram notice ("✓ Sent
-    email to Alice"), throttled so a burst of NOTIFY tools doesn't spam.
-  - Add `send_system_alert(text)` for the @critical_task decorator's
-    consumer (Phase 2 Task 2.7b) — referenced widely in the plan.
+All three are best-effort — a delivery failure logs but never raises into
+the caller, so a Telegram outage can't take down the agent path.
 """
+from app.messaging.normalizer import channel_registry
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# Master's primary alert channel. Phase 1 hard-codes Telegram; if we ever
+# add per-user routing rules they can override this.
+PRIMARY_ALERT_CHANNEL = "telegram"
+
+
+async def notify_tool_executed(thread_id: str, tool_name: str) -> None:
+    """NOTIFY-tier tool was executed — ping master so they're aware."""
+    try:
+        ch = channel_registry.get(PRIMARY_ALERT_CHANNEL)
+        await ch.send_alert(f"🔔 Executed: `{tool_name}`")
+    except Exception as exc:
+        logger.error(
+            "notify_tool_executed_failed",
+            thread_id=thread_id,
+            tool_name=tool_name,
+            error=str(exc),
+        )
 
 
 async def send_approval_request_to_master(
@@ -28,24 +46,24 @@ async def send_approval_request_to_master(
     tool_name: str,
     description: str,
 ) -> None:
-    """STUB — Turn 11 wires real Telegram inline keyboard delivery."""
-    logger.info(
-        "approval_request_stub",
-        approval_id=approval_id,
-        tool_name=tool_name,
-        description_len=len(description),
-    )
-
-
-async def notify_tool_executed(thread_id: str, tool_name: str) -> None:
-    """STUB — Turn 11 wires the throttled Telegram notice."""
-    logger.info(
-        "notify_tool_executed_stub",
-        thread_id=thread_id,
-        tool_name=tool_name,
-    )
+    """APPROVE-tier — push the inline approve/reject prompt to master."""
+    try:
+        ch = channel_registry.get(PRIMARY_ALERT_CHANNEL)
+        await ch.send_approval_request(approval_id=approval_id, description=description)
+    except Exception as exc:
+        logger.error(
+            "send_approval_request_failed",
+            approval_id=approval_id,
+            tool_name=tool_name,
+            error=str(exc),
+        )
 
 
 async def send_system_alert(text: str) -> None:
-    """STUB — Turn 11 wires this for @critical_task failure delivery."""
-    logger.warning("system_alert_stub", text=text)
+    """Generic system alert. Used by `@critical_task` Celery wrapper and any
+    other path that needs to surface a non-conversational ping."""
+    try:
+        ch = channel_registry.get(PRIMARY_ALERT_CHANNEL)
+        await ch.send_alert(f"🚨 *SYSTEM*\n\n{text}")
+    except Exception as exc:
+        logger.error("send_system_alert_failed", error=str(exc))
