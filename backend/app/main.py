@@ -58,12 +58,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Telegram is the Phase 1 primary. Construct lazily so a missing token
     # raises here (in lifespan, where logs are visible) rather than at
     # module import.
+    #
+    # Polling vs webhook is a hard mutex. If both are active you get every
+    # incoming Update twice — Telegram delivers via webhook AND the polling
+    # loop pulls the same update via getUpdates. Enforce one-or-the-other
+    # by clearing the opposite registration at startup.
     if settings.TELEGRAM_BOT_TOKEN:
         tg = get_telegram_channel()
         channel_registry.register(tg)
         logger.info("telegram_channel_registered")
 
         if settings.TELEGRAM_USE_POLLING:
+            # Best-effort clear any stale webhook registration so we don't
+            # double-deliver. Failure is non-fatal: if no webhook was ever
+            # set, deleteWebhook is still a 200.
+            try:
+                await tg.bot.delete_webhook(drop_pending_updates=False)
+                logger.info("telegram_webhook_cleared_for_polling")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("telegram_webhook_clear_failed", error=str(exc))
+
             polling_app = tg.build_polling_application()
             await polling_app.initialize()
             await polling_app.start()
@@ -72,12 +86,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # can start serving HTTP.
             asyncio.create_task(polling_app.updater.start_polling())
             app.state.telegram_polling_app = polling_app
-            logger.info("telegram_long_polling_started")
+            logger.info("telegram_mode_active", mode="polling")
         else:
-            logger.info(
-                "telegram_polling_disabled",
-                hint="webhook mode active — incoming updates land via /api/webhooks/telegram",
-            )
+            # Webhook mode requires a public HTTPS URL Telegram can POST
+            # to AND a shared secret it'll echo back as
+            # X-Telegram-Bot-Api-Secret-Token. Missing either is a config
+            # error — refuse to register a half-broken webhook.
+            if not settings.TUNNEL_PUBLIC_URL:
+                logger.error(
+                    "telegram_webhook_misconfigured",
+                    reason="TUNNEL_PUBLIC_URL not set; webhook can't be registered",
+                )
+            elif not settings.TELEGRAM_WEBHOOK_SECRET:
+                logger.error(
+                    "telegram_webhook_misconfigured",
+                    reason="TELEGRAM_WEBHOOK_SECRET not set; refusing to register without HMAC",
+                )
+            else:
+                webhook_url = (
+                    settings.TUNNEL_PUBLIC_URL.rstrip("/")
+                    + "/api/webhooks/telegram"
+                )
+                try:
+                    await tg.bot.set_webhook(
+                        url=webhook_url,
+                        secret_token=settings.TELEGRAM_WEBHOOK_SECRET,
+                        drop_pending_updates=False,
+                    )
+                    logger.info(
+                        "telegram_mode_active",
+                        mode="webhook",
+                        url=webhook_url,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "telegram_webhook_register_failed",
+                        url=webhook_url,
+                        error=str(exc),
+                    )
     else:
         logger.warning("telegram_disabled_no_token")
 
@@ -100,6 +146,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("shutdown_done")
 
 
+def _allowed_cors_origins() -> list[str]:
+    """Lock CORS to the public dashboard origin (Phase 4) and nothing else.
+
+    Same-origin browser requests don't pass through CORS, so the backend
+    serving its own dashboard from the same host doesn't need to allowlist
+    itself. We allowlist *cross*-origin callers, of which there's exactly
+    one in Phase 1: the dashboard at TUNNEL_PUBLIC_URL.
+
+    Wide-open CORS plus allow_credentials=True is a safety footgun: a
+    malicious page on any domain could trigger state-changing requests
+    using the master's session cookie. Locking origins to a single explicit
+    URL closes that. Browsers also reject `*` when credentials are involved
+    — so an empty allowlist here is strictly safer than a permissive one.
+
+    Phase 4 adds the dev origin (e.g. http://localhost:3002) to support
+    `next dev` against this backend. For now the prod tunnel URL is enough
+    — there's no frontend yet to need anything else."""
+    origins: list[str] = []
+    if settings.TUNNEL_PUBLIC_URL:
+        origins.append(settings.TUNNEL_PUBLIC_URL.rstrip("/"))
+    return origins
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Jarvis AI Agent",
@@ -108,10 +177,10 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.BASE_URL],
+        allow_origins=_allowed_cors_origins(),
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
     )
     app.include_router(api_router, prefix="/api")
     return app
