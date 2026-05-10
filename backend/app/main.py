@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.graph import close_checkpointer, init_checkpointer
 from app.api.router import api_router
 from app.config import settings
 from app.db.engine import close_db, init_db
@@ -22,7 +23,14 @@ from app.utils.logging import configure_logging, get_logger
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Bring up resources before serving traffic, drain them on shutdown."""
+    """Bring up resources before serving traffic, drain them on shutdown.
+
+    Order matters:
+      - DB engine first (cheap; needed by everything else).
+      - Checkpointer second (depends on DB pool; opens its own pg connection
+        for AsyncPostgresSaver and is what the agent graph builds against).
+    Shutdown reverses that order.
+    """
     configure_logging()
     logger = get_logger(__name__)
     logger.info("startup_begin", environment=settings.ENVIRONMENT)
@@ -30,9 +38,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await init_db()
     logger.info("db_engine_ready")
 
+    await init_checkpointer()
+    logger.info("checkpointer_ready")
+
     yield
 
     logger.info("shutdown_begin")
+    await close_checkpointer()
     await close_db()
     logger.info("shutdown_done")
 
