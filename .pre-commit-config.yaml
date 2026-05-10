@@ -1,0 +1,24 @@
+# Pre-commit configuration.
+#
+# To install hooks locally (one-time per clone):
+#     pip install pre-commit
+#     pre-commit install
+#
+# After install, every `git commit` will run the hooks against staged files.
+# Manually:
+#     pre-commit run --all-files
+#
+# Hooks:
+#   - check-alembic-history: ensures the migration revision graph stays linear
+#                             and matches the EXPECTED_CHAIN in the script.
+repos:
+  - repo: local
+    hooks:
+      - id: check-alembic-history
+        name: alembic history is linear and expected
+        entry: python3 scripts/check_alembic_history.py
+        language: system
+        # Only re-run when migration files (or the linter) change. Avoids
+        # taxing every code-only commit.
+        files: '^(backend/alembic/versions/.*\.py|scripts/check_alembic_history\.py)$'
+        pass_filenames: false

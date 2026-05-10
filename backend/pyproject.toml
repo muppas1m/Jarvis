@@ -33,8 +33,22 @@ dependencies = [
     # LangGraph (agent orchestration — replaces custom ReAct loop)
     "langgraph>=1.0.0",
     "langgraph-checkpoint-postgres>=2.0.0",   # AsyncPostgresSaver for durable graph state
-    "langchain-core>=0.3.0",                  # BaseChatModel + tool abstractions
     "langchain-litellm>=0.2.0",               # ChatLiteLLM — bridges LiteLLM into LangGraph
+    # langchain + langchain-core PINNED to the 0.3.x line. Why:
+    #   - langfuse 2.60.10 (which we keep because LiteLLM 1.83 is hardcoded
+    #     against langfuse v2's `sdk_integration=` kwarg) ships its
+    #     CallbackHandler against `from langchain.callbacks.base import
+    #     BaseCallbackHandler`. That submodule was removed when langchain
+    #     went to 1.x — moved out and never re-exported by langchain-classic
+    #     or langchain-community.
+    #   - langgraph 1.1.10 has no upper bound on langchain-core, so it works
+    #     fine against the 0.3.x line (verified empirically).
+    #   - Pinning both together avoids pip's resolver picking incompatible
+    #     pairs across the 0.3↔1.x boundary.
+    # When LiteLLM upstream catches up to langfuse v3+/v4 SDK, we can lift
+    # both pins and switch to `from langfuse.langchain import CallbackHandler`.
+    "langchain>=0.3.0,<0.4.0",
+    "langchain-core>=0.3.85,<1.0.0",
 
     # Observability
     # Pinned to the v2 line. LiteLLM 1.83.x's integration calls

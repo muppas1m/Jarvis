@@ -19,9 +19,17 @@ from urllib.parse import urlparse
 from mem0 import AsyncMemory
 
 from app.config import settings
+from app.llm.bootstrap import wire_litellm_providers
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Mem0 v2 routes its extraction LLM through LiteLLM, which reads provider keys
+# from os.environ at call time. Without this call, GEMINI_API_KEY (mapped from
+# settings.GOOGLE_GEMINI_API_KEY) never makes it into the environment because
+# Mem0 import path doesn't go through gateway.py. Idempotent — safe to call
+# from every LiteLLM-using module.
+wire_litellm_providers()
 
 
 def _mem0_config() -> dict[str, Any]:
@@ -48,15 +56,15 @@ def _mem0_config() -> dict[str, Any]:
         "llm": {
             # Goes through LiteLLM so model swapping in .env flows here too.
             # Mem0 uses this LLM to *extract* facts from raw turns via function
-            # calling. We point at PRIMARY_MODEL (llama-3.3-70b-versatile by
-            # default) instead of FAST_MODEL because most cheap fast models
-            # — gemma2-9b in particular — do not advertise tool-use to LiteLLM,
-            # and Mem0 silently no-ops the extraction when the call fails.
-            # Trading a few extra Groq tokens per memory write for actually
-            # getting durable extraction.
+            # calling. We have a DEDICATED MEMORY_EXTRACTION_MODEL setting
+            # (defaulting to gemini/gemini-2.0-flash) rather than reusing
+            # PRIMARY_MODEL, because per-write token burn is 5-9k and Groq
+            # free tier's 12k TPM cannot sustain that on top of normal chat.
+            # See memory note `project_mem0_extraction_gemini_swap.md` for
+            # the decision rationale.
             "provider": "litellm",
             "config": {
-                "model": settings.PRIMARY_MODEL,
+                "model": settings.MEMORY_EXTRACTION_MODEL,
                 "temperature": 0.0,
                 "max_tokens": 1500,
             },
@@ -85,7 +93,7 @@ class Mem0Client:
         logger.info(
             "mem0_client_init",
             embedder=settings.EMBEDDING_MODEL,
-            extraction_llm=settings.PRIMARY_MODEL,   # see _mem0_config rationale
+            extraction_llm=settings.MEMORY_EXTRACTION_MODEL,
             vector_store="pgvector(jarvis.mem0_memories)",
         )
 

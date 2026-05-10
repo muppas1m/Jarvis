@@ -39,7 +39,11 @@ class Settings(BaseSettings):
     # --- Active model selection (swap by env var, no code change) ------------
     PRIMARY_MODEL: str = "groq/llama-3.3-70b-versatile"
     FAST_MODEL: str = "groq/gemma2-9b-it"
-    FALLBACK_MODEL: str = "groq/llama-3.3-70b-versatile"
+    # Different provider on purpose so single-provider outages don't kill the agent.
+    FALLBACK_MODEL: str = "openai/gpt-4o-mini"
+    # Dedicated extraction LLM for Mem0 — see project_mem0_extraction_gemini_swap.
+    # PRIMARY_MODEL on Groq free tier saturates TPM after ~1 memory write.
+    MEMORY_EXTRACTION_MODEL: str = "gemini/gemini-2.5-flash-lite"
 
     # --- Embedding model (LOCKED at BGE-M3, schema depends on dim) -----------
     EMBEDDING_MODEL: str = "ollama/bge-m3"
