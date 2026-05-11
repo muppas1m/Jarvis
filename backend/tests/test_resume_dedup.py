@@ -52,8 +52,24 @@ def _counter_key(thread_id: str, tool_name: str) -> str:
 
 @pytest.fixture
 async def real_checkpointer():
-    """Open the AsyncPostgresSaver against the live Postgres for the test
-    duration. Idempotent if already open."""
+    """Open the AsyncPostgresSaver against the live Postgres for the test.
+
+    Force a clean (re)initialization scoped to THIS test's event loop.
+    pytest-asyncio's default per-function loop scope means the cached
+    checkpointer + connection pool from any prior test in the session is
+    bound to a now-dead loop. Closing + reopening pins the connections
+    to the current loop so reads don't fail with 'connection is closed'.
+    """
+    from app.agent import graph as graph_module
+
+    if graph_module._checkpointer_cm is not None:
+        try:
+            await graph_module._checkpointer_cm.__aexit__(None, None, None)
+        except Exception:
+            pass
+        graph_module._checkpointer = None
+        graph_module._checkpointer_cm = None
+
     await init_checkpointer()
     yield
     # Don't close — the runner.py module-level cached graph holds a
