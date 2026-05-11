@@ -1,12 +1,13 @@
 """
 FastAPI app factory + lifespan.
 
-Starts the engine pool, mounts the API router, leaves shutdown clean.
+Starts the engine pool, runs the first-run profile guard, brings up the
+checkpointer + tools + Telegram channel, mounts the API router, drains
+on shutdown.
 
-Heads up: `app.api.router` does not exist yet — it lands in a later commit
-(api/router.py + the chat/webhooks/approvals modules underneath). Importing
-this module before then will fail. The container's CMD points at this file,
-which is why the backend service can't `up` cleanly until the router is in.
+CORS is locked to TUNNEL_PUBLIC_URL (see _allowed_cors_origins for why).
+Polling vs webhook is enforced as a hard mutex at startup so we never
+double-deliver Telegram updates.
 """
 import asyncio
 from collections.abc import AsyncIterator
@@ -15,15 +16,46 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from sqlalchemy import select
+
 from app.agent.graph import close_checkpointer, init_checkpointer
 from app.agent.tools import register_all_tools
 from app.agent.tools.registry import tool_registry
 from app.api.router import api_router
 from app.config import settings
-from app.db.engine import close_db, init_db
+from app.db.engine import async_session, close_db, init_db
+from app.db.models import UserProfile
 from app.messaging.channels.telegram import get_telegram_channel
 from app.messaging.normalizer import channel_registry
 from app.utils.logging import configure_logging, get_logger
+
+
+async def _ensure_master_profile_or_exit(logger) -> None:
+    """Hard refuse to boot if the master profile row is missing.
+
+    Phase 1 is a single-master system: every prompt embeds the master's
+    name and always_on slice. Booting without that data means the agent
+    introduces itself as "Master" and confidently fabricates context on
+    the first turn — the worst possible first impression.
+
+    Raising SystemExit propagates through uvicorn cleanly with the
+    message printed; no traceback noise."""
+    async with async_session() as session:
+        result = await session.execute(select(UserProfile).limit(1))
+        existing = result.scalar_one_or_none()
+    if existing is not None:
+        logger.info("master_profile_present", profile_id=str(existing.id), name=existing.name)
+        return
+
+    msg = (
+        "FATAL: master profile not seeded. The agent refuses to boot without "
+        "knowing who it's serving.\n\n"
+        "Run the seeder:\n"
+        "  docker compose run --rm backend python scripts/seed_profile.py < profile.json\n\n"
+        "See `python scripts/seed_profile.py --help` for the JSON shape."
+    )
+    logger.error("master_profile_missing")
+    raise SystemExit(msg)
 
 
 @asynccontextmanager
@@ -31,13 +63,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Bring up resources before serving traffic, drain them on shutdown.
 
     Order matters:
-      - DB engine first (cheap; needed by everything else).
-      - Checkpointer second (depends on DB pool; opens its own pg connection
-        for AsyncPostgresSaver and is what the agent graph builds against).
-      - Tool registration third (needs the registry module imported and the
-        memory layer reachable; index_all_tools writes to pgvector).
-      - Channel registration + polling start last — channels deliver INTO
-        the agent stack so everything they call needs to be ready first.
+      1. DB engine (cheap; needed by everything else).
+      2. First-run profile guard — refuse to boot if the master profile
+         row is missing. Must run BEFORE checkpointer/tools/channels so a
+         half-initialized stack doesn't accept traffic against a misseeded DB.
+      3. Checkpointer (depends on DB pool; opens its own pg connection
+         for AsyncPostgresSaver and is what the agent graph builds against).
+      4. Tool registration (needs the registry module imported and the
+         memory layer reachable; index_all_tools writes to pgvector).
+      5. Channel registration + Telegram mode (polling OR webhook, mutex
+         enforced) last — channels deliver INTO the agent stack so
+         everything they call needs to be ready first.
     Shutdown reverses that order, except the registry has no resources to close.
     """
     configure_logging()
@@ -46,6 +82,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await init_db()
     logger.info("db_engine_ready")
+
+    # First-run guard. Refuse to boot if the master's profile row is
+    # missing — without it the agent doesn't know who it's serving and the
+    # first conversation goes sideways with "I don't have any information
+    # about you" hallucinations. Single-master deployment, so we fail fast
+    # rather than soft-warn.
+    await _ensure_master_profile_or_exit(logger)
 
     await init_checkpointer()
     logger.info("checkpointer_ready")

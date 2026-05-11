@@ -128,13 +128,18 @@ class DecideRequest(BaseModel):
 async def list_pending_approvals() -> list[PendingApprovalView]:
     """All approvals currently awaiting a decision, oldest first.
 
-    Phase 1 has a single master so there's no per-user filter — every
-    pending approval belongs to them. When multi-user lands, filter by
-    thread_id ownership."""
+    Filters out expired rows (expires_at <= now) so the dashboard never
+    surfaces stale approvals as actionable. Phase 1 has no expiry sweeper;
+    expired rows accumulate in the table but are invisible here. A Phase
+    3 Celery job sweeps them (and updates status='expired' so audit
+    queries still see the trail). Single-master Phase 1 has no per-user
+    filter — every pending approval belongs to the master."""
+    now = datetime.now(timezone.utc)
     async with async_session() as session:
         result = await session.execute(
             select(PendingApproval)
             .where(PendingApproval.status == "pending")
+            .where(PendingApproval.expires_at > now)
             .order_by(PendingApproval.created_at.asc())
         )
         rows = result.scalars().all()

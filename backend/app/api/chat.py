@@ -20,6 +20,14 @@ by /api/approvals/{id}/decide so clients write one renderer for both
 transports. status="complete" carries the assistant text; status="interrupted"
 carries the interrupt payload (approval_id, tool_name, description) and
 the dashboard surfaces the approve/reject UI.
+
+Note on `usage.cost_usd`: BEST-EFFORT, computed inline from
+`litellm.completion_cost`. Providers not in LiteLLM's pricing table
+(Groq today) contribute 0.0 to this number even though the request did
+cost something. The AUTHORITATIVE source for cost data is `GET /api/costs`
+— it reads `LLMUsageLog` rows the LiteLLM persistence callback writes
+with provider-reported cost. The per-turn number here is a fast-path
+hint for client UIs; production accounting belongs on `/costs`.
 """
 import uuid
 from typing import Any, Optional
