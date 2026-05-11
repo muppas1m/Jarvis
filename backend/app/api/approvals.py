@@ -1,26 +1,43 @@
 """
 Approvals API + helpers.
 
-This module currently contains only the helper `resolve_approval()` that
-the Telegram callback handler calls when the master clicks Approve/Reject.
-It updates the `pending_approvals` row with the master's decision and
-returns the thread_id so the caller can resume the graph.
+Two surfaces in this module:
 
-Turn 12 will extend this module with the proper API router endpoints
-(`GET /approvals/pending`, `POST /approvals/{id}/decide`) for the web
-dashboard. The router import in `main.py` is gated behind a try/except
-until Turn 12 lands the router declaration.
+  resolve_approval(approval_id, action, resolved_via)
+      Helper. Updates the pending_approvals row with the master's decision
+      and returns the thread_id so the caller can resume the graph. Used
+      by BOTH the Telegram inline-button callback (in
+      messaging/channels/telegram.py) AND the dashboard POST below —
+      single helper, two transports.
+
+  router (FastAPI)
+      GET  /approvals/pending           — list approvals awaiting decision
+      POST /approvals/{id}/decide       — record decision + resume graph
+
+The router endpoints are mounted under the protected_router so they
+inherit Depends(get_current_user). The decide endpoint is synchronous
+and returns the same TurnEnvelope shape as /api/chat — the resume IS
+a turn continuation and clients render it with the same code path. If
+the resumed chain hits another interrupt() (chained HITL), the response
+carries status="interrupted" with the new approval_id and the dashboard
+loops back to present the next decision.
 """
 import uuid
 from datetime import datetime, timezone
+from typing import Any, Optional
 
+from fastapi import APIRouter, HTTPException, Path, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from app.agent.runner import resume_turn
 from app.db.engine import async_session
 from app.db.models import PendingApproval
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
 async def resolve_approval(
@@ -79,3 +96,92 @@ async def resolve_approval(
             thread_id=approval.thread_id,
         )
         return approval.thread_id
+
+
+# --------------------------------------------------------------------------- #
+# HTTP API                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+class PendingApprovalView(BaseModel):
+    """Wire shape for a pending approval row."""
+
+    id: str
+    thread_id: str
+    action_type: str
+    description: str
+    payload: dict
+    created_at: str
+    expires_at: str
+
+
+class DecideRequest(BaseModel):
+    approved: bool
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional rejection reason; surfaced in the audit trail.",
+    )
+
+
+@router.get("/pending", response_model=list[PendingApprovalView])
+async def list_pending_approvals() -> list[PendingApprovalView]:
+    """All approvals currently awaiting a decision, oldest first.
+
+    Phase 1 has a single master so there's no per-user filter — every
+    pending approval belongs to them. When multi-user lands, filter by
+    thread_id ownership."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(PendingApproval)
+            .where(PendingApproval.status == "pending")
+            .order_by(PendingApproval.created_at.asc())
+        )
+        rows = result.scalars().all()
+
+    return [
+        PendingApprovalView(
+            id=str(row.id),
+            thread_id=row.thread_id,
+            action_type=row.action_type,
+            description=row.description,
+            payload=row.payload or {},
+            created_at=row.created_at.isoformat() if row.created_at else "",
+            expires_at=row.expires_at.isoformat() if row.expires_at else "",
+        )
+        for row in rows
+    ]
+
+
+@router.post("/{approval_id}/decide")
+async def decide_approval(
+    body: DecideRequest,
+    approval_id: str = Path(..., description="PendingApproval row UUID"),
+) -> dict[str, Any]:
+    """Record the master's decision, then resume the paused graph.
+
+    Returns the same TurnEnvelope shape /api/chat returns. status="complete"
+    means the resumed chain finished cleanly. status="interrupted" means
+    the chain hit ANOTHER interrupt() — the response carries the new
+    approval payload and the dashboard renders the next decision UI."""
+    action = "approve" if body.approved else "reject"
+    thread_id = await resolve_approval(
+        approval_id=approval_id,
+        action=action,
+        resolved_via="web",
+    )
+    if thread_id is None:
+        # Either bad UUID or row not found. Both surface as 404 — the
+        # caller's job is to refresh /pending; we don't differentiate
+        # because both states tell them the same thing ("this approval
+        # is no longer actionable").
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="approval not found or already resolved",
+        )
+
+    decision: dict[str, Any] = {"approved": body.approved}
+    if not body.approved and body.reason:
+        decision["reason"] = body.reason
+
+    return await resume_turn(thread_id=thread_id, decision=decision)

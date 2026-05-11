@@ -171,6 +171,52 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
             f"Wrong tool paused for approval: {result['interrupt']!r}"
         )
 
+        # --- approval_id contract assertion ----------------------------------
+        # /api/approvals/{id}/decide depends on this — the dashboard's approve
+        # button calls that endpoint with the UUID it pulled from this payload.
+        # If approval_id is missing or doesn't match a real PendingApproval row,
+        # the resume-from-dashboard path is structurally broken even if the
+        # exactly-once defense holds.
+        approval_id_raw = result["interrupt"].get("approval_id")
+        assert approval_id_raw, (
+            f"interrupt payload must carry approval_id (load-bearing for "
+            f"/api/approvals/{{id}}/decide), got {result['interrupt']!r}"
+        )
+        try:
+            approval_uuid = uuid.UUID(approval_id_raw)
+        except ValueError as exc:
+            raise AssertionError(
+                f"approval_id is not a valid UUID: {approval_id_raw!r} ({exc})"
+            )
+
+        # And the row had better actually exist with that UUID + the right
+        # interrupt_id pointing at this turn's tool_call_id.
+        from sqlalchemy import select
+        from app.db.engine import async_session
+        from app.db.models import PendingApproval
+
+        async with async_session() as session:
+            row_result = await session.execute(
+                select(PendingApproval).where(PendingApproval.id == approval_uuid)
+            )
+            approval_row = row_result.scalar_one_or_none()
+        assert approval_row is not None, (
+            f"approval_id {approval_id_raw} surfaced in interrupt payload but "
+            f"no PendingApproval row exists with that UUID"
+        )
+        assert approval_row.thread_id == thread_id, (
+            f"PendingApproval.thread_id mismatch: row says "
+            f"{approval_row.thread_id!r}, turn was {thread_id!r}"
+        )
+        assert approval_row.interrupt_id == call_b_id, (
+            f"PendingApproval.interrupt_id should be the gmail_send tool_call_id "
+            f"({call_b_id!r}), got {approval_row.interrupt_id!r}"
+        )
+        assert approval_row.status == "pending", (
+            f"PendingApproval.status should be 'pending' before resume, got "
+            f"{approval_row.status!r}"
+        )
+
         count_a_after_run = int(await redis_client.get(counter_a_key) or 0)
         count_b_after_run = int(await redis_client.get(counter_b_key) or 0)
         assert count_a_after_run == 1, (
