@@ -40,7 +40,32 @@ async def handle_gmail_push(pubsub_message: dict):
 
 
 async def _process_single_email(service, message_data: dict):
-    """Full pipeline for one email."""
+    """Full pipeline for one email.
+
+    Ordering matters here. The original Task 2.3 verbatim ordering had
+    routing → side-effects → email_logs INSERT. Concurrent Pub/Sub
+    deliveries (Pub/Sub guarantees at-least-once and retries on any 5xx)
+    could both pass the _fetch_new_messages dedup query before either
+    committed an EmailLog row, then race through the routing block —
+    archiving twice, queuing N approval rows, adding N digest entries —
+    before the IntegrityError on the eventual EmailLog INSERT caught
+    the second writer. Observed in Turn 16: 12 PendingApproval rows for
+    one Zapier email (`19e2274ca914e6b6`).
+
+    The fix: claim ownership of `msg_id` by INSERTing the EmailLog row
+    BEFORE any side effects fire. The UNIQUE constraint on
+    gmail_message_id atomically arbitrates concurrent writers — exactly
+    one delivery wins, the rest hit IntegrityError and abort. See
+    `project_gmail_approval_duplicate_race.md` for the full rationale.
+
+    Trade-off: generate_draft fires for action_required emails before
+    the gate check, so a duplicate delivery wastes one drafting LLM call
+    per redelivery. Cheap (~$0.001 each, Groq is $0 anyway) vs. the
+    UPDATE-after-gate alternative which would add a query for every
+    successful action_required write.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     msg_id = message_data["id"]
 
     # Fetch full message
@@ -53,57 +78,26 @@ async def _process_single_email(service, message_data: dict):
     sender = headers.get("From", "Unknown")
     body = _extract_body(full_msg)
 
-    # Step 1: Classify
+    # Step 1: Classify (cheap classification call against fast model).
     classification = await classify_email(subject=subject, sender=sender, body=body)
 
-    draft = None  # only set on the action_required branch
-
-    # Step 2: Route based on classification
-    if classification == "spam":
-        # Auto-archive
-        service.users().messages().modify(
-            userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
-        ).execute()
-        logger.info("email_archived_spam", subject=subject)
-
-    elif classification == "fyi":
-        # Add to daily digest batch
-        await add_to_digest(subject=subject, sender=sender, body_preview=body[:300])
-        logger.info("email_added_to_digest", subject=subject)
-
-    elif classification == "action_required":
-        # Generate draft response
+    # Step 2: Generate draft if needed BEFORE the gate, so the EmailLog
+    # row carries the draft fields on first INSERT (no follow-up UPDATE).
+    draft = None
+    if classification == "action_required":
         draft = await generate_draft(subject=subject, sender=sender, body=body)
 
-        if draft["complexity"] == "simple":
-            # Auto-send (still APPROVE safety — queue for approval)
-            await _queue_email_approval(msg_id, subject, sender, draft["response"])
-        else:
-            # Complex — notify master with full context
-            await send_system_alert(
-                f"📧 **Action Required**\n\n"
-                f"**From:** {sender}\n"
-                f"**Subject:** {subject}\n\n"
-                f"**Draft response:**\n{draft['response']}\n\n"
-                f"Reply with edits or say 'send it'."
-            )
-
-    # Log to DB. Race-safe: two concurrent Pub/Sub deliveries for the same
-    # message can both pass the _fetch_new_messages dedup query (neither
-    # sees the other's row yet) and race to INSERT. The UNIQUE constraint
-    # on gmail_message_id catches the second one — swallow the IntegrityError
-    # so we return 200 (Pub/Sub doesn't retry) rather than 500 (which it
-    # would retry, amplifying the race).
-    from sqlalchemy.exc import IntegrityError
-
+    # GATE: claim ownership of this msg_id by INSERTing EmailLog FIRST.
+    # If a concurrent delivery beat us to it, IntegrityError fires here
+    # and we return immediately — NO side effects fire on the duplicate path.
     async with async_session() as session:
         log = EmailLog(
             gmail_message_id=msg_id,
             subject=subject,
             sender=sender,
             classification=classification,
-            draft_response=draft["response"] if classification == "action_required" and draft else None,
-            response_complexity=draft.get("complexity") if classification == "action_required" and draft else None,
+            draft_response=draft["response"] if draft else None,
+            response_complexity=draft.get("complexity") if draft else None,
         )
         session.add(log)
         try:
@@ -111,6 +105,33 @@ async def _process_single_email(service, message_data: dict):
         except IntegrityError:
             await session.rollback()
             logger.info("email_log_already_exists", gmail_message_id=msg_id)
+            return  # CRITICAL: stop processing, the other delivery owns it.
+
+    # Step 3: Route based on classification — only reached when this delivery
+    # successfully claimed ownership of msg_id via the EmailLog INSERT above.
+    if classification == "spam":
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
+        ).execute()
+        logger.info("email_archived_spam", subject=subject)
+
+    elif classification == "fyi":
+        await add_to_digest(subject=subject, sender=sender, body_preview=body[:300])
+        logger.info("email_added_to_digest", subject=subject)
+
+    elif classification == "action_required":
+        if draft["complexity"] == "simple":
+            # Auto-send (still APPROVE safety — queue for approval).
+            await _queue_email_approval(msg_id, subject, sender, draft["response"])
+        else:
+            # Complex — notify master with full context.
+            await send_system_alert(
+                f"📧 **Action Required**\n\n"
+                f"**From:** {sender}\n"
+                f"**Subject:** {subject}\n\n"
+                f"**Draft response:**\n{draft['response']}\n\n"
+                f"Reply with edits or say 'send it'."
+            )
 
 
 async def _queue_email_approval(msg_id: str, subject: str, sender: str, draft: str):
