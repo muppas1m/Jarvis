@@ -9415,3 +9415,80 @@ echo "0 3 * * * /path/to/jarvis/backend/scripts/backup.sh >> /var/log/jarvis-bac
 **Hardware upgrade**
 - If running on your dedicated machine, more RAM unlocks larger Ollama LLMs (Llama 3.3 70B quantized fits in 48GB) and reduces dependence on cloud APIs
 
+---
+
+## Close-out Turns (added during execution)
+
+These turns were added after the original 34-turn plan was authored, in response to deferred work and refactoring opportunities that emerged during execution. They follow the same pattern as Phase 1's Turn 14 (test suite close-out) and Turn 16.5 (dedup race + anti-fabrication polish) — focused work between named turns when deferred items accumulate enough to warrant a dedicated turn.
+
+The execution-map row numbering uses `.5` suffixes to indicate post-original insertions (e.g., `Turn 17.5` sits between Turn 17 and Turn 18). Tasks within these turns may reference tasks defined earlier in the plan, OR introduce new task IDs in the `X.Y-closeout` form to distinguish them from original-plan tasks.
+
+### Turn 17.5 — Phase 2 close-out polish
+
+**Slot:** Between Turn 17 (Celery + scheduled jobs) and Turn 18 (Document text extractors / Phase 2 Week 6 begins). 
+
+**Motivation:** Two memory notes pinned during Phase 2 mid-stream document related no-op gaps in the email action surface:
+- `project_email_action_capability_gap.md` — Approve/Reject buttons today mark DB state but trigger no outbound send; "Reply with edits or say 'send it'" copy is forward-looking
+- `project_gmail_approval_resume_fails_no_langgraph_thread.md` — Gmail-originated approvals try to resume a non-existent LangGraph thread, generating a "Resume failed" noise alert on every decision
+
+Both gaps share a single fix: a `gmail_send` tool + dispatch in `route_approval_decision` on `thread_id.startswith("gmail:")` that calls the tool with data from `PendingApproval.payload` instead of calling `resume_turn`. Closes both gaps in one edit.
+
+**Tasks:**
+
+`2.X-closeout-a` — `app/agent/tools/gmail_send.py`
+- New tool module following the registry pattern from Task 1.11 (Pydantic args schema, async handler, `register()` function)
+- Args: `to: str`, `subject: str`, `body: str`, `in_reply_to_message_id: str | None = None`, `thread_id: str | None = None`
+- Builds a MIME message via `email.mime.text.MIMEText` + headers (In-Reply-To, References if replying)
+- Calls `service.users().messages().send(userId="me", body={"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()})`
+- Already classified APPROVE in `TOOL_SAFETY_MAP` from Phase 1 (no change needed)
+
+`2.X-closeout-b` — Register `gmail_send` in `app/agent/tools/__init__.py`
+- Add the `register()` call alongside `calendar_tool.register()` from Turn 16
+
+`2.X-closeout-c` — `app/messaging/router.py:route_approval_decision` dispatch
+- Detect `thread_id.startswith("gmail:")` BEFORE calling `resume_turn`
+- For Gmail approvals: read PendingApproval row by approval_id, extract `payload.gmail_message_id` + `payload.draft` + `payload.sender`, build `In-Reply-To` references, call `gmail_send(...)` directly
+- On approve → send, log `gmail_reply_sent`
+- On reject → no-op (DB row already marked rejected by resolve_approval)
+- DO NOT call `resume_turn` for gmail-prefixed thread_ids (eliminates the "Resume failed" noise)
+- Default path (non-gmail thread_id prefix) keeps existing `resume_turn` behavior for LangGraph-tool-call approvals
+
+`2.X-closeout-d` — `app/email/gmail_pubsub.py` SYSTEM alert copy cleanup
+- If the misleading "Reply with edits or say 'send it'" copy is still in the complex branch, replace with the capability-honest framing from Turn 16.5's design (or whatever the current state is at the time of this turn)
+
+**Checkpoint:** Send yourself an action_required email, tap Approve in Telegram. Email actually sends (verify in Gmail Sent folder). No "Resume failed" alert appears. EmailLog and PendingApproval rows show the full lifecycle (`status='approved'`, `resolved_via='telegram'`, plus audit_trail row for the gmail_send execution).
+
+### Turn 26.5 — Phase 3 close-out / memory maintenance
+
+**Slot:** Between Turn 26 (Phase 3 close: tool registration + browser audit migration) and Turn 27 (Phase 4 kickoff: Next.js scaffold).
+
+**Motivation:** Turn 17 shipped a deliberate stub for `memory_consolidation.py` because (a) Phase 2's Celery infrastructure needed to land before consolidation could ride on it, and (b) consolidation strategy is a multi-day design problem that benefits from being designed alongside conflict detection rather than rushed during Phase 2 build-out. By Phase 3 close, the agent has accumulated enough real conversation history and memory entries to make consolidation meaningful.
+
+**Tasks:**
+
+`2.8-real` — Real `memory_consolidation` implementation
+- Replaces the Turn 17 log-and-return stub
+- Reads recent `conversation_analytics` + `memory_episodes` rows from the last N days (define N as a settings constant, default 7)
+- Summarizes via the LLM gateway (`task_type="summarization"`) into consolidated semantic memories
+- Writes consolidated entries back to Mem0 with `metadata.kind="consolidated"` and source-tracing fields linking back to the originating thread_ids
+- Idempotent: re-running consolidates only NEW activity since the last consolidation watermark
+- Beat schedule remains at 2am daily
+
+`2.8-conflict` — `memory_conflict_check` task implementation
+- New task: `app/scheduler/tasks/memory_conflict_check.py`
+- Detects contradictions in Mem0 — e.g., two profile entries saying different timezones, two memories with mutually-exclusive facts about the same entity
+- Strategy: pairwise comparison of high-similarity entries via LLM call ("are these two statements contradictory?")
+- On conflict detected: queue a PendingApproval (`thread_id="memory:conflict:<uuid>"`, `action_type="memory_conflict_resolution"`) asking master which one to keep
+- Beat schedule: 2:30am daily (after consolidation)
+
+`2.8-beat-update` — Update `beat_schedule.py` to include the conflict-check entry
+- Add `"memory-conflict-check": {"task": "app.scheduler.tasks.memory_conflict_check.run", "schedule": crontab(hour=2, minute=30)}`
+
+**Checkpoint:** Nightly consolidation runs end-to-end on real conversation history accumulated since Turn 17 — produces at least one consolidated memory entry visible in `mem0_memories` with `metadata.kind="consolidated"`. Memory conflict-check fires at 2:30am and either reports zero conflicts (clean state) or queues a real PendingApproval for at least one detected conflict.
+
+### Notes on numbering
+
+Original-plan tasks use `<phase>.<n>` (e.g., `2.7`, `3.5`).  
+Close-out tasks use `<phase>.<n>-closeout-<letter>` to distinguish them and keep grep-ability.  
+Future close-out turns should follow the same convention.
+
