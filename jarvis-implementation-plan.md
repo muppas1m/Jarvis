@@ -9487,6 +9487,34 @@ The data is all there in the DB — `email_logs` (classification, draft, respons
 
 **Checkpoint:** After landing, ask Jarvis via Telegram: "Hey, what action_required emails came in over the past 2 days?" → agent invokes email_history_search → returns a real grouped summary based on `email_logs` + `pending_approvals` state. Verify: counts match a direct SQL query, expired approvals show as such, sender filter works.
 
+### Turn 17.7 — FallbackChatLLM for agent_node resilience
+
+**Slot:** Immediately after Turn 17.6 (email_history_search), before Turn 18 (Phase 2 Week 6 — document text extractors). Same pattern as Turn 17.5 / 17.6 — Phase 2 close-out slot for a gap visible on every interaction that triggers it.
+
+**Motivation:** The agent's main reasoning loop (`app/agent/nodes.py:agent_node`) uses `langchain_litellm.ChatLiteLLM` directly via `bind_tools()` for tool-aware reasoning. This bypasses `app/llm/gateway.py:LLMGateway.complete()`'s cross-provider fallback chain (Groq → openai/gpt-4o-mini). When Groq returns RateLimitError (TPM exhaustion on multi-tool synthesis queries) or BadRequestError with `code: "tool_use_failed"` (Groq llama-3.3-70b emitting malformed Llama-native function-call syntax, per `project_open_weights_tool_schema_and_conversation_poisoning.md`), the entire turn fails as "I hit an internal error." Master sees this on multi-tool synthesis queries with non-trivial regularity — the same severity as the resume-fail noise that motivated Turn 17.5.
+
+Full design + implementation sketch lives in `project_agent_node_bypasses_gateway_fallback.md`. This task block summarizes; refer to the memory note for the verbatim wrapper code and predicate logic.
+
+**Tasks:**
+
+`2.X-closeout-h` — `app/llm/fallback_llm.py`
+- New module: `FallbackChatLLM(BaseChatModel)` wrapping two LangChain chat models (primary + fallback)
+- Implements `_generate`, `_agenerate`, and `bind_tools` (which delegates to BOTH underlying models so the wrapped instance behaves identically from agent_node's perspective)
+- On primary failure with retry-worthy exception type, falls over to fallback; non-retry-worthy exceptions propagate
+- Retry-worthy predicate: `RateLimitError`, `BadRequestError` with "tool_use_failed" in message body, `APIConnectionError`, `APITimeoutError`. NOT `AuthenticationError` or non-retryable bad-request shapes.
+
+`2.X-closeout-i` — `app/agent/nodes.py:_build_chat_model` (or wherever ChatLiteLLM is constructed) updated to construct a `FallbackChatLLM(primary=ChatLiteLLM(PRIMARY_MODEL), fallback=ChatLiteLLM(FALLBACK_MODEL))`. agent_node code stays unchanged — bind_tools + invoke continue to work because FallbackChatLLM mirrors the BaseChatModel interface.
+
+`2.X-closeout-j` — Test coverage in `backend/tests/test_fallback_llm.py`:
+- Mock primary to raise RateLimitError → assert fallback called, returns fallback's response
+- Mock primary to raise BadRequestError with `tool_use_failed` in message → assert fallback called
+- Mock primary to raise AuthenticationError → assert propagates (not retry-worthy)
+- bind_tools delegation: assert that calling .bind_tools(tools) on the wrapper produces a NEW wrapper whose primary and fallback both have the tools bound
+
+**Checkpoint:** Send a multi-tool synthesis query via Telegram (the same kind that triggered tool_use_failed in Turn 17.6 — e.g., "walk me through everything you remember about me and what's been happening"). Expected: agent attempts on Groq, Groq emits malformed format → BadRequestError, FallbackChatLLM catches → invokes gpt-4o-mini with same tools+messages → returns proper structured tool_calls → agent synthesizes successfully. Log should show `agent_llm_fallback` warning with primary_error reason. Master sees a coherent multi-source response instead of "internal error."
+
+**Cost note:** When fallback fires, the turn uses paid gpt-4o-mini instead of free Groq. Expected fallback rate ~5-10% of turns at Phase 2 scale → negligible monthly spend (well under $1). Acceptable trade for reliability.
+
 ### Turn 26.5 — Phase 3 close-out / memory maintenance
 
 **Slot:** Between Turn 26 (Phase 3 close: tool registration + browser audit migration) and Turn 27 (Phase 4 kickoff: Next.js scaffold).
