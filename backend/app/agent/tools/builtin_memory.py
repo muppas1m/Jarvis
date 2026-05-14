@@ -49,10 +49,12 @@ def register() -> None:
         name="memory_search",
         handler=memory_search,
         description=(
-            "Search the master's long-term memory for facts, past decisions, "
-            "preferences, or past conversations. Use when the user references "
-            "something previously discussed or when context from past turns "
-            "may help answer."
+            "Search the master's persistent conversation memory — facts they've "
+            "told you, preferences, relationships, things mentioned in past "
+            "chats with you (Jarvis). "
+            "Does NOT search email content; use email_history_search for that. "
+            "Use for: 'what did I tell you about X', 'do I prefer Y', 'who is Z', "
+            "questions referencing prior chat context."
         ),
         args_schema=MemorySearchArgs,
         always_loaded=True,

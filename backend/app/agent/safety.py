@@ -43,6 +43,7 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "gmail_list":       SafetyLevel.SAFE,
     "calendar_read":    SafetyLevel.SAFE,
     "memory_search":    SafetyLevel.SAFE,
+    "email_history_search": SafetyLevel.SAFE,
     "web_research":     SafetyLevel.SAFE,
 
     # --- low-risk writes -----------------------------------------------------

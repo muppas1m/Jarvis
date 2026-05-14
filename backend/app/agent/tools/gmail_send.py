@@ -51,23 +51,28 @@ logger = get_logger(__name__)
 
 
 class GmailSendArgs(BaseModel):
+    """Plain-types-only schema. Optional[str] would serialize to
+    `anyOf: [{"type": "string"}, {"type": "null"}]` which breaks tool-calling
+    on Groq's llama-3.3-70b-versatile (and likely other open-weights models).
+    Empty-string sentinels for "not provided"; handler maps back to None.
+    See project_open_weights_tool_schema_anyof_null.md."""
+
     to: str = Field(description="Recipient email address. Single recipient only for Phase 2.")
-    subject: str = Field(description="Subject line. Phase 2 convention: 'Re: <original>' for replies.")
+    subject: str = Field(description="Subject line. 'Re: <original>' for replies.")
     body: str = Field(description="Plain-text message body. HTML not supported yet.")
-    in_reply_to_message_id: Optional[str] = Field(
-        default=None,
+    in_reply_to_message_id: str = Field(
+        default="",
         description=(
             "RFC822 Message-ID header value (e.g. '<CABc123@mail.gmail.com>') of the email "
-            "being replied to. When set, the outbound message gets In-Reply-To + References "
-            "headers so Gmail threading works correctly. NOT the Gmail-internal message ID."
+            "being replied to. Sets In-Reply-To + References headers for Gmail threading. "
+            "Empty string when not a reply. NOT the Gmail-internal message ID."
         ),
     )
-    gmail_message_id: Optional[str] = Field(
-        default=None,
+    gmail_message_id: str = Field(
+        default="",
         description=(
             "Gmail-internal message ID (e.g. '19e2274ca914e6b6'). When set, the corresponding "
-            "EmailLog row gets auto_sent=True. Used by the approval-dispatch path to close the "
-            "audit loop; agent-direct invocations can leave this blank."
+            "EmailLog row gets auto_sent=True. Empty string for agent-direct invocations."
         ),
     )
 
@@ -76,19 +81,23 @@ async def gmail_send(
     to: str,
     subject: str,
     body: str,
-    in_reply_to_message_id: Optional[str] = None,
-    gmail_message_id: Optional[str] = None,
+    in_reply_to_message_id: str = "",
+    gmail_message_id: str = "",
 ) -> str:
     """Send an email via the master's Gmail account. Returns a short status string."""
+    # Normalize sentinel → effective None for internal logic.
+    irt = in_reply_to_message_id.strip() or None
+    gmid = gmail_message_id.strip() or None
+
     service = get_gmail_service()
 
     # Build MIME message with optional threading headers.
     mime = MIMEText(body, "plain", "utf-8")
     mime["To"] = to
     mime["Subject"] = subject
-    if in_reply_to_message_id:
-        mime["In-Reply-To"] = in_reply_to_message_id
-        mime["References"] = in_reply_to_message_id
+    if irt:
+        mime["In-Reply-To"] = irt
+        mime["References"] = irt
 
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
 
@@ -96,10 +105,10 @@ async def gmail_send(
     # If we know the Gmail message ID being replied to, also set threadId so
     # Gmail places the reply in the SAME conversation rather than starting a
     # new one. Belt-and-braces alongside In-Reply-To.
-    if gmail_message_id:
+    if gmid:
         try:
             original = service.users().messages().get(
-                userId="me", id=gmail_message_id, format="metadata"
+                userId="me", id=gmid, format="metadata"
             ).execute()
             thread_id_gmail = original.get("threadId")
             if thread_id_gmail:
@@ -109,7 +118,7 @@ async def gmail_send(
             # gives correct threading in most clients. Log and continue.
             logger.warning(
                 "gmail_send_thread_lookup_failed",
-                gmail_message_id=gmail_message_id,
+                gmail_message_id=gmid,
                 error=str(exc),
             )
 
@@ -123,26 +132,26 @@ async def gmail_send(
             to=to,
             subject=subject[:80],
             sent_message_id=sent_id,
-            in_reply_to=in_reply_to_message_id is not None,
+            in_reply_to=irt is not None,
         )
     except Exception as exc:  # noqa: BLE001 — re-raised below after audit
         await _audit(
-            to=to, subject=subject, gmail_message_id=gmail_message_id,
+            to=to, subject=subject, gmail_message_id=gmid,
             success=False, error=str(exc)[:500],
         )
         logger.error("gmail_send_failed", to=to, subject=subject[:80], error=str(exc))
         raise
 
     await _audit(
-        to=to, subject=subject, gmail_message_id=gmail_message_id,
+        to=to, subject=subject, gmail_message_id=gmid,
         success=True, error=None, sent_message_id=sent_id,
     )
 
     # Close the audit loop on the original EmailLog row — mark auto_sent=True
     # so /api/costs and future history-search tools can distinguish "draft
     # auto-sent" from "drafted but never sent."
-    if gmail_message_id:
-        await _mark_email_auto_sent(gmail_message_id)
+    if gmid:
+        await _mark_email_auto_sent(gmid)
 
     return f"Email sent to {to} (Gmail id: {sent_id})"
 
