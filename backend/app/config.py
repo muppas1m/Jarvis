@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     TOOL_RESULT_MAX_CHARS: int = 2000       # results bigger than this are archived
 
     # --- Approval flow -------------------------------------------------------
-    APPROVAL_EXPIRY_HOURS: int = 24
+    APPROVAL_EXPIRY_HOURS: int = 72
     AUTO_APPROVE_REPLY_MAX_WORDS: int = 80
 
 

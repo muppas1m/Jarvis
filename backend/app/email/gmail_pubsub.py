@@ -138,26 +138,50 @@ async def _process_single_email(service, message_data: dict):
         logger.info("email_added_to_digest", subject=subject)
 
     elif classification == "action_required":
+        # RFC822 Message-ID header — used by gmail_send for In-Reply-To
+        # threading. Distinct from msg_id (Gmail-internal). Stored in
+        # PendingApproval.payload so the dispatch path can skip a Gmail
+        # fetch for new rows. Header is sometimes capitalized "Message-Id"
+        # or missing entirely; default to empty string and let dispatch
+        # fetch as fallback.
+        rfc822_message_id = (
+            headers.get("Message-ID")
+            or headers.get("Message-Id")
+            or ""
+        )
+
         if draft["complexity"] == "simple":
             # Auto-send (still APPROVE safety — queue for approval).
-            await _queue_email_approval(msg_id, subject, sender, draft["response"])
+            await _queue_email_approval(
+                msg_id=msg_id,
+                rfc822_message_id=rfc822_message_id,
+                subject=subject,
+                sender=sender,
+                draft=draft["response"],
+            )
         else:
             # Complex — notify master with full context. Copy is deliberately
-            # capability-neutral: no promise about what happens after master
-            # reads it. The "send it" wording from the plan-verbatim Task 2.3
-            # implied a conversational-dispatch capability that doesn't exist
-            # yet (see project_email_action_capability_gap.md). Once the
-            # gmail_send tool + dispatch land in Turn 17.5, this copy can
-            # gain back its actionable footer.
+            # capability-neutral: no trailing "what happens next" footer.
+            # The conversational reply-to-edit path doesn't exist yet (see
+            # project_email_action_capability_gap.md); promising it in copy
+            # would be the same trap as the original "say 'send it'" wording
+            # from plan-verbatim Task 2.3. Master sees the draft for context
+            # and decides whether to handle the email manually in Gmail.
             await send_system_alert(
                 f"📧 **Action Required** — agent needs your input\n\n"
                 f"**From:** {sender}\n"
                 f"**Subject:** {subject}\n\n"
-                f"**Draft for context (review before responding):**\n{draft['response']}\n"
+                f"**Draft for context (review before responding):**\n{draft['response']}"
             )
 
 
-async def _queue_email_approval(msg_id: str, subject: str, sender: str, draft: str):
+async def _queue_email_approval(
+    msg_id: str,
+    rfc822_message_id: str,
+    subject: str,
+    sender: str,
+    draft: str,
+):
     """Queue email send for master approval via Telegram.
 
     Plan gap fill: Task 2.3's verbatim PendingApproval construction omits
@@ -171,6 +195,12 @@ async def _queue_email_approval(msg_id: str, subject: str, sender: str, draft: s
     plan-verbatim code skipped. interrupt_id mirrors thread_id since
     there's no LangGraph interrupt token to reference; expires_at uses
     APPROVAL_EXPIRY_HOURS to match the LangGraph approval flow's expiry.
+
+    Turn 17.5 addition: payload now also stores `subject` and
+    `rfc822_message_id`. The Gmail-approval dispatch path in
+    app.messaging.router.route_approval_decision uses these directly so it
+    can skip an extra Gmail API call per Approve tap for new rows. Stale
+    rows (from before Turn 17.5) fall back to fetching from Gmail.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -188,7 +218,13 @@ async def _queue_email_approval(msg_id: str, subject: str, sender: str, draft: s
             interrupt_id=thread_id,
             action_type="gmail_reply",
             description=f"Reply to '{subject}' from {sender}:\n\n{draft}",
-            payload={"gmail_message_id": msg_id, "draft": draft, "sender": sender},
+            payload={
+                "gmail_message_id": msg_id,
+                "rfc822_message_id": rfc822_message_id,
+                "subject": subject,
+                "sender": sender,
+                "draft": draft,
+            },
             expires_at=expires_at,
         )
         session.add(approval)

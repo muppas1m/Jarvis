@@ -196,9 +196,12 @@ class TelegramChannel(Channel):
 
             # Acknowledge the button + edit the message so the master sees
             # the action took. The actual graph resume is below.
-            await query.answer(text=f"{action.capitalize()}ed.")
+            # `action` is "approve" | "reject" — past-tense rendering can't
+            # use a simple +"ed" suffix (would produce "Approveed").
+            past_tense = "Approved" if action == "approve" else "Rejected"
+            await query.answer(text=f"{past_tense}.")
             await query.edit_message_text(
-                text=f"{'✅' if action == 'approve' else '❌'} {action.capitalize()}ed."
+                text=f"{'✅' if action == 'approve' else '❌'} {past_tense}."
             )
 
             thread_id = await resolve_approval(
