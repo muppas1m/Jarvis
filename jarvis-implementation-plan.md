@@ -9458,6 +9458,35 @@ Both gaps share a single fix: a `gmail_send` tool + dispatch in `route_approval_
 
 **Checkpoint:** Send yourself an action_required email, tap Approve in Telegram. Email actually sends (verify in Gmail Sent folder). No "Resume failed" alert appears. EmailLog and PendingApproval rows show the full lifecycle (`status='approved'`, `resolved_via='telegram'`, plus audit_trail row for the gmail_send execution).
 
+### Turn 17.6 — email_history_search tool
+
+**Slot:** Immediately after Turn 17.5 (Phase 2 close-out polish), before Turn 18 (Phase 2 Week 6 — document text extractors).
+
+**Motivation:** Phase 2's triage system creates a real product surface — emails get classified, queued, expired, replied to — but the master has no way to ASK the agent about that history. `memory_search` queries Mem0 (semantic extractions of conversation memories), not the structured `email_logs` / `pending_approvals` tables where triage state lives. When master returns from a weekend and asks "did I miss anything?" the agent has no tool to answer; it either says "I can't check that" or hallucinates from whatever's in Mem0.
+
+The data is all there in the DB — `email_logs` (classification, draft, response_complexity, auto_sent), `pending_approvals` (status, resolved_via, resolved_at, expires_at) — just not reachable through any agent tool. A new `email_history_search` tool fixes that.
+
+**Tasks:**
+
+`2.X-closeout-e` — `app/agent/tools/email_history.py`
+- Pydantic args:
+  - `days_back: int = 7` — time window (created_at >= NOW() - INTERVAL days_back DAY)
+  - `classification: Literal["spam", "fyi", "action_required"] | None = None` — optional filter
+  - `sender: str | None = None` — optional ILIKE filter on sender column
+  - `status: Literal["pending", "approved", "rejected", "expired"] | None = None` — joins pending_approvals
+  - `limit: int = 20` — bounded result set
+- SQL query: SELECT from `email_logs` LEFT JOIN `pending_approvals` ON `pending_approvals.payload->>'gmail_message_id' = email_logs.gmail_message_id`
+- Returns natural-language summary: counts by classification + top action_required senders + expired-but-unanswered count + bulleted recent items (subject, sender, classification, status)
+- SAFE classification in TOOL_SAFETY_MAP (read-only DB query, no side effects)
+
+`2.X-closeout-f` — Register in `app/agent/tools/__init__.py`
+- Add `register_email_history()` call alongside `register_calendar()` and `register_gmail_send()`
+
+`2.X-closeout-g` — Add `email_history_search` to TOOL_SAFETY_MAP if not already
+- Phase 1 left blank for new tools; explicit SAFE classification needed
+
+**Checkpoint:** After landing, ask Jarvis via Telegram: "Hey, what action_required emails came in over the past 2 days?" → agent invokes email_history_search → returns a real grouped summary based on `email_logs` + `pending_approvals` state. Verify: counts match a direct SQL query, expired approvals show as such, sender filter works.
+
 ### Turn 26.5 — Phase 3 close-out / memory maintenance
 
 **Slot:** Between Turn 26 (Phase 3 close: tool registration + browser audit migration) and Turn 27 (Phase 4 kickoff: Next.js scaffold).
