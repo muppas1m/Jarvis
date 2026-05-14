@@ -90,14 +90,33 @@ async def memory_load_node(state: AgentState) -> dict:
 # ============================================================================
 # Node 2 — agent (LLM call with bound tools)
 # ============================================================================
-def _build_chat_model(tools: list) -> ChatLiteLLM:
-    """ChatLiteLLM speaks LangChain's BaseChatModel interface but routes
-    through LiteLLM, so model swaps stay env-var-only and the LiteLLM
-    Langfuse callback fires on every dispatch."""
-    llm = ChatLiteLLM(model=settings.PRIMARY_MODEL, temperature=0.7)
+def _build_chat_model(tools: list):
+    """Build the agent's chat model — primary + fallback wrapped in
+    FallbackChatLLM for resilience against Groq rate-limit and
+    tool_use_failed errors.
+
+    Both ChatLiteLLM instances are constructed per-turn (cheap; they're
+    config objects, not heavy state). Tools are bound to BOTH before
+    wrapping, so a fallback fires with the same tool set the primary
+    had — agent_node downstream sees structured tool_calls regardless
+    of which model produced them.
+
+    Returns a Runnable that mirrors ChatLiteLLM's invoke/ainvoke
+    interface; agent_node calls `.ainvoke(messages)` as before.
+
+    See `project_agent_node_bypasses_gateway_fallback.md` for the
+    architectural rationale.
+    """
+    from app.llm.fallback_llm import FallbackChatLLM
+
+    primary = ChatLiteLLM(model=settings.PRIMARY_MODEL, temperature=0.7)
+    fallback = ChatLiteLLM(model=settings.FALLBACK_MODEL, temperature=0.7)
+
     if tools:
-        llm = llm.bind_tools(tools)
-    return llm
+        primary = primary.bind_tools(tools)
+        fallback = fallback.bind_tools(tools)
+
+    return FallbackChatLLM(primary=primary, fallback=fallback)
 
 
 async def agent_node(state: AgentState) -> dict:
