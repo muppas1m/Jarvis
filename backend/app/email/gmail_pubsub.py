@@ -17,13 +17,10 @@ logger = structlog.get_logger()
 
 
 async def handle_gmail_push(pubsub_message: dict):
-    """
-    Process a Gmail push notification:
-    1. Fetch the new email(s)
-    2. Classify each (spam / fyi / action_required)
-    3. Route accordingly
-    """
-    # Decode the Pub/Sub message
+    """Process a Gmail Pub/Sub push notification — decode + delegate to
+    `sweep_recent_inbox`. The actual fetch/dedup/process pipeline lives in
+    the shared helper so gmail_renew (post-renewal catch-up) and gmail_check
+    (15-min safety-net poll) can reuse it without duplicating logic."""
     data = base64.b64decode(pubsub_message.get("data", "")).decode("utf-8")
     payload = json.loads(data)
     history_id = payload.get("historyId")
@@ -31,12 +28,33 @@ async def handle_gmail_push(pubsub_message: dict):
     if not history_id:
         return
 
-    # Fetch new messages since last history ID
+    await sweep_recent_inbox(history_id)
+
+
+async def sweep_recent_inbox(history_id: str | None = None) -> int:
+    """List recent INBOX messages and run each not yet in email_logs through
+    the full classify/route/log pipeline.
+
+    Single helper, three callers:
+      - handle_gmail_push (Pub/Sub-driven, real-time)
+      - gmail_renew Celery task (after watch re-registration — catches anything
+        published in the seam between the old watch's last delivery and the new
+        watch's first)
+      - gmail_check Celery task (every 15 min as a Pub/Sub safety net)
+
+    `history_id` is currently accepted but unused — kept for forward-compat
+    with a future state-tracked-delta implementation that uses history.list().
+
+    Returns the count of messages the lister returned (NOT the count actually
+    processed; dedup may skip some). Callers can log this for visibility.
+    """
     service = _get_gmail_service()
     messages = await _fetch_new_messages(service, history_id)
 
     for msg in messages:
         await _process_single_email(service, msg)
+
+    return len(messages)
 
 
 async def _process_single_email(service, message_data: dict):
@@ -124,13 +142,18 @@ async def _process_single_email(service, message_data: dict):
             # Auto-send (still APPROVE safety — queue for approval).
             await _queue_email_approval(msg_id, subject, sender, draft["response"])
         else:
-            # Complex — notify master with full context.
+            # Complex — notify master with full context. Copy is deliberately
+            # capability-neutral: no promise about what happens after master
+            # reads it. The "send it" wording from the plan-verbatim Task 2.3
+            # implied a conversational-dispatch capability that doesn't exist
+            # yet (see project_email_action_capability_gap.md). Once the
+            # gmail_send tool + dispatch land in Turn 17.5, this copy can
+            # gain back its actionable footer.
             await send_system_alert(
-                f"📧 **Action Required**\n\n"
+                f"📧 **Action Required** — agent needs your input\n\n"
                 f"**From:** {sender}\n"
                 f"**Subject:** {subject}\n\n"
-                f"**Draft response:**\n{draft['response']}\n\n"
-                f"Reply with edits or say 'send it'."
+                f"**Draft for context (review before responding):**\n{draft['response']}\n"
             )
 
 

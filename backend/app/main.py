@@ -30,6 +30,47 @@ from app.messaging.normalizer import channel_registry
 from app.utils.logging import configure_logging, get_logger
 
 
+async def _startup_model_ping(logger) -> None:
+    """Ping each declared LLM model slot at boot to surface deprecations early.
+
+    LLM providers periodically deprecate models with little notice (Groq
+    decommissioned `gemma2-9b-it` mid-Phase-2 — the fallback chain absorbed
+    every classification call until volume revealed 100% fallback rate). The
+    ping surfaces deprecation on the first restart after it happens, so the
+    fix lands before a high-volume task burns quota retrying a dead model.
+
+    Three 1-token completion calls at boot. Failures log error-level but
+    don't fail boot — a transient provider outage at lifespan time shouldn't
+    prevent the agent from starting (it can recover via fallback chain once
+    primary comes back). The point is VISIBILITY, not enforcement.
+    """
+    from litellm import acompletion
+
+    from app.llm.models import get_models
+
+    for slot, model_info in get_models().items():
+        try:
+            await acompletion(
+                model=model_info.model_id,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                temperature=0.0,
+                timeout=10.0,
+            )
+            logger.info(
+                "startup_model_ping_ok",
+                slot=slot,
+                model=model_info.model_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — startup probe, never fatal
+            logger.error(
+                "startup_model_ping_failed",
+                slot=slot,
+                model=model_info.model_id,
+                error=str(exc)[:300],
+            )
+
+
 async def _ensure_master_profile_or_exit(logger) -> None:
     """Hard refuse to boot if the master profile row is missing.
 
@@ -96,6 +137,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_all_tools()
     await tool_registry.index_all_tools()
     logger.info("tools_indexed", count=len(tool_registry))
+
+    await _startup_model_ping(logger)
 
     # --- channels -----------------------------------------------------------
     # Telegram is the Phase 1 primary. Construct lazily so a missing token

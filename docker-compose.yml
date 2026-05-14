@@ -33,6 +33,51 @@ services:
     # is intentionally not run yet. Migrations use `docker compose run --rm`
     # which overrides the CMD.
 
+  celery-worker:
+    build: ./backend
+    container_name: jarvis-celery-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Same overrides as backend: container DNS for sibling services.
+      DATABASE_URL: postgresql+asyncpg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      DATABASE_URL_SYNC: postgresql+psycopg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LANGFUSE_HOST: http://langfuse-web:3000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: celery -A app.scheduler.celery_app worker --loglevel=info --concurrency=4
+
+  celery-beat:
+    build: ./backend
+    container_name: jarvis-celery-beat
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      DATABASE_URL_SYNC: postgresql+psycopg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      # Beat schedule state persists across container restarts so a `restart`
+      # of just celery-beat doesn't lose the "last fired" timestamps for
+      # periodic tasks. `down -v` still nukes it — that's the deliberate
+      # "fresh start" gesture. Interval-only tasks (no cron-style at-time
+      # jobs in Phase 2) are tolerant of schedule-state loss.
+      - celery_beat_data:/var/run/celery
+    command: celery -A app.scheduler.celery_app beat --loglevel=info --schedule=/var/run/celery/celerybeat-schedule
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: jarvis-postgres
@@ -279,6 +324,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  celery_beat_data:
   langfuse_db_data:
   langfuse_clickhouse_data:
   langfuse_clickhouse_logs:
