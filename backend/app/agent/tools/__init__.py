@@ -31,14 +31,15 @@ def register_all_tools() -> None:
     from app.agent.tools.builtin_memory import register as register_memory
     register_memory()
 
+    from app.agent.tools.calendar_tool import register as register_calendar
+    register_calendar()
+
     # Phase 2 / Phase 3 / Phase 4 tool registrations land below as each
     # tool module ships. Keep them commented until their underlying module
     # exists, so this function never raises ImportError on a fresh build.
     #
     # from app.agent.tools.gmail_tool import register as register_gmail
     # register_gmail()
-    # from app.agent.tools.calendar_tool import register as register_calendar
-    # register_calendar()
     # from app.agent.tools.browser_tool import register as register_browser
     # register_browser()
     # from app.agent.tools.search_tool import register as register_search

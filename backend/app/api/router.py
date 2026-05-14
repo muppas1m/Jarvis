@@ -22,6 +22,7 @@ from app.api.chat import router as chat_router
 from app.api.costs import router as costs_router
 from app.api.health import router as health_router
 from app.api.memory import router as memory_router
+from app.api.webhooks.gmail import router as gmail_webhook_router
 from app.api.webhooks.telegram import router as telegram_webhook_router
 from app.security.auth import UserContext, get_current_user
 
@@ -30,6 +31,7 @@ api_router = APIRouter()
 # --- public ---------------------------------------------------------------
 api_router.include_router(health_router)
 api_router.include_router(telegram_webhook_router)
+api_router.include_router(gmail_webhook_router)
 
 # --- protected ------------------------------------------------------------
 # All routes mounted here inherit Depends(get_current_user) at the
