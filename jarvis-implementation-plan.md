@@ -9517,7 +9517,7 @@ Full design + implementation sketch lives in `project_agent_node_bypasses_gatewa
 
 ### Turn 17.8 — Email triage enrichment + EmailLog meta column
 
-**Slot:** Between Turn 17.7 (FallbackChatLLM) and Turn 18 (Phase 2 Week 6 — document text extractors). Same "Phase 2 close-out polish" pattern as 17.5/17.6/17.7.
+**Slot:** After Turn 20 (Phase 2 close: APIs + cost visibility), bundled with Turn 17.9 and Turn 20.5 as the Phase-2-Week-6 close-out batch. Mirrors the Phase-2-Week-5 close-out batch pattern (Turn 17.5 + 17.6 + 17.7) — bundling related audit-deferred polish work for focused attention and commit coherence. (Originally slotted "between 17.7 and 18" at plan-rewire time; reordered post Turn-18 commit after recognising that 17.8's email-path scope is orthogonal to the RAG arc and the batch-after-Turn-20 cadence keeps RAG momentum intact.)
 
 **Motivation:** Surfaced by the frontier-grade audit conducted before Turn 18 sign-off. Two compounding gaps:
 
@@ -9558,7 +9558,7 @@ These are paired by design — extending classifier output without persistence i
 
 ### Turn 17.9 — Tool description audit + reasoning protocol + AuditTrail latency
 
-**Slot:** After Turn 17.8 (email triage enrichment), before Turn 18. Final Phase 2 close-out slot — completes the audit's three retroactive lifts (L1 + L2 + L3).
+**Slot:** After Turn 17.8 in the Phase-2-Week-6 close-out batch (Turn 17.8 → 17.9 → 20.5), which lands after Turn 20. Completes the audit's three retroactive lifts (L1 + L2 + L3). (Originally slotted "before Turn 18" at plan-rewire time; reordered post Turn-18 commit alongside 17.8 — see 17.8's slot note.)
 
 **Motivation:** Three small but distinct gaps surfaced by the pre-Turn-18 verification pass:
 
@@ -9599,7 +9599,7 @@ These are paired by design — extending classifier output without persistence i
 
 ### Turn 20.5 — Eval framework + integration test backbone
 
-**Slot:** Between Turn 20 (Phase 2 close: APIs + cost visibility) and the planned "testing vacation" before Phase 2.5 / Phase 3. Completes Phase 2 with measurement infrastructure rather than just feature parity.
+**Slot:** End of the Phase-2-Week-6 close-out batch (Turn 17.8 → 17.9 → 20.5), after Turn 20 and before the planned "testing vacation" / Phase 2.5 / Phase 3 transition. Completes Phase 2 with measurement infrastructure rather than just feature parity, AND validates Phase-2-Week-6's audit-deferred work (17.8 + 17.9) is exercised under the new eval harness.
 
 **Motivation:** Surfaced by the frontier-grade audit. Current state (verified): `backend/tests/` has 11 files, ~50 functions, only one of which (`test_memory_recall_integration`) is a genuine integration test. The rest are unit / structural tests that verify code shape, not feature correctness. There is NO end-to-end test that exercises the Telegram → agent → tool → reply flow.
 
