@@ -9515,6 +9515,132 @@ Full design + implementation sketch lives in `project_agent_node_bypasses_gatewa
 
 **Cost note:** When fallback fires, the turn uses paid gpt-4o-mini instead of free Groq. Expected fallback rate ~5-10% of turns at Phase 2 scale → negligible monthly spend (well under $1). Acceptable trade for reliability.
 
+### Turn 17.8 — Email triage enrichment + EmailLog meta column
+
+**Slot:** Between Turn 17.7 (FallbackChatLLM) and Turn 18 (Phase 2 Week 6 — document text extractors). Same "Phase 2 close-out polish" pattern as 17.5/17.6/17.7.
+
+**Motivation:** Surfaced by the frontier-grade audit conducted before Turn 18 sign-off. Two compounding gaps:
+
+1. **Classifier is 3-way only.** `app/email/classifier.py:CLASSIFICATION_PROMPT` outputs `spam | fyi | action_required`. Frontier triage is multi-dimensional — urgency (when is response expected), intent (what does the sender want), confidence (how sure is the classifier), suggested_action (reply / archive / forward / schedule). The current single-axis classification leaves digest ordering arbitrary, leaves urgent vs. routine action_required undifferentiated, and gives downstream tools (history search, future dashboard) nothing to filter on.
+
+2. **EmailLog has no `meta` column** (verified: `app/db/models.py:EmailLog`). Even if the classifier emitted richer fields, there's nowhere to persist them. Adding ad-hoc top-level columns for each new dimension is the wrong shape; a single `meta JSONB` column matches the pattern Turn 18's chunk model will use.
+
+These are paired by design — extending classifier output without persistence is a half-step.
+
+**Tasks:**
+
+`2.X-closeout-k` — Alembic migration `004_email_logs_meta`
+- New file: `backend/alembic/versions/004_email_logs_meta.py`
+- `op.add_column("email_logs", sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))`
+- Down: `op.drop_column("email_logs", "meta")`
+- Run + verify against running Postgres before any code references the column
+
+`2.X-closeout-l` — `app/email/classifier.py` multi-dimensional output
+- Update `CLASSIFICATION_PROMPT` to request a JSON object: `{"classification": "spam|fyi|action_required", "urgency": "immediate|today|this_week|none", "intent": "request|question|notification|fyi|spam", "confidence": 0.0-1.0, "suggested_action": "reply|archive|forward|schedule|none"}`
+- Update `classify_email` return type to `EmailTriageResult` (Pydantic), not just `Literal[...]`
+- Single LLM call (cost-neutral to current implementation) — the prompt asks for ALL fields in one shot
+- JSON-parse hardening: if the model returns malformed JSON, log and fall back to the conservative 3-way classification (`fyi` if uncertain)
+
+`2.X-closeout-m` — `app/db/models.py:EmailLog` + writer updates
+- Add `meta: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=sa.text("'{}'::jsonb"))`
+- Update `app/email/gmail_pubsub.py:_process_single_email` to write the full `EmailTriageResult` dict into `EmailLog.meta` on creation
+- Keep the top-level `classification` column populated for backward compatibility with existing queries
+
+`2.X-closeout-n` — `app/email/digest.py` urgency-aware ordering
+- `build_and_clear_digest`: pull EmailLog rows for the digest window, sort by `meta->>'urgency'` (immediate first, then today, this_week, none)
+- Update digest formatting to surface urgency tag inline: `[URGENT] Subject — Sender` etc.
+
+`2.X-closeout-o` — `app/agent/tools/email_history.py` enriched output
+- Update the SQL to read `meta` and surface urgency / intent / suggested_action in the formatted output
+- Add `urgency` as an optional filter argument
+
+**Checkpoint:** Send 3 test emails of deliberately varying urgency (one "respond by EOD", one routine, one no-action FYI). After classification: query `email_logs` directly, verify each row's `meta` has all five fields populated and matches sender intent. Run `digest_compose` Celery task → digest output orders urgent first. Ask Jarvis via Telegram "what urgent emails came in today?" → email_history_search filters correctly.
+
+### Turn 17.9 — Tool description audit + reasoning protocol + AuditTrail latency
+
+**Slot:** After Turn 17.8 (email triage enrichment), before Turn 18. Final Phase 2 close-out slot — completes the audit's three retroactive lifts (L1 + L2 + L3).
+
+**Motivation:** Three small but distinct gaps surfaced by the pre-Turn-18 verification pass:
+
+1. **Calendar tool descriptions missed Turn 17.6's sharpening pass** (verified: `app/agent/tools/calendar_tool.py`). Memory tools + email_history_search got entry-level descriptions sharpened into cross-referenced, anti-pattern-aware, example-bearing descriptions in Turn 17.6. Calendar tools (added Turn 16) were not in scope and still carry their original one-line descriptions. This is the L2 retroactive correction.
+
+2. **SAFETY_DOCTRINE lacks reasoning-protocol scaffolding** (verified: `app/agent/prompts.py`). Current safety doctrine is rules 1-5 about WHAT not to do (no fabrication, trust tool results, etc.). Frontier agent prompts also include a brief think-before-act protocol — "(1) understand the ask, (2) identify what you need to know, (3) call tools to fill gaps, (4) synthesize, (5) respond" — to encourage structured reasoning over reactive tool-call spam. Three-line addition to system prompt; large effect on multi-tool query quality.
+
+3. **AuditTrail has no latency_ms column** (verified: `app/db/models.py:AuditTrail`). `_log_audit` in `app/agent/nodes.py:501-525` writes tool execution rows but doesn't capture latency. Tool execution time is the single most valuable signal for tool-performance investigation (which tool is slow, which is fast, which is the bottleneck on multi-tool turns). This is the L3 retroactive correction.
+
+**Tasks:**
+
+`2.X-closeout-p` — Calendar tool description sharpening
+- `app/agent/tools/calendar_tool.py:calendar_read.description`: expand from current one-line to multi-line including: what it does, what it does NOT do (does not detect conflicts, does not normalize timezones), cross-reference to `calendar_create` for write operations, example queries
+- `app/agent/tools/calendar_tool.py:calendar_create.description`: same treatment — what it does, what it does NOT do (does not return event_id, does not add Google Meet links), cross-reference to `calendar_read` for browsing existing events, example queries with attendees
+- Match the pattern established in Turn 17.6 for memory_search / email_history_search
+- Re-verify prompt cache stability after the change (tool descriptions are part of the cacheable system block)
+
+`2.X-closeout-q` — SAFETY_DOCTRINE reasoning protocol
+- `app/agent/prompts.py:SAFETY_DOCTRINE`: prepend a brief "## Reasoning protocol" subsection above the existing numbered rules
+- Content (draft): "Before acting on a request: (1) restate the ask in your own words to confirm understanding, (2) identify what information you need vs. what you already have, (3) call tools to fill information gaps before drafting a response, (4) synthesize across tool results before responding, (5) state what you did and any uncertainty in the response."
+- Keep total system-prompt length under the prompt-cache threshold (verify via existing cache-stability test)
+
+`2.X-closeout-r` — Alembic migration `005_audit_trail_latency`
+- New file: `backend/alembic/versions/005_audit_trail_latency.py`
+- `op.add_column("audit_trail", sa.Column("latency_ms", sa.Integer(), nullable=True))`
+- Down: `op.drop_column("audit_trail", "latency_ms")`
+
+`2.X-closeout-s` — `_log_audit` + tool execution instrumentation
+- `app/agent/nodes.py:_log_audit`: accept new `latency_ms: int | None = None` argument, write to AuditTrail row
+- `app/agent/nodes.py:tool_executor_node`: capture `start = time.monotonic()` before each tool dispatch, compute `latency_ms = int((time.monotonic() - start) * 1000)` after, pass to `_log_audit`
+- `app/agent/tools/gmail_send.py:_audit` (or equivalent in-tool audit writer): mirror the same capture-and-write pattern
+- Add `latency_ms` to AuditTrail model in `app/db/models.py`
+
+**Checkpoint:** 
+- Grep `calendar_read` + `calendar_create` descriptions: each must include "does NOT" language, a cross-reference to its sibling, and at least one example query. 
+- Run the prompt-cache stability test (existing): must still pass.
+- Send a multi-tool query via Telegram, then SELECT from `audit_trail`: every row from the turn has a populated `latency_ms` value with sensible magnitudes (memory_search <500ms, gmail_send <2000ms, etc.).
+
+### Turn 20.5 — Eval framework + integration test backbone
+
+**Slot:** Between Turn 20 (Phase 2 close: APIs + cost visibility) and the planned "testing vacation" before Phase 2.5 / Phase 3. Completes Phase 2 with measurement infrastructure rather than just feature parity.
+
+**Motivation:** Surfaced by the frontier-grade audit. Current state (verified): `backend/tests/` has 11 files, ~50 functions, only one of which (`test_memory_recall_integration`) is a genuine integration test. The rest are unit / structural tests that verify code shape, not feature correctness. There is NO end-to-end test that exercises the Telegram → agent → tool → reply flow.
+
+This gap is invisible at Phase 2 scale (single master notices regressions manually) but compounds badly across Phase 3 onward — research agent / news briefings / browser automation each have their own non-trivial feature surfaces, and without an eval harness + integration backbone, regressions creep in turn-by-turn.
+
+Frontier agent systems (Claude, ChatGPT custom GPTs, Cursor) all maintain golden-query suites + LLM-as-judge scoring + integration smoke tests. This turn lifts Jarvis to that floor before Phase 3 begins.
+
+**Tasks:**
+
+`2.X-closeout-t` — `backend/evals/` golden queries
+- New directory: `backend/evals/`
+- New file: `backend/evals/golden_queries.yaml` — 20-30 query/expected-behavior triples spanning: recall queries ("what do you remember about X"), action queries ("schedule a meeting with X"), classification queries ("any urgent emails today?"), synthesis queries (multi-tool: "what's on my plate this week"), edge cases (empty memory, no calendar events, no recent emails)
+- Each triple: `query`, `expected_tools_called` (list of tool names that SHOULD fire), `expected_response_traits` (free-text criteria for LLM-as-judge: "must mention X", "must NOT fabricate", "must cite source")
+
+`2.X-closeout-u` — `backend/evals/runner.py` LLM-as-judge harness
+- pytest-runnable script: loads golden_queries.yaml, for each entry runs `run_turn(query)` with a fresh thread_id, captures: response text + sequence of tools called + audit_trail rows
+- Grades via LLM-as-judge: GPT-4o-mini call with the query + expected_response_traits + actual response, returns scores 1-5 on (relevance, accuracy, tone, completeness)
+- Also asserts hard rules: `set(expected_tools_called).issubset(set(actual_tools_called))` (allows extra tool calls, not missing ones)
+- Outputs JSON report to `backend/evals/results/<timestamp>.json` for trend tracking
+- Settable threshold (default: 4.0 average across all queries to pass)
+
+`2.X-closeout-v` — `backend/tests/integration/test_email_flow.py`
+- End-to-end: simulate Pub/Sub notification → gmail_pubsub processes → classifier fires → draft generated → PendingApproval row created → Telegram approval simulated → gmail_send dispatched (mocked at the Google API boundary, not at gmail_send call boundary) → EmailLog updated
+- Uses a real Postgres (test database via existing test fixtures), real Redis, real Mem0 — only the Google API and Telegram Bot API are mocked
+- Pass: all DB state transitions correct, mocked Google API receives correct payload, no spurious alerts
+
+`2.X-closeout-w` — `backend/tests/integration/test_cross_source_recall.py`
+- End-to-end: seed Mem0 with known facts about a fictional contact, seed email_logs with related emails, send a Telegram message "what do you remember about <contact>?", verify response contains facts from BOTH sources
+- Tests the multi-source synthesis path that was the original motivation for Turn 17.7 (FallbackChatLLM)
+- Pass: response is coherent, references at least one Mem0 fact AND at least one email_history fact, no fabrication
+
+`2.X-closeout-x` — CI hook + baseline
+- Add a `pytest backend/evals/runner.py` invocation to the existing test command (or a new `make evals` target)
+- Run once to establish baseline scores, commit baseline JSON as `backend/evals/results/baseline.json`
+- Document in README how to run evals locally + how to compare against baseline (`backend/evals/compare.py` — small diff utility)
+
+**Checkpoint:** 
+- Golden suite (`pytest backend/evals/runner.py`) runs end-to-end in under 60 seconds, scores ≥ 4.0 average across the suite, no hard-rule failures.
+- Integration tests (`pytest backend/tests/integration/`) pass with real Postgres + Redis + Mem0 + mocked Google/Telegram.
+- Baseline JSON committed; running the suite a second time shows regression detection works (deliberately break a tool, re-run, see the suite catch it).
+
 ### Turn 26.5 — Phase 3 close-out / memory maintenance
 
 **Slot:** Between Turn 26 (Phase 3 close: tool registration + browser audit migration) and Turn 27 (Phase 4 kickoff: Next.js scaffold).
