@@ -6174,6 +6174,19 @@ After autogen, **manually verify** the generated migration file at `backend/alem
 
 ### Week 6: Document Ingestion (RAG) + Cost Visibility
 
+> **Turn execution map (revised post Turn-18 commit):**
+>
+> - **Turn 18** ✓ (committed 69c5f18): Tasks 2.13 + 2.14 — extractors + chunker, with frontier lifts A (structure-preserving extractors via PyMuPDF `page.get_text("dict")`), B (semantic chunking with token-budget ceiling, oversized-block fallback), C (citation-ready meta JSONB: page/section_heading/paragraph_index).
+> - **Turn 19**: Tasks 2.14b + 2.15 + 2.15b + 2.16 + new `document_search` agent tool. **Owns the retrieval surface end-to-end.** Hybrid search (Task 2.16) is pulled forward from plan-verbatim Turn 20 because `search.py` is one architectural feedback loop (retrieve → rerank → threshold → return) that lands cleaner complete than split. Splitting retrieval improvements across turns means Turn 20 inherits an incomplete surface and the "is retrieval working" question isn't answerable until both land.
+> - **Turn 20**: Tasks 2.16b + 2.17 + 2.18 — alembic migration for documents (**no-op:** schema landed in Phase 1's monolithic 001_initial_schema migration; verify with `\dt` and delete autogen leftovers) + documents HTTP API + cost visibility API. Surface layer atop Turn 19's retrieval.
+>
+> **Deferred frontier lifts (memory-noted, not in Turn 19/20 scope):**
+>
+> - **HyDE / query rewriting** — speculative recall lift on adversarial-vocabulary scenarios; latency cost (500ms-1s per search) is concrete, recall gain on a personal corpus where queries use corpus-similar vocabulary is uncertain. Defer until real usage shows recall failures from phrasing mismatch. Trigger condition surfaces via Turn 20.5's eval framework (golden queries with known-relevant chunks; recall regression detection).
+> - **LLM-as-judge per-chunk relevance grading** — duplicative with bge-reranker-v2-m3 cross-encoder (which is purpose-built for relevance grading and faster + cheaper). Ship reranker threshold filter (default 0.3, permissive) with structured logging of dropped candidates + their scores. Revisit only if reranker leak-through shows up in eval data — and at that point reconsider whether tuning the reranker threshold beats adding an LLM pass.
+>
+> **Structural dependency:** the deferral discipline above requires Turn 20.5's eval framework to land — otherwise the trigger conditions have no instrument that can fire. Turn 20.5 is therefore not optional polish but the measurement floor that Phase 2's deferred-lift discipline depends on. See Turn 20.5's slot framing in the Close-out section for the explicit coupling.
+
 #### Task 2.13 — Document Text Extractors
 
 Create `backend/app/documents/extractors.py`:
@@ -6283,6 +6296,8 @@ def chunk_text(
 > Anthropic's Contextual Retrieval (Sept 2024) preprends a 50-100 token LLM-generated *context summary* to each chunk before embedding. The summary explains where the chunk sits in the document (e.g., *"This chunk is from Section 3 of the 2024 Q3 earnings report and discusses revenue from the cloud segment."*). Embedding the chunk with this preamble — rather than the raw chunk alone — gives ~5-15% precision lift on real-world RAG tasks.
 >
 > Cost: ~1 LLM call per chunk at ingest time. For a 50-page PDF with 100 chunks, that's 100 calls. Routed through `FAST_MODEL`, this is pennies.
+>
+> **Design constraint (locked Turn 19 pre-execution):** the contextualizer interface MUST be batch-friendly from day 1 — accept `chunks: list[Chunk]` (Turn 18's structured chunk objects) and return `list[str]` of summaries, not single-chunk-at-a-time. Sequential LLM calls per chunk for a 100-chunk PDF = slow ingest; batch-aware interface preserves the option to add concurrent dispatch later (`asyncio.gather` with semaphore) without rippling into `ingestion.py`. Cheap design choice now, expensive retrofit later. The plan-verbatim sketch below (`contextualize_chunk(chunk_text, full_doc_excerpt)`) is a starting point; the Turn 19 implementation widens it to the batch form.
 
 Create `backend/app/documents/contextualizer.py`:
 
@@ -6565,6 +6580,16 @@ async def search_documents(query: str, top_k: int = 5, candidate_pool: int = 50)
     reranked = rerank(query=query, candidates=candidates, top_k=top_k, content_key="content")
     return reranked
 ```
+
+> **Turn 19 sub-step plan (locked, pre-execution):**
+>
+> 1. **19.1** — `contextualizer.py` with batch-friendly interface from day 1 (per Task 2.14b's design constraint).
+> 2. **19.2** — `ingestion.py` end-to-end (extract → chunk → contextualize → embed → store), consuming Turn 18's structured `Chunk.meta` so page / section_heading / paragraph_index round-trip cleanly into `DocumentChunk.meta` (Phase 1 monolithic migration already provides the column).
+> 3. **19.3** — `reranker.py` lazy-singleton bge-reranker-v2-m3 (per Task 2.15b).
+> 4. **19.4** — `search.py` hybrid retrieve + rerank + permissive threshold filter (default 0.3) + structured logging of dropped candidates with scores. **Internal incremental build pattern:** vector-search alone → verify; add BM25 → verify; add rerank → verify; add threshold + dropped-candidate logging → verify. Gate-before-commit applied INSIDE this sub-step (no extra commits; just internal checkpoints), since 19.4 is the highest-LOC and highest-risk surface in the turn.
+> 5. **19.5** — `app/agent/tools/document_search.py` registers the agent tool with citation-formatted output (`[<source_file>, p.<page>, §<section_heading>]` per chunk) AND citation guidance in the tool description (NOT SAFETY_DOCTRINE — keeps global doctrine narrow as the tool surface grows; future web_search / news_briefing tools can carry their own citation patterns in their descriptions).
+> 6. **19.6** — `scripts/smoke_rag.py` verifies **pipeline correctness, not retrieval quality**. Smoke proves: end-to-end ingest works, citations appear in agent response, threshold filter drops low-score chunks, structured logging captures dropped-candidate audit data. Smoke stays fast (<60s) and deterministic. **Retrieval quality measurement is Turn 20.5's eval framework job** — explicitly NOT this smoke's bar. Different surfaces, different durability requirements: smoke is "does the pipeline run?", eval is "does retrieval quality meet a bar?".
+> 7. **19.7** — smoke + gate + commit.
 
 #### Task 2.16b — Alembic Migration for Document Tables
 
@@ -9600,6 +9625,8 @@ These are paired by design — extending classifier output without persistence i
 ### Turn 20.5 — Eval framework + integration test backbone
 
 **Slot:** End of the Phase-2-Week-6 close-out batch (Turn 17.8 → 17.9 → 20.5), after Turn 20 and before the planned "testing vacation" / Phase 2.5 / Phase 3 transition. Completes Phase 2 with measurement infrastructure rather than just feature parity, AND validates Phase-2-Week-6's audit-deferred work (17.8 + 17.9) is exercised under the new eval harness.
+
+**Structural role (locked Turn 19 pre-execution): this turn is the measurement floor that Phase 2's deferred-lift discipline depends on, not optional polish.** Turn 19 deferred two frontier lifts (HyDE / query rewriting; LLM-as-judge per-chunk relevance grading) under the principle "retrieval/quality lifts ship on real-usage signal, not speculatively." That principle ONLY works if there's an instrument that can fire the trigger condition — golden queries with known-relevant chunks, recall measurement, regression detection on retrieval quality. Turn 20.5's eval framework IS that instrument. If 20.5 slips, the deferred HyDE + LLM-grading lifts lose their revisit signal entirely and the deferrals become "we'll figure it out later" rather than "we'll measure and decide." So 20.5's eval framework is structurally load-bearing for Phase 2's RAG discipline; it cannot be deferred past Phase 2 close without re-opening the HyDE + LLM-grading deferral decisions.
 
 **Motivation:** Surfaced by the frontier-grade audit. Current state (verified): `backend/tests/` has 11 files, ~50 functions, only one of which (`test_memory_recall_integration`) is a genuine integration test. The rest are unit / structural tests that verify code shape, not feature correctness. There is NO end-to-end test that exercises the Telegram → agent → tool → reply flow.
 
