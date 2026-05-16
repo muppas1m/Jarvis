@@ -62,9 +62,20 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      # Same overrides as backend + celery-worker. Without OLLAMA_BASE_URL
+      # pointing at host.docker.internal, beat's import chain
+      # (gmail_renew → gmail_pubsub → responder → MemoryManager → Mem0Client
+      # → OllamaEmbedder._ensure_model_exists) crashes at startup with
+      # ConnectionError because .env's `OLLAMA_BASE_URL=http://localhost:...`
+      # resolves to the container itself. Discovered Turn 18 pre-commit
+      # gate after beat had been silently restart-looping since Turn 17.
       DATABASE_URL: postgresql+asyncpg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
       DATABASE_URL_SYNC: postgresql+psycopg://jarvis_app:jarvis_dev_password@postgres:5432/jarvis
       REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LANGFUSE_HOST: http://langfuse-web:3000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
