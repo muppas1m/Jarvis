@@ -1,4 +1,4 @@
-"""Renew the Gmail Pub/Sub watch every 6 days + sweep the recent inbox.
+"""Renew the Gmail Pub/Sub watch twice weekly + sweep the recent inbox.
 
 The renewal itself just re-calls users.watch(), which Gmail treats as an
 extension of the existing watch rather than a tear-down + recreate. So
@@ -10,7 +10,7 @@ yet could be missed.
 
 Closes that seam with `sweep_recent_inbox()` immediately after renewal:
 the recent INBOX list + dedup against email_logs picks up anything the
-push deliveries dropped. Cheap (one Gmail list call), runs every 6 days.
+push deliveries dropped. Cheap (one Gmail list call), runs twice weekly.
 
 Wrapped in @critical_task because a silently-failing renewal is exactly
 the operational disaster mode — watch expires, Pub/Sub pushes stop,

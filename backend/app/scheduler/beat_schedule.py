@@ -26,7 +26,7 @@ celery_app.conf.beat_schedule = {
     # guarantee only covers messages the broker successfully accepted from
     # the publisher. It does NOT cover (a) Gmail's internal publisher
     # failing before publishing, or (b) the seam during watch re-registration
-    # every 6 days. A 15-min poll closes both gaps. Cost: ~100 Gmail list
+    # twice weekly. A 15-min poll closes both gaps. Cost: ~100 Gmail list
     # API calls/day (well under quota); LLM calls only fire when the poll
     # actually finds an unprocessed message (rare in steady state).
     #
@@ -37,13 +37,22 @@ celery_app.conf.beat_schedule = {
         "task": "app.scheduler.tasks.gmail_check.check_gmail_inbox",
         "schedule": crontab(minute="*/15"),
     },
-    # Gmail watch renewal every 6 days (7-day expiry, renew early).
-    # gmail_renew runs a catch-up sweep after re-registering — closes the
-    # short seam where the new watch's first historyId is published before
-    # the old subscription's last events are fully drained.
+    # Gmail watch renewal twice weekly at 3am Sun + Sat (7-day Gmail-side
+    # expiry; renewing on a wall-clock cadence keeps the watch alive with
+    # ~3-4 day slack, predictable for alerting). gmail_renew runs a catch-up
+    # sweep after re-registering — closes the short seam where the new
+    # watch's first historyId is published before the old subscription's
+    # last events are fully drained.
+    #
+    # Cron note: `day_of_week="0,6"` selects Sun (0) AND Sat (6). The earlier
+    # `*/6` form looked like "every 6 days" but cron interprets it as
+    # "every 6th weekday starting from 0" → the same Sun + Sat selection by
+    # accident. Twice-weekly is fine operationally (more conservative than
+    # "every 6 days" against the 7-day expiry); the explicit `"0,6"` form
+    # documents the actual cadence.
     "gmail-watch-renew": {
         "task": "app.scheduler.tasks.gmail_renew.renew_gmail_watch",
-        "schedule": crontab(hour=3, minute=0, day_of_week="*/6"),
+        "schedule": crontab(hour=3, minute=0, day_of_week="0,6"),
     },
     # Nightly memory consolidation at 2am.
     # Phase 2 ships a log-only stub; real implementation lands in Turn 26.5
