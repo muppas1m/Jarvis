@@ -1,5 +1,13 @@
 # Jarvis AI Agent — Full Implementation Plan
 
+> **⚠️ EXECUTION HALTED 2026-05-25** — see `jarvis-frontier-upgrade.md` for the active frontier-grade upgrade pass.
+>
+> Execution halted after commit `4a327fb` at Turn 19.2 close (mid-Phase-2). Currently producing `jarvis-frontier-upgrade.md` — the frontier-grade upgrade doc. Backward lifts (Turn 1 through 19.2) are being drafted first. Once backward lifts up through the halt point are completed and applied, forward execution resumes from the halt point per base plan, with forward turns also routed through the upgrade doc.
+>
+> This document remains the historical baseline. The upgrade document is authoritative for what is actually being executed under the frontier-grade discipline.
+
+---
+
 > **Audience:** Full-stack AI Software Engineer with file-level instructions.
 > **Stack:** Python (FastAPI + Celery) backend · Next.js 16 + TypeScript frontend · PostgreSQL + pgvector · Redis · Mem0 (self-hosted, BGE-M3 embeddings) · LiteLLM (provider-agnostic — plug any LLM) · LangGraph 1.0 (agent orchestration with checkpointing + HITL) · Langfuse (self-hosted observability) · Patchright (stealth browser automation)
 > **Development:** 100% localhost via Docker. Zero cloud costs during development.
