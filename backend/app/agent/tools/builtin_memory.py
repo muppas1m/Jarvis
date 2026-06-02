@@ -1,9 +1,10 @@
 """
 memory_search — built-in tool, always loaded.
 
-The only tool registered in Phase 1. Lets the agent fetch facts from Mem0
-when a question references something previously discussed (preferences,
-past decisions, named relationships, etc.).
+First tool registered (Phase 1); Phase 2+ tools register alongside via
+__init__.py. Lets the agent fetch facts from Mem0 when a question references
+something previously discussed (preferences, past decisions, named
+relationships, etc.).
 
 `always_loaded=True` skips the embedding-based ranking — memory_search is
 relevant on so many turns that paying the dynamic-selection cost would

@@ -25,7 +25,7 @@ from typing import Any
 from app.agent.runner import resume_turn, run_turn
 from app.memory.session import SessionManager
 from app.messaging.channel import NormalizedMessage
-from app.messaging.normalizer import channel_registry
+from app.messaging.channel_registry import channel_registry
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)

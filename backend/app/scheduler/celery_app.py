@@ -83,7 +83,7 @@ def init_worker_process(**kwargs):
     if settings.TELEGRAM_BOT_TOKEN:
         try:
             from app.messaging.channels.telegram import get_telegram_channel
-            from app.messaging.normalizer import channel_registry
+            from app.messaging.channel_registry import channel_registry
 
             tg = get_telegram_channel()
             channel_registry.register(tg)

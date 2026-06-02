@@ -32,7 +32,7 @@ from app.db.engine import async_session, close_db
 from app.db.models import ConversationAnalytics
 from app.messaging.channel import NormalizedMessage
 from app.messaging.channels.telegram import get_telegram_channel
-from app.messaging.normalizer import channel_registry
+from app.messaging.channel_registry import channel_registry
 from app.messaging.router import route_inbound
 
 

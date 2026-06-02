@@ -8903,6 +8903,8 @@ async def enforce_rate_limit(tool_name: str) -> None:
 
 #### Task 4.18 — Auth.js Integration (Dashboard Auth)
 
+> **⚠️ Forward note (added 2026-06-01 from frontier-upgrade Step 11 audit, finding F2):** `backend/app/security/auth.py` ALREADY shipped at Phase 1 with a richer shape than the spec below — dual-path (X-API-Key constant-time HMAC + Bearer HS256 JWT), `UserContext` dataclass, empty-secret deny-all default, "API key first; mismatched key doesn't fall through to JWT" suspicious-traffic guard, Phase 4 JWE migration notes documented inline (two viable swap paths: configure Auth.js for HS256, OR replace `_verify_jwt` with JWE decryption). **Re-scope this task to EXTEND the existing file for Auth.js dashboard integration, NOT create from scratch.** The spec below is the original Phase-4-only shape — follow it as a contract reference for what the dashboard's session-token validation must accept, not as a file-creation instruction. See `jarvis-frontier-upgrade.md` Step 11 entry (F2) for the full audit context.
+
 Create `backend/app/security/auth.py`:
 
 ```python
@@ -9625,6 +9627,20 @@ These are paired by design — extending classifier output without persistence i
 - `app/agent/tools/gmail_send.py:_audit` (or equivalent in-tool audit writer): mirror the same capture-and-write pattern
 - Add `latency_ms` to AuditTrail model in `app/db/models.py`
 
+`2.X-closeout-q2` — SafetyClassifier args-override observability (added 2026-05-25 from Step 6 audit, finding F2)
+- `app/agent/safety.py:SafetyClassifier._args_overrides`: emit a structlog warning when an args-aware escalation fires (e.g., `telegram_send` to non-master chat). ~3 LOC addition.
+- Event shape: `logger.warning("safety_args_override_escalated", tool=tool_name, from_level=base.value, to_level=escalated.value, override_reason="<short>")` where override_reason names the rule that fired (e.g., `"telegram_send_to_non_master"`).
+- **Why:** reading `audit_trail` alone, can't currently distinguish default-APPROVE-from-TOOL_SAFETY_MAP from args-escalated-APPROVE. A future Phase 4 dashboard wanting to surface "how often does args-escalation fire?" needs this signal as a log event.
+- Surfaced by frontier-upgrade backward audit Step 6 (Turn 7 audit, 2026-05-25). See `jarvis-frontier-upgrade.md` Step 6 entry F2 for full disposition rationale.
+
+`2.X-closeout-q3` — TurnEnvelope stop_reason granularity (added 2026-05-25 from Step 7 audit, finding F6)
+- `app/agent/runner.py:_build_envelope`: extend the TurnEnvelope shape with a `stop_reason` field that distinguishes natural completion from tool-budget-hit / rate-limit / cost-cap / exception paths. ~5 LOC structured-output change.
+- Current state: `status` is one of `complete | interrupted | error` — coarse-grained. A Phase 4 dashboard surfacing "why did this turn end?" needs finer granularity to surface tool-budget exhaustion vs natural end vs rate-limit vs cost-cap separately.
+- Suggested values (Anthropic Claude SDK style): `end_turn` (natural completion, no tool calls pending), `tool_budget` (hit MAX_TOOL_CALLS_PER_TURN), `rate_limit` (rate-limiter blocked further dispatch mid-turn), `cost_cap` (gateway refused on hard-cap), `interrupted` (paused on an approval), `error` (exception path).
+- Set in `_build_envelope`; threaded through the existing return shape (additive — no breaking change to consumers).
+- **Why:** the existing `status` is enough for "did the turn complete?" but not for "why didn't it?". Phase 4 dashboard observability needs the granularity.
+- Surfaced by frontier-upgrade backward audit Step 7 (Turn 8+9 audit, 2026-05-25). See `jarvis-frontier-upgrade.md` Step 7 entry F6 for full disposition rationale. Pattern: Turn 17.9 close-out has become the umbrella for "frontier-lens observability gaps for Phase 4 dashboard readiness" (q / q2 / q3 all share this theme).
+
 **Checkpoint:** 
 - Grep `calendar_read` + `calendar_create` descriptions: each must include "does NOT" language, a cross-reference to its sibling, and at least one example query. 
 - Run the prompt-cache stability test (existing): must still pass.
@@ -9636,7 +9652,7 @@ These are paired by design — extending classifier output without persistence i
 
 **Structural role (locked Turn 19 pre-execution): this turn is the measurement floor that Phase 2's deferred-lift discipline depends on, not optional polish.** Turn 19 deferred two frontier lifts (HyDE / query rewriting; LLM-as-judge per-chunk relevance grading) under the principle "retrieval/quality lifts ship on real-usage signal, not speculatively." That principle ONLY works if there's an instrument that can fire the trigger condition — golden queries with known-relevant chunks, recall measurement, regression detection on retrieval quality. Turn 20.5's eval framework IS that instrument. If 20.5 slips, the deferred HyDE + LLM-grading lifts lose their revisit signal entirely and the deferrals become "we'll figure it out later" rather than "we'll measure and decide." So 20.5's eval framework is structurally load-bearing for Phase 2's RAG discipline; it cannot be deferred past Phase 2 close without re-opening the HyDE + LLM-grading deferral decisions.
 
-**Motivation:** Surfaced by the frontier-grade audit. Current state (verified): `backend/tests/` has 11 files, ~50 functions, only one of which (`test_memory_recall_integration`) is a genuine integration test. The rest are unit / structural tests that verify code shape, not feature correctness. There is NO end-to-end test that exercises the Telegram → agent → tool → reply flow.
+**Motivation:** Surfaced by the frontier-grade audit. Current state (verified, updated 2026-06-01 at frontier-upgrade Step 10 audit): `backend/tests/` has 11 files, ~50 functions. TWO are genuine integration tests (`test_memory_recall_integration` + `test_resume_dedup`); `test_resume_dedup` exercises the real graph + checkpointer + DB/Redis on the interrupt-resume path with the LLM faked (`FakeMessagesListChatModel`) and tools mocked (`tool_registry.execute` patched). The rest are unit / structural tests that verify code shape, not feature correctness. Still no full Telegram → agent → tool → reply end-to-end test — that's `closeout-v` (email flow via Pub/Sub → classifier → draft → approval → send) and `closeout-w` (cross-source recall via Telegram message). Channel layer + email classifier have zero coverage at this layer; their only home is `closeout-v`/`closeout-w`, which makes this turn load-bearing for coverage, not just eval.
 
 This gap is invisible at Phase 2 scale (single master notices regressions manually) but compounds badly across Phase 3 onward — research agent / news briefings / browser automation each have their own non-trivial feature surfaces, and without an eval harness + integration backbone, regressions creep in turn-by-turn.
 
@@ -9670,6 +9686,14 @@ Frontier agent systems (Claude, ChatGPT custom GPTs, Cursor) all maintain golden
 - Add a `pytest backend/evals/runner.py` invocation to the existing test command (or a new `make evals` target)
 - Run once to establish baseline scores, commit baseline JSON as `backend/evals/results/baseline.json`
 - Document in README how to run evals locally + how to compare against baseline (`backend/evals/compare.py` — small diff utility)
+
+`2.X-closeout-y` — Line-coverage measurement via coverage.py (added 2026-06-01 from Step 10 audit, finding F3)
+- Add `coverage.py` config to `backend/pyproject.toml`: `[tool.coverage.run]` source = ["app"], omit = ["app/__init__.py", "*/__pycache__/*"]; `[tool.coverage.report]` show_missing = true, skip_covered = false.
+- Generate local HTML report via `pytest --cov=app --cov-report=html backend/tests/` for spot-checking which surfaces lack tests (channel layer + email classifier are the known coverage gaps until `closeout-v`/`w` land).
+- For Turn 20.5: produce the local report + baseline number; commit as `backend/tests/coverage_baseline.txt` for next-pass comparison.
+- CI gate (e.g., fail if line coverage drops below baseline - 5%) added later, when the Phase 4 CI pipeline lands. Don't gate at 20.5 — first establish a stable baseline post `closeout-v`/`w`.
+- **Distinct from `closeout-x`:** `closeout-x` is eval-score regression tracking (LLM-judged quality on the golden suite). `closeout-y` is line-level test coverage of application code. Both ride 20.5's test-infra scope; neither subsumes the other.
+- Surfaced by frontier-upgrade backward audit Step 10 (Turn 14 audit, 2026-06-01). See `jarvis-frontier-upgrade.md` Step 10 entry F3 for the full disposition rationale (reviewer folded the gap into 20.5 rather than spawning a standalone memory note — "test-infra owned by 20.5; don't park-lot it").
 
 **Checkpoint:** 
 - Golden suite (`pytest backend/evals/runner.py`) runs end-to-end in under 60 seconds, scores ≥ 4.0 average across the suite, no hard-rule failures.

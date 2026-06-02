@@ -26,7 +26,7 @@ from app.config import settings
 from app.db.engine import async_session, close_db, init_db
 from app.db.models import UserProfile
 from app.messaging.channels.telegram import get_telegram_channel
-from app.messaging.normalizer import channel_registry
+from app.messaging.channel_registry import channel_registry
 from app.utils.logging import configure_logging, get_logger
 
 

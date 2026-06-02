@@ -43,8 +43,9 @@ class NormalizedMessage:
 class Channel(ABC):
     """Contract every messaging platform must satisfy.
 
-    Subclasses set `platform` to their PlatformName and implement the four
-    async methods. Lifespan wiring constructs an instance via the channel's
+    Subclasses set `platform` to their PlatformName and implement the five
+    async methods (normalize, send_reply, send_alert, send_approval_request,
+    show_typing). Lifespan wiring constructs an instance via the channel's
     lazy factory and registers it with `channel_registry`.
     """
 

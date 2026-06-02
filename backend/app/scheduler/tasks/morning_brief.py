@@ -9,7 +9,7 @@ import asyncio
 
 from app.email.digest import build_and_clear_digest
 from app.messaging.failure_alerter import PRIMARY_ALERT_CHANNEL
-from app.messaging.normalizer import channel_registry
+from app.messaging.channel_registry import channel_registry
 from app.scheduler.task_helpers import reset_async_state_for_task
 from app.scheduler.task_wrapper import critical_task
 from app.utils.logging import get_logger

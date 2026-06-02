@@ -16,7 +16,7 @@ configurable per master preference, swap the constant for a Settings field.
 All three are best-effort — a delivery failure logs but never raises into
 the caller, so a Telegram outage can't take down the agent path.
 """
-from app.messaging.normalizer import channel_registry
+from app.messaging.channel_registry import channel_registry
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)

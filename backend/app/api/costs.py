@@ -11,6 +11,18 @@ Source: LLMUsageLog rows. The LiteLLM success callback writes one row
 per completion call; this endpoint just sums them. No dedup logic
 because each callback fires per-completion (no duplicates).
 
+CAVEAT — what this endpoint is NOT authoritative about:
+LLMUsageLog itself only captures completions that flow through
+`LLMGateway.complete()`. Three current surfaces bypass the gateway and
+write nothing to LLMUsageLog: agent_node (uses ChatLiteLLM via
+FallbackChatLLM directly), the embedding paths (`litellm.aembedding`),
+and Mem0's extraction LLM (`provider: litellm` in Mem0 config). See
+`project_agent_llm_cost_attribution_gap.md` for the full landscape.
+So /api/costs is authoritative for what the GATEWAY tracked — a strict
+subset of real LLM spend. Real spend reconciliation lands with Phase 4
+dashboard cost-visibility work (Option C hybrid helper in the memory
+note closes all three bypass surfaces in one structural change).
+
 Phase 3 will add per-thread / per-tool breakdowns + a daily history
 chart. For Phase 1 just the rollups.
 """
