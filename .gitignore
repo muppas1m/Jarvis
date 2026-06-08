@@ -43,3 +43,6 @@ langfuse_clickhouse_data/
 # Editor/agent caches
 .aider*
 .claude_local/
+
+# Local-only commit depth log — reference for the human, never version-controlled
+commits.md
