@@ -62,7 +62,7 @@ This document is **authoritative for what's actually being executed under the fr
 | Level | Pattern | Example |
 |---|---|---|
 | Umbrella phase | `Phase 1.5` | "Phase 1.5 — Retroactive Foundation Lifts" |
-| Sub-phase by execution slot | `Phase 1.5<letter>` (letter assigned at the consolidation step) | "Phase 1.5a — Pre-Phase-2.5 Lifts" |
+| Sub-phase by execution slot | `Phase 1.5<letter>` (letter assigned at the consolidation step) | "Phase 1.5a — Trigger-Gated MCP-Readiness Lifts" |
 | Individual lift | `Phase 1.5<letter>-<N>` | "Phase 1.5a-1 — Registry MCP-Readiness" |
 | Inserted lift post-consolidation | `.5` suffix on N | "Phase 1.5a-1.5" |
 | Retroactive turn entry | `Turn N` | "Turn 18 — Extractors + Chunker" |
@@ -1706,13 +1706,127 @@ Deeper lens produced 9 candidates; 0 net-new findings — all gaps either F1 (su
 - Forward cross-reference: retrieval surfaces (Turn 19.3+: reranker / search / document_search) NOT BUILT — past halt at Turn 19.2; HyDE + LLM-grading deferred per memory notes; revisit when retrieval lands AND Turn 20.5 eval framework surfaces trigger conditions; idempotency F1 trigger conditions per memory note (first re-ingest produces duplicates OR HTTP docs API ships at Turn 20 OR eval framework surfaces retrieval-skew); **Phase 2 audit closes at Step 19 — no further audit steps**; next stretch per execution halt note: Phase 1.5 lifts ship per slotting decided at consolidation step + forward execution resumes from Turn 19.3
 - Memory notes referenced (all 5 RAG-arc deferreds reaffirmed at this surface): `project_ingestion_idempotency_deferral.md` (F1 — reaffirm-with-explicit-recommendation; rating-relevant per reviewer), `project_contextualizer_concurrent_dispatch_deferral.md` (spine #3 reaffirm), `project_embedding_cost_attribution_gap.md` (spine #4 reaffirm), `project_hyde_deferral.md` (forward-only reaffirm — retrieval not built), `project_llm_relevance_grading_deferral.md` (forward-only reaffirm — retrieval not built)
 
+### Step 20 — Phase 1.5 Consolidation (terminal step of the backward audit)
+
+**Overall rating:** N/A — planning step, not an audit surface. — **Status:** final — sign-off 2026-06-08
+
+**Scope:**
+Terminal step of the backward audit (Pre-Phase-0 Steps 1-2 + Phase 1 audit Steps 3-11 + Phase 2 audit Steps 12-19 + Step 20 consolidation). **NOT a code audit** — dependency-correctness + completeness planning. Four deliverables per directive:
+
+1. Final slot assignments for the 4 Phase 1.5 lifts surfaced at audit Steps 3 / 5 / 8.
+2. Ordering + dependency edges within sub-phases + cross-sub-phase + against base plan (Phase 2.5 + Phase 4 anchors verified live).
+3. Migration-numbering coupling flag on 1.5b-1 (per `project_phase1_monolithic_migration.md`).
+4. Deferred-with-trigger memory note sweep — inventory, classify (FIXED / folded / stay-deferred / standing / process), flag forward-phase coupling.
+
+After this step's outputs (4 lift slot-header patches landed + 1 template-example reframe + Phase 1.5 section preamble expansion + memory-note adjacency cross-reference added both ways + MEMORY.md ledger refreshed): Phase 1.5 lifts execute per their respective triggers; forward execution resumes from Turn 19.3 (retrieval surfaces — reranker / search / document_search).
+
+### Task 1 — Final slot assignments
+
+| Audit-time placeholder | **Final slot (Step 20)** | Title | Origin step |
+|---|---|---|---|
+| `Phase 1.5a-N` | **`Phase 1.5a-1`** | Tool registry MCP descriptor export | Step 8 (Turn 10) |
+| `Phase 1.5a-N+1` | **`Phase 1.5a-2`** | Tool registry MCP server endpoint | Step 8 (Turn 10) |
+| `Phase 1.5b-N` (Step 3) | **`Phase 1.5b-1`** | Schema multi-user readiness (user_id columns + backfill) | Step 3 (Turn 4) |
+| `Phase 1.5b-N` (Step 5) | **`Phase 1.5b-2`** | Mem0Client USER_ID multi-user readiness (wrap approach) | Step 5 (Turn 6) |
+
+Sub-phase letters: `a` = Trigger-Gated MCP-Readiness (parallel to Phase 2.5, NOT pre-Phase-2.5); `b` = Pre-Phase-4 Multi-User-Readiness. Sub-phase `c` not introduced. **The 4 audit-surfaced lifts ARE the complete Phase 1.5 set** — no further lifts surfaced across Steps 1-19.
+
+### Task 2 — Ordering + dependency edges (verified)
+
+**Within Phase 1.5a — HARD dependency:**
+- **1.5a-1 → 1.5a-2: HARD.** 1.5a-2's proposed `backend/app/api/mcp.py` calls `tool_registry.export_mcp_descriptors()` directly (per lift entry code sketch); method must exist first. Documented in 1.5a-2's `Slot:` line.
+
+**Within Phase 1.5b — INDEPENDENT (verified live at Step 20):**
+- **1.5b-1 ↔ 1.5b-2: NO hard dependency.** Verified by live grep at Step 20: `backend/app/memory/mem0_client.py:52,97` uses `mem0_memories` pgvector collection — Mem0's own backing store, NOT the `memory_episodes` ORM table (which IS in 1.5b-1's 9-table schema-lift scope). Parameterizing `Mem0Client.USER_ID` touches zero columns from the 9-table schema lift. **Reorderable.**
+- **SOFT preference: schema-first (1.5b-1 → 1.5b-2).** Reasoning: (a) schema is the canonical anchor for "user_id is a real column"; (b) schema has the trickier migration-numbering coordination (Task 3 below); (c) Mem0 wrap is the smaller ~20 LOC change, comfortable as trailing lift in the bucket. **Both lifts' Slot lines patched at Step 20** to make "no hard dependency; reorderable" explicit so a future executor knows the order can flip.
+
+**Cross-sub-phase (1.5a ↔ 1.5b): INDEPENDENT.** No coupling. Execute by trigger order, not by letter.
+
+**Anchoring against live base plan (verified at Step 20):**
+
+- **Phase 2.5 anchoring** — Phase 2.5 (plan lines 6861-7193, Tasks 2.5M-1 through 2.5M-8) wraps EXISTING outbound integrations (calendar / telegram / whatsapp / news / booking) as MCP servers. It does NOT expose the agent's own in-process tool registry as MCP. **1.5a is parallel to Phase 2.5, NOT a blocker for it.** Anchor for 1.5a is trigger-gated (real Claude Desktop / Cursor MCP-client use case OR Phase 3 multi-agent cross-process handoff). **Sub-phase framing reconciliation per reviewer correction:** dropped "Pre-Phase-2.5 Lifts" wording (formerly in template example at line 65 of this upgrade doc) → "Trigger-Gated MCP-Readiness Lifts" framing. Both line 65 + Phase 1.5 section preamble patched at Step 20.
+- **Phase 4 anchoring** — 1.5b blocks Phase 4 Tasks 4.13 (line 8525) / 4.14 (line 8632) / 4.18 (line 8904) / 4.18b (line 8937). All 4 headers verified live at stated plan lines. **1.5b is pre-Phase-4-hard.** Must land before Phase 4 multi-user work begins, OR the first multi-user task ships as a Phase-1.5b-then-feature compound execution.
+
+### Task 3 — Migration-numbering coupling flag (1.5b-1)
+
+Per `project_phase1_monolithic_migration.md`: 1.5b-1 adds a new Alembic migration. **Prefix chosen at LIFT-EXECUTION TIME** via `ls backend/alembic/versions/` + `\dt` against running DB. **NOT hardcoded at Step 20 consolidation** — would be wrong-axis verification.
+
+1.5b-1 lift entry already contains the full downstream-impact table covering: Task 2.12 (`003_email_tables` — no-op per monolithic-migration note); Task 2.16b (`004_documents` — no-op); Turn 17.8 close-out (`004_email_logs_meta` — real; renumber on conflict); Turn 17.9 close-out (`005_audit_trail_latency` — real; renumber on conflict); Phase 3 Task 3.10 (`005_browser_audit` — real; renumber on conflict); Phase 4 Task 4.11b (`006_messaging_tables` — real; renumber on conflict).
+
+**At lift-execution time:** verify what's actually shipped via `ls` + `\dt`, pick the next sequential prefix for THIS lift's migration, AND update affected downstream plan-stated migration numbers in `jarvis-implementation-plan.md` + this upgrade doc's close-out forward notes. **No Step 20 action required** beyond verifying the lift entry's caveat reads correctly post-slot-assignment (verified — caveat verbatim preserved across the slot-header patch).
+
+### Task 4 — Deferred-with-trigger memory note sweep
+
+Inventoried all 39 `project_*.md` notes in `.claude/projects/.../memory/` (8 `feedback_*.md` notes are methodology, NOT deferred-with-trigger — excluded from this sweep). **39 total: 38 deferred-concern/standing + 1 process note** (per reviewer count correction; previous synthesis miscount of 38 corrected pre-write).
+
+**FIXED-AND-CLOSED (4 notes — already reflected in ledger):**
+- `project_gmail_approval_resume_fails_no_langgraph_thread.md` — fixed pre-Step-9 (prefix-dispatch at router.py:118-120 + `_resolve_gmail_approval` handler).
+- `project_gmail_approval_duplicate_race.md` — fixed Turn 16.5 (re-ordered gate at gmail_pubsub.py:108-126 + 25-line in-code rationale docstring).
+- `project_email_action_capability_gap.md` — Approve/Reject path fixed Turn 17.5 (gmail_send + `_resolve_gmail_approval`); conversational "send it" half explicitly NOT-shipped by design (opted-out scope, not a deferred trigger).
+- `project_email_responder_fabricates_content.md` — fixed Turn 16.5 (anti-fabrication + ask-back rules in DRAFT_PROMPT).
+
+**FOLDED-INTO-LIFT (1 note):**
+- `project_phase1_monolithic_migration.md` — operationalized in 1.5b-1's migration-numbering verification protocol + downstream-impact table. Note stays active as standing pre-migration verification lesson (`\dt` before every migration creation).
+
+**STAY-DEFERRED, Phase-3-coupled (12 notes):**
+`project_trivial_message_over_invocation` • `project_email_responder_sender_name` (Phase 3 auto-send) • `project_cross_source_recall_pattern` • `project_subgraph_topology_for_phase3_or_4` • `project_calendar_output_enrichment_phase3` • `project_archived_tool_result_no_fetch_path` • `project_per_tool_execution_timeout_gap` • `project_gmail_handler_decoupling_deferral` • `project_hyde_deferral` (Turn 20.5 eval trigger) • `project_llm_relevance_grading_deferral` (Turn 20.5 eval trigger) • `project_contextualizer_concurrent_dispatch_deferral` • `project_ingestion_idempotency_deferral` (Step 19 F1).
+
+**STAY-DEFERRED, Phase-4-coupled (11 notes):**
+`project_seeder_force_cascade_risk` • `project_webhook_secret_naming_inconsistency` • `project_oauth_scope_minimization_production_hardening` • `project_module_level_mem0_instantiation_smell` • `project_agent_node_bypasses_gateway_fallback` (cost-attribution half active; FallbackChatLLM half landed Turn 17.7) • `project_agent_llm_cost_attribution_gap` (3-surface) • `project_embedding_cost_attribution_gap` (3-surface sibling) • `project_groq_error_message_string_match_dependency` (canary in place) • `project_n_provider_fallback_deferral` • `project_persistent_tunnel_deferral` • `project_langfuse_stack_weight_deferral`.
+
+**STANDING OPERATIONAL / REFERENCE (10 notes — never "fire"; applied at code touch points):**
+`project_no_hallucinated_actions` (doctrine) • `project_cost_cap_redis_only` • `project_mem0_silent_drop_on_rpm` • `project_docker_compose_restart_does_not_reload_env` • `project_async_state_rebind_pattern` • `project_open_weights_tool_schema_and_conversation_poisoning` • `project_mem0_contamination_test_residue` • `project_self_send_bounces` • `project_audit_ratings_turn_11_through_17` (reference) • `project_execution_halt_2026_05_25_frontier_upgrade_pass` (context).
+
+**PROCESS NOTE (1 — NOT deferred-with-trigger; acknowledged for sweep completeness per reviewer):**
+- `project_coder_skill_load_timing.md` — process/reminder note specifying when to load `.claude/skills/coder/SKILL.md` (after backward audit drafted + Phase 1.5 slotted, just BEFORE forward execution resumes from Turn 19.3). Not classified under fired/deferred/standing — it's a one-shot process trigger. **Currently ACTIVE:** Step 20 IS the slotting; load the coder skill before Turn 19.3 greenlight per the note's concrete trigger.
+
+**Tally:** 4 fixed + 1 folded + 12 P3-deferred + 11 P4-deferred + 10 standing + 1 process = **39**. Balance preserved per reviewer count correction.
+
+### Forward-phase coupling flags (Step 20 sweep output)
+
+Three couplings worth explicit forward-carry:
+
+1. **`project_module_level_mem0_instantiation_smell.md` ↔ Phase 1.5b-2 (Mem0 wrap) — ADJACENT, NOT BUNDLED** (per Step 20 Q2 sign-off). Both touch the Mem0Client / MemoryManager surface. **Different concerns** (lazy-init = import-time safety; USER_ID = multi-user parameterization); **different files** (`app/memory/manager.py` + 5 call sites vs `app/memory/mem0_client.py`). Two architectural units per `feedback_architectural_units_land_complete.md` split-at-stable-interface-boundary discipline. **Adjacency cross-reference added BOTH WAYS at Step 20:** memory note's Related-notes section + 1.5b-2's Status line + 1.5b-2's Slot section + 1.5b-2's Cross-references line all note "adjacent — opportunistic-co-execution candidate; whoever executes either checks the other and MAY bundle if already in `app/memory/`; captures efficiency without coupling unrelated changes into one commit." **Lazy-init stays a standing ship-any-time improvement, NOT gated on 1.5b-2.**
+2. **`project_oauth_scope_minimization_production_hardening.md` ↔ Phase 4 multi-user (post-1.5b).** Trigger is Phase 4 multi-user; 1.5b lands BEFORE Phase 4; OAuth hardening landscape becomes execution-ready immediately after 1.5b ships. **No Step 20 action required;** flag for Phase 4 sequencing executor (Step 12 audit already expanded note with the full hardening landscape including refresh-token-plaintext-print + multi-operator scrollback trigger).
+3. **3-surface gateway-bypass cluster — `project_agent_llm_cost_attribution_gap.md` + `project_agent_node_bypasses_gateway_fallback.md` (cost-attribution half) + `project_embedding_cost_attribution_gap.md` ↔ Phase 4 dashboard.** Not a Phase 1.5 lift; deferred to Phase 4 cost-by-surface work. **Flag for Phase 4 executor:** Option C hybrid helper closes all three surfaces in one pass (agent_node highest-frequency; embedding $0 today via local Ollama; Mem0 extraction ~$0.05/day untracked).
+
+### Methodology note
+
+Step 20 is the terminal planning step of the backward audit. Discipline applied:
+- **Verification-before-claim** on dependency edges — live grep of `mem0_client.py:52,97` confirmed Mem0 backing-store independence from schema-lift table set, turning a presumed SOFT preference into a VERIFIED independence (`feedback_verify_before_claiming.md`).
+- **Sub-phase framing reconciliation per reviewer correction** — dropped "Pre-Phase-2.5 Lifts" template example (line 65) → "Trigger-Gated MCP-Readiness Lifts" framing, since 1.5a is parallel to Phase 2.5, not gating on it.
+- **Q1 (SOFT 1.5b ordering) + Q2 (Mem0 lazy-init separate, NOT bundled) per reviewer sign-off** — both decisions reflected in lift Slot lines + adjacency cross-references in both directions.
+- **Count discipline applied** — 39 project notes (38 deferred-concern/standing + 1 process note per reviewer correction); previous synthesis miscount of 38 corrected pre-write.
+- **Memory note adjacency cross-reference added both ways** (memory note Related-notes + lift entry Cross-references + lift entry Status line + lift entry Slot line) per `feedback_forward_prompts_name_files_to_read.md` discipline applied to forward-coupling flags (anchor at all surfaces, not just one).
+- **Silence protocol holds for the consolidation step** — Tasks 1-3 are mechanical assignment + verification; only Task 4 sweep is information-dense, presented as categorized inventory rather than per-note narrative. Three couplings flagged in dedicated subsection — the rest of the sweep is index-only.
+
+The backward audit (Turn 1 → Turn 19.2) closes at Step 20. Next stretch per `project_execution_halt_2026_05_25_frontier_upgrade_pass.md` + `project_coder_skill_load_timing.md`: load coder skill (process trigger active NOW) → Phase 1.5 lifts execute per their respective triggers (1.5a trigger-gated; 1.5b pre-Phase-4-hard) → forward execution resumes from Turn 19.3 (retrieval surfaces — reranker / search / document_search).
+
+### Cross-references
+
+- Base plan: Phase 2.5 (lines 6861-7193, Tasks 2.5M-1 through 2.5M-8) — verified for 1.5a parallel-not-blocking anchoring; Phase 4 Tasks 4.13 (8525) / 4.14 (8632) / 4.18 (8904) / 4.18b (8937) — verified for 1.5b pre-Phase-4-hard anchoring.
+- Base plan amended at this step: **none** (consolidation is upgrade-doc + memory-note work, not plan-task work).
+- In-place code fixes landed at audit-write time: **none** (planning step — no code touched).
+- Memory notes saved at this step: **none**.
+- Memory notes amended at this step: `project_module_level_mem0_instantiation_smell.md` (Related-notes section — added 1.5b-2 adjacency cross-reference with stay-separable + opportunistic-bundling framing per Step 20 Q2 sign-off).
+- MEMORY.md ledger: refreshed line 24 (module-Mem0 smell entry) to acknowledge 1.5b-2 adjacency.
+- Upgrade-doc patches landed at Step 20: **11 patches** — line 65 template example (Pre-Phase-2.5 → Trigger-Gated MCP-Readiness); Phase 1.5 section preamble (added sub-phase semantics block + live-verification rationale); 4 lift entry headers (drop "(slot TBD)" + final slot assignment); 4 lift entry Status lines (final slot + Step 20 dependency framing + adjacency cross-reference for 1.5b-2); 4 lift entry Slot lines (final slot + dependency edges + verified-independence wording for 1.5b lifts); 1.5b-2 Cross-references line (strengthened adjacency wording).
+- Backward cross-reference: closes Step 19's forward cross-reference ("Phase 1.5 lifts ship per slotting decided at consolidation step + forward execution resumes from Turn 19.3"); closes the audit's standing forward references to "(slot TBD)" / "position number assigned at the consolidation step" / "sub-phase letter expected" across all 4 lift entries; closes audit Steps 3 (1.5b-1 surfaced) / 5 (1.5b-2 surfaced) / 8 (1.5a-1 + 1.5a-2 surfaced) lift-slotting forward references.
+- Forward cross-reference: Phase 1.5 lifts execute per individual trigger conditions (1.5a-1 + 1.5a-2: real MCP-client use case OR Phase 3 multi-agent; 1.5b-1 + 1.5b-2: pre-Phase-4-hard, must land before first Phase 4 multi-user task); load `.claude/skills/coder/SKILL.md` per `project_coder_skill_load_timing.md` BEFORE Turn 19.3 greenlight (process trigger ACTIVE NOW); Phase 4 sequencing executor inherits 3 forward-coupling flags (Mem0-lazy-init adjacent / OAuth hardening immediately-ready / 3-surface gateway-bypass Option C).
+- Memory notes referenced: all 39 sweep notes (categorized in Task 4 above); explicit forward-coupling notes — `project_module_level_mem0_instantiation_smell.md` (adjacency added both ways) + `project_oauth_scope_minimization_production_hardening.md` (immediately-ready post-1.5b) + 3-surface gateway-bypass cluster (Phase 4 dashboard Option C) + `project_coder_skill_load_timing.md` (process trigger ACTIVE NOW).
+
 ## Phase 1.5 — Retroactive Foundation Lifts (Backward Audit Output)
 
-> Sub-phase letters (`a` / `b` / `c`) and per-lift numbering assigned at the consolidation step (terminal step of the backward audit) based on dependencies surfaced across all audit steps. Per-lift entries use the Phase 1.5 lift template described above.
+> Sub-phase letters and per-lift numbering **assigned at Step 20 consolidation (2026-06-08)** based on dependencies surfaced across all audit steps + live-code verification (Mem0Client `mem0_memories` collection independence; Phase 2.5 / Phase 4 base-plan anchors). Per-lift entries use the Phase 1.5 lift template described above.
+>
+> **Sub-phase semantics (post-consolidation):**
+> - **Phase 1.5a — Trigger-Gated MCP-Readiness Lifts** (1.5a-1 + 1.5a-2). NOT pre-Phase-2.5 — **parallel to** Phase 2.5 (Phase 2.5 wraps existing OUTBOUND integrations as MCP servers — calendar / telegram / whatsapp / news / booking; 1.5a exposes the in-process tool registry itself as MCP). **Trigger:** real MCP-client use case crystallizes (Claude Desktop / Cursor) OR Phase 3 multi-agent decides on cross-process tool handoffs. **1.5a-1 → 1.5a-2 is a HARD dependency** (server endpoint imports the descriptor exporter).
+> - **Phase 1.5b — Pre-Phase-4 Multi-User-Readiness Lifts** (1.5b-1 + 1.5b-2). Blocks Phase 4 Tasks 4.13 (plan line 8525) / 4.14 (8632) / 4.18 (8904) / 4.18b (8937). **The two lifts are INDEPENDENT** — no hard dependency. Verified live: `mem0_client.py:52,97` uses Mem0's own `mem0_memories` pgvector collection, NOT the user-scoped ORM tables (which are in 1.5b-1's schema-lift scope). **Reorderable.** SOFT preference is schema-first (1.5b-1 → 1.5b-2): canonical anchor + trickier migration-numbering coordination on the schema side; ~20 LOC Mem0 wrap as trailing lift.
+> - **Cross-sub-phase (1.5a ↔ 1.5b): INDEPENDENT.** Execute by trigger order, not by letter.
 
-### Phase 1.5a-N (slot TBD) — Tool registry MCP descriptor export
+### Phase 1.5a-1 — Tool registry MCP descriptor export
 
-**Status:** proposed — surfaced at Step 8 (Turn 10 audit, 2026-05-25). Sub-phase letter expected `a` (descriptor export has no Phase-4-coupling; ships independently of multi-user). Position number assigned at the consolidation step. **First of two sequential Phase 1.5a lifts** split from F3 (the second is Phase 1.5a-N+1 — MCP server endpoint, below).
+**Status:** proposed — surfaced at Step 8 (Turn 10 audit, 2026-05-25). **Slot assigned at Step 20 consolidation (2026-06-08):** sub-phase `a` (Trigger-Gated MCP-Readiness — parallel to Phase 2.5, NOT pre-Phase-2.5). **First of two sequential Phase 1.5a lifts** split from F3 (the second is Phase 1.5a-2 — MCP server endpoint, below).
 
 **Live-code observation:**
 - `backend/app/agent/tools/registry.py:248` defines `tool_registry` singleton holding in-process Python tool objects via `_entries: dict[str, _ToolEntry]`.
@@ -1769,17 +1883,17 @@ def export_mcp_descriptors(self) -> list[dict[str, Any]]:
     return out
 ```
 
-~30-50 LOC including the method, a small dedicated test (`backend/tests/test_tool_registry_mcp_export.py`), and any helper utilities for schema normalization. Useful WITHOUT the server (Phase 1.5a-N+1):
+~30-50 LOC including the method, a small dedicated test (`backend/tests/test_tool_registry_mcp_export.py`), and any helper utilities for schema normalization. Useful WITHOUT the server (Phase 1.5a-2):
 - Phase 3 internal multi-agent handoffs (one Jarvis subgraph exports its tools to another)
 - Auto-generated tool documentation (dashboard or README artifact)
 - MCP-spec compliance validation (CI assert: every registered tool's descriptor passes MCP schema check)
 - Test harness fixtures (mock external MCP clients consuming descriptors)
 
 **Scope exclusions (explicit boundary against scope creep):**
-- MCP server endpoint (FastAPI route + discovery metadata + auth model) → **separate Phase 1.5a-N+1 lift below**
+- MCP server endpoint (FastAPI route + discovery metadata + auth model) → **separate Phase 1.5a-2 lift below**
 - Per-user tool isolation (which tools each MCP client can see) → **Phase 4 multi-user work**
 - Tool output schema definition + enforcement → **Phase 3+ work when tool surface evolves beyond strings**; outputSchema field can stay absent in descriptors for now
-- MCP capability negotiation (server version, supported MCP spec version) → **part of Phase 1.5a-N+1**
+- MCP capability negotiation (server version, supported MCP spec version) → **part of Phase 1.5a-2**
 
 **Verification plan:**
 - Unit test: `tool_registry.export_mcp_descriptors()` returns one descriptor per registered tool with `name`, `description`, and `inputSchema` fields populated.
@@ -1787,17 +1901,17 @@ def export_mcp_descriptors(self) -> list[dict[str, Any]]:
 - MCP spec compliance: descriptors match Anthropic's published MCP tool descriptor shape (named-field check; not full protocol).
 - Backward compatibility: existing `tool_registry.execute()`, `select_relevant_tools()`, `all_names()` paths unchanged and continue to work.
 
-**Slot:** `Phase 1.5a-N` (sub-phase letter `a` — no Phase-4-coupling; position number assigned at the consolidation step). Blocks Phase 1.5a-N+1 (MCP server endpoint depends on descriptors). Does NOT block any Phase 2 or Phase 3 work.
+**Slot:** `Phase 1.5a-1` (assigned at Step 20 consolidation, 2026-06-08). Blocks **Phase 1.5a-2** (MCP server endpoint depends on descriptors — HARD dependency). Does NOT block any Phase 2, Phase 2.5, or Phase 3 work; **parallel to Phase 2.5 outbound-integration wrappers**, not pre-Phase-2.5.
 
 **Cross-references:**
 - Surfaced at audit step: Step 8 (Turn 10 audit) — see Backward Audit Records section above (F3 split rationale)
-- Sibling Phase 1.5a lift: Phase 1.5a-N+1 (MCP server endpoint — sequential dependency)
+- Sibling Phase 1.5a lift: Phase 1.5a-2 (MCP server endpoint — sequential dependency)
 - Base plan reference: Task 1.11 (lines 3322-3577) — tool registry definition
 - Split rationale memory note: `feedback_architectural_units_land_complete.md` — "split at stable interface boundaries"
 
-### Phase 1.5a-N+1 (slot TBD) — Tool registry MCP server endpoint
+### Phase 1.5a-2 — Tool registry MCP server endpoint
 
-**Status:** proposed — surfaced at Step 8 (Turn 10 audit, 2026-05-25). Sub-phase letter expected `a` (sibling to N descriptor lift). Position number assigned at the consolidation step. **Second of two sequential Phase 1.5a lifts** split from F3 (depends on Phase 1.5a-N descriptors lift).
+**Status:** proposed — surfaced at Step 8 (Turn 10 audit, 2026-05-25). **Slot assigned at Step 20 consolidation (2026-06-08):** sub-phase `a` (sibling to 1.5a-1). **Second of two sequential Phase 1.5a lifts** split from F3 — **HARD dependency on Phase 1.5a-1** (descriptor exporter must exist before server endpoint can import it).
 
 **Live-code observation:**
 - No MCP server endpoint anywhere in the FastAPI app (verified by grep on `app.api`).
@@ -1811,8 +1925,8 @@ Same Task 1.11 (lines 3322-3326) quote applies — base plan's tool registry is 
 
 **Discrepancies surfaced:**
 - None between live code and plan markdown.
-- Plan-vs-frontier gap (same shape as Phase 1.5a-N).
-- **Phase-4-coupling discrepancy:** the lift's auth model decision is tied to Phase 4 multi-user shape. Landing single-master auth at Phase 1.5a-N+1 risks migration when Phase 4 multi-user lands. Trigger-gated execution accommodates this.
+- Plan-vs-frontier gap (same shape as Phase 1.5a-1).
+- **Phase-4-coupling discrepancy:** the lift's auth model decision is tied to Phase 4 multi-user shape. Landing single-master auth at Phase 1.5a-2 risks migration when Phase 4 multi-user lands. Trigger-gated execution accommodates this.
 
 **Comparison target:**
 
@@ -1820,7 +1934,7 @@ Anthropic's reference MCP server implementations (Python + TypeScript SDKs); Cla
 
 **Proposed lift:**
 
-Two routes + discovery metadata, depending on Phase 1.5a-N descriptors:
+Two routes + discovery metadata, depending on Phase 1.5a-1 descriptors:
 
 ```python
 # backend/app/api/mcp.py (new file)
@@ -1888,18 +2002,18 @@ Execution-time decision: pick the shape that matches Phase 4 multi-user state at
 - Discovery metadata `GET /mcp/v1/` matches Anthropic MCP spec.
 - Backward compatibility: existing `/api/*` routes unchanged.
 
-**Slot:** `Phase 1.5a-N+1` (sub-phase letter `a` — sibling to N; position number assigned at the consolidation step). **Depends on:** Phase 1.5a-N (Tool descriptor export). **Trigger condition for execution:** real MCP-client use case crystallizes (master wants Jarvis tools accessible from Claude Desktop OR Cursor) OR Phase 3 multi-agent decides on cross-process tool handoffs. **Phase 4 coupling:** auth shape decision pulls in Phase 4 multi-user state; execute after Phase 4 auth has shipped, OR ship static bearer token with documented migration path.
+**Slot:** `Phase 1.5a-2` (assigned at Step 20 consolidation, 2026-06-08). **HARD dependency on:** Phase 1.5a-1 (Tool descriptor export — `api/mcp.py` imports `tool_registry.export_mcp_descriptors()`). **Trigger condition for execution:** real MCP-client use case crystallizes (master wants Jarvis tools accessible from Claude Desktop OR Cursor) OR Phase 3 multi-agent decides on cross-process tool handoffs. **Phase 4 coupling:** auth shape decision pulls in Phase 4 multi-user state; execute after Phase 4 auth has shipped, OR ship static bearer token with documented migration path.
 
 **Cross-references:**
 - Surfaced at audit step: Step 8 (Turn 10 audit) — see Backward Audit Records section above (F3 split rationale)
-- Sibling Phase 1.5a lift: Phase 1.5a-N (Tool descriptor export — sequential prerequisite)
+- Sibling Phase 1.5a lift: Phase 1.5a-1 (Tool descriptor export — sequential prerequisite)
 - Base plan reference: Task 1.11 (lines 3322-3577) — tool registry definition; Phase 4 Tasks 4.18 / 4.18b — backend auth + Auth.js v5 (coupling for auth shape decision)
 - Split rationale memory note: `feedback_architectural_units_land_complete.md` — "split at stable interface boundaries"
 - Memory notes referenced: none yet — execution-time auth-shape decision will surface relevant notes
 
-### Phase 1.5b-N (slot TBD) — Schema multi-user readiness (add user_id columns + backfill)
+### Phase 1.5b-1 — Schema multi-user readiness (add user_id columns + backfill)
 
-**Status:** proposed — surfaced at Step 3 (Turn 4 audit, 2026-05-25). Sub-phase letter expected `b` (pre-Phase-4 lifts, per Explore agent dependency analysis). Position number assigned at the consolidation step.
+**Status:** proposed — surfaced at Step 3 (Turn 4 audit, 2026-05-25). **Slot assigned at Step 20 consolidation (2026-06-08):** sub-phase `b` (Pre-Phase-4 Multi-User-Readiness). **No hard dependency on 1.5b-2** — reorderable per Step 20; SOFT preference for schema-first (canonical anchor + trickier migration-numbering coordination per the in-entry downstream-impact table below).
 
 **Live-code observation:**
 - `backend/app/db/models.py:51-297` defines 11 ORM tables; `001_initial_schema.py` migration creates them.
@@ -1978,7 +2092,7 @@ This lift is **schema-only**: gets `user_id` columns in place + backfilled so Ph
 - Existing app code paths (Phase 1-2 functionality) continue to work — writers must SET user_id to master_uuid (lift includes minimal writer-side change: throwaway `user_id=master_uuid` default on all inserts; removed when Phase 4 wires real user_id from session).
 - Re-run existing Phase 1 test suite — all tests pass against the new schema.
 
-**Slot:** `Phase 1.5b-N` (sub-phase letter + position number assigned at the consolidation step). Blocks Phase 4 (specifically Tasks 4.13+ non-master intent routing + 4.18 Auth.js integration + 4.18b Auth.js v5 frontend).
+**Slot:** `Phase 1.5b-1` (assigned at Step 20 consolidation, 2026-06-08). Blocks Phase 4: Task 4.13 (non-master intent routing, plan line 8525) + Task 4.14 (auto-responder, plan line 8632) + Task 4.18 (backend auth, plan line 8904) + Task 4.18b (Auth.js v5 frontend, plan line 8937). **No hard dependency on 1.5b-2** — verified live: Mem0Client uses its own `mem0_memories` pgvector collection at `mem0_client.py:52,97`, NOT the user-scoped ORM tables in this lift's 9-table scope. Reorderable; SOFT preference is schema-first.
 
 **Cross-references:**
 - Surfaced at audit step: Step 3 (Turn 4 audit) — see Backward Audit Records section above
@@ -1987,9 +2101,9 @@ This lift is **schema-only**: gets `user_id` columns in place + backfilled so Ph
 - Memory notes: `project_phase1_monolithic_migration.md` (monolithic migration context — this lift adds a new migration on top of the monolithic baseline)
 - Blocks: Phase 4 Tasks 4.13 (non-master intent routing), 4.14 (auto-responder), 4.18 (backend auth), 4.18b (frontend Auth.js v5)
 
-### Phase 1.5b-N (slot TBD) — Mem0Client USER_ID multi-user readiness (wrap approach)
+### Phase 1.5b-2 — Mem0Client USER_ID multi-user readiness (wrap approach)
 
-**Status:** proposed — surfaced at Step 5 (Turn 6 audit, 2026-05-25). Sub-phase letter expected `b` (pre-Phase-4, sibling to Step 3's F1 schema lift). Position number assigned at the consolidation step.
+**Status:** proposed — surfaced at Step 5 (Turn 6 audit, 2026-05-25). **Slot assigned at Step 20 consolidation (2026-06-08):** sub-phase `b` (Pre-Phase-4 Multi-User-Readiness, sibling to 1.5b-1 schema lift). **No hard dependency on 1.5b-1** — reorderable per Step 20; SOFT preference is schema-first. **Adjacency cross-reference (Step 20 forward-coupling flag):** `project_module_level_mem0_instantiation_smell.md` lazy-init refactor (5 sites: `responder.py:4` + `nodes.py:68` + `context.py:19` + `builtin_memory.py:20` + `api/memory.py:20`) shares the Mem0Client / MemoryManager surface — whoever executes 1.5b-2 OR the lazy-init refactor checks the other and MAY opportunistically bundle if already in `app/memory/`. Both stay separable per `feedback_architectural_units_land_complete.md` split-at-stable-interface-boundary discipline; lazy-init is NOT gated on 1.5b-2.
 
 **Live-code observation:**
 - `backend/app/memory/mem0_client.py:89` declares `USER_ID = "master"` as a class-level constant.
@@ -2099,13 +2213,13 @@ Alternative: lift to per-user `Mem0Client` instances via a factory function (`ge
 - New test: `await mem0.add("fact A", user_id="user_a")` + `await mem0.add("fact B", user_id="user_b")` then `await mem0.search("fact", user_id="user_a")` returns only fact A (verifies user_id propagates as filter scope; verifies isolation between users)
 - Existing Phase 1 test suite passes unchanged
 
-**Slot:** `Phase 1.5b-N` (sub-phase letter + position number assigned at the consolidation step). Sibling lift to Step 3's F1 (schema multi-user). Both Phase 1.5b; ordering decided at the consolidation step (likely schema first, then code-level Mem0 wrap; but the consolidation step confirms).
+**Slot:** `Phase 1.5b-2` (assigned at Step 20 consolidation, 2026-06-08). Sibling lift to 1.5b-1 (schema multi-user). **No hard dependency on 1.5b-1** — verified independent at Step 20: Mem0Client uses its own `mem0_memories` pgvector collection (`mem0_client.py:52,97`), not the user-scoped ORM tables. Reorderable; SOFT preference is schema-first (canonical anchor + trickier migration-numbering coordination on the schema side; ~20 LOC Mem0 wrap as trailing lift).
 
 **Cross-references:**
 - Surfaced at audit step: Step 5 (Turn 6 audit) — see Backward Audit Records section above
 - Sibling Phase 1.5b lift: Step 3 F1 (schema multi-user readiness)
 - Base plan reference: Task 1.7 (lines 2103-2135) — Mem0Client class definition
-- Memory notes referenced: `project_module_level_mem0_instantiation_smell.md` (related caller-side smell — separate concern, not in scope here)
+- Memory notes referenced: `project_module_level_mem0_instantiation_smell.md` (**adjacent — Step 20 forward-coupling flag**: shares Mem0Client / MemoryManager surface; opportunistic-co-execution candidate per Step 20 consolidation; stay-separable per `feedback_architectural_units_land_complete.md` split-at-stable-interface-boundary; lazy-init NOT gated on 1.5b-2 — captures efficiency without coupling unrelated changes in one commit)
 - Blocks: Phase 4 Tasks 4.13 (non-master intent routing), 4.14 (auto-responder), 4.18 (backend auth), 4.18b (frontend Auth.js v5)
 
 _(populated by all audit steps; consolidated at the consolidation step)_
