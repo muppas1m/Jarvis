@@ -9,6 +9,7 @@ Mounted under `/api` by main.py. Two tiers:
 
   PROTECTED routers — gated by Depends(get_current_user):
     - chat, approvals, memory, costs    (Turn 12b)
+    - documents                         (Turn 20 — upload/search the RAG corpus)
 
 Turn 12a ships the public tier + the auth dependency itself. Turn 12b
 mounts the protected tier under a sub-router with the auth dependency
@@ -20,6 +21,7 @@ from fastapi import APIRouter, Depends
 from app.api.approvals import router as approvals_router
 from app.api.chat import router as chat_router
 from app.api.costs import router as costs_router
+from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.memory import router as memory_router
 from app.api.webhooks.gmail import router as gmail_webhook_router
@@ -51,5 +53,6 @@ protected_router.include_router(chat_router)
 protected_router.include_router(approvals_router)
 protected_router.include_router(memory_router)
 protected_router.include_router(costs_router)
+protected_router.include_router(documents_router)
 
 api_router.include_router(protected_router)

@@ -31,8 +31,9 @@ to ``EXCERPT_CHARS`` regardless of document size.
 Deferred lifts (memory-noted, see ``project_ingestion_idempotency_deferral.md``
 and friends):
 
-- Idempotency on re-ingest of same file — currently produces a new
-  ``document_id`` + duplicate chunks
+- Idempotency on re-ingest: **SHIPPED Turn 20** — a content-hash dedup gate
+  skips identical content+pipeline and atomically replaces stale chunks when the
+  pipeline version changed (see the Stage-0 gate in ``ingest_document``).
 - Concurrent embedding via ``asyncio.gather`` + semaphore (symmetric to
   contextualizer's deferred concurrent dispatch)
 - Embedding via gateway for cost-cap tracking
@@ -47,6 +48,7 @@ import time
 import uuid
 
 from litellm import aembedding
+from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db.engine import async_session
@@ -68,6 +70,14 @@ logger = get_logger(__name__)
 # the contextualizer's prompt. Frontier-clean: caller assembles only what's
 # needed; contextualizer takes what it's given and doesn't truncate.
 EXCERPT_CHARS = 8000
+
+# Single-master owner today. Threaded into ``chunk.meta["owner_id"]`` as a clean
+# multi-user seam: the HTTP layer passes the authenticated ``user_id`` (Phase-4
+# dashboard sessions resolve a real id; Phase-1/2 api-key callers resolve
+# "master"). Search does not filter on it yet — promote meta->owner_id to a real
+# indexed column when multi-user (Phase 1.5b / Phase 4) lands. Nothing here
+# cements "master" beyond this default.
+_DEFAULT_OWNER = "master"
 
 
 def _compute_ingester_version() -> dict:
@@ -120,23 +130,91 @@ def _assemble_excerpt(blocks: list, char_budget: int) -> str:
     return "\n\n".join(parts)[:char_budget]
 
 
+def _hash_file(file_path: str, chunk_size: int = 1 << 20) -> str:
+    """SHA-256 of the raw file bytes — the content-identity key for dedup.
+    Streamed in 1 MiB blocks so a large file never lands in memory whole."""
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+async def _existing_versions_for_hash(
+    content_hash: str,
+) -> list[tuple[uuid.UUID, str | None]]:
+    """Distinct ``(document_id, ingester_version.combined_sha256)`` already stored
+    for this content hash. Empty list → never ingested. Drives the Stage-0 gate:
+    a match on the current version is an exact duplicate (skip); a match on a
+    different version is the same content under a stale pipeline (replace)."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                DocumentChunk.document_id,
+                DocumentChunk.meta["ingester_version"]["combined_sha256"].astext,
+            )
+            .where(DocumentChunk.meta["content_hash"].astext == content_hash)
+            .distinct()
+        )
+    return [(row[0], row[1]) for row in result.all()]
+
+
 # --------------------------------------------------------------------------- #
 # Public API                                                                  #
 # --------------------------------------------------------------------------- #
-async def ingest_document(file_path: str, filename: str) -> dict:
+async def ingest_document(
+    file_path: str,
+    filename: str,
+    owner_id: str = _DEFAULT_OWNER,
+) -> dict:
     """End-to-end ingestion: extract → chunk → contextualize → embed → store.
 
-    Returns:
-        ``{document_id, filename, chunks_stored, total_tokens, ingester_version}``
+    **Idempotent on content.** The file bytes are SHA-256'd into a ``content_hash``;
+    re-ingesting the same bytes under the same pipeline version is a no-op that
+    returns the existing ``document_id`` (``deduplicated=True``, no new chunks).
+    If the content matches but the pipeline (``INGESTER_VERSION``) changed, the
+    stale chunks are atomically replaced (``replaced=True``) — the selective
+    re-processing the version hash was built for. Different content → fresh ingest.
 
-    Raises ``ValueError`` if no text extracted from the file. Per-chunk
-    failures isolated (embedding=None on failure or dimension mismatch;
-    contextual_summary="" on contextualization failure per 19.1).
+    ``owner_id`` is stored in each ``chunk.meta`` as a multi-user seam (default
+    single-master "master"); search does not filter on it yet (Phase 4).
 
-    Emits five ``*_complete`` structlog events with ``status=success|failure``:
-    extract, chunk, contextualize, embed, commit.
+    Returns ``{document_id, filename, chunks_stored, total_tokens, content_hash,
+    deduplicated, replaced, owner_id, ingester_version}``.
+
+    Raises ``ValueError`` if no text extracted from the file. Per-chunk failures
+    isolated (embedding=None on failure or dimension mismatch; contextual_summary=""
+    on contextualization failure per 19.1). Emits five ``*_complete`` structlog
+    events with ``status=success|failure``: extract, chunk, contextualize, embed, commit.
     """
     document_id = uuid.uuid4()
+
+    # --- Stage 0: content-hash dedup gate ---
+    content_hash = _hash_file(file_path)
+    existing = await _existing_versions_for_hash(content_hash)
+    current_version = INGESTER_VERSION["combined_sha256"]
+    exact = [doc_id for doc_id, ver in existing if ver == current_version]
+    if exact:
+        logger.info(
+            "ingest_deduplicated",
+            filename=filename,
+            content_hash=content_hash,
+            existing_document_id=str(exact[0]),
+            ingester_version=current_version,
+        )
+        return {
+            "document_id": str(exact[0]),
+            "filename": filename,
+            "chunks_stored": 0,
+            "total_tokens": 0,
+            "content_hash": content_hash,
+            "deduplicated": True,
+            "replaced": False,
+            "owner_id": owner_id,
+            "ingester_version": INGESTER_VERSION,
+        }
+    # Same content under a stale pipeline version → replace its chunks (atomic in Stage 5).
+    is_replace = bool(existing)
 
     # --- Stage 1: extract ---
     start = time.monotonic()
@@ -262,6 +340,8 @@ async def ingest_document(file_path: str, filename: str) -> dict:
 
             chunk_meta = dict(chunk.meta)
             chunk_meta["ingester_version"] = INGESTER_VERSION
+            chunk_meta["content_hash"] = content_hash
+            chunk_meta["owner_id"] = owner_id
 
             rows.append(DocumentChunk(
                 document_id=document_id,
@@ -301,6 +381,15 @@ async def ingest_document(file_path: str, filename: str) -> dict:
     start = time.monotonic()
     try:
         async with async_session() as session:
+            if is_replace:
+                # Atomic swap: drop the stale-pipeline chunks for this content in
+                # the SAME transaction as the new insert, so a mid-ingest failure
+                # never leaves the document with zero searchable chunks.
+                await session.execute(
+                    delete(DocumentChunk).where(
+                        DocumentChunk.meta["content_hash"].astext == content_hash
+                    )
+                )
             session.add_all(rows)
             await session.commit()
         logger.info(
@@ -309,6 +398,7 @@ async def ingest_document(file_path: str, filename: str) -> dict:
             filename=filename,
             document_id=str(document_id),
             chunks_stored=len(rows),
+            replaced=is_replace,
             duration_ms=int((time.monotonic() - start) * 1000),
         )
     except Exception as exc:
@@ -328,5 +418,9 @@ async def ingest_document(file_path: str, filename: str) -> dict:
         "filename": filename,
         "chunks_stored": len(rows),
         "total_tokens": sum(c.token_count for c in chunks),
+        "content_hash": content_hash,
+        "deduplicated": False,
+        "replaced": is_replace,
+        "owner_id": owner_id,
         "ingester_version": INGESTER_VERSION,
     }

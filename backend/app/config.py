@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     MAX_TOOL_CALLS_PER_TURN: int = 8
     MAX_AGENT_TURNS_PER_HOUR: int = 100
     TOOL_RESULT_MAX_CHARS: int = 2000       # results bigger than this are archived
+    MAX_UPLOAD_SIZE_MB: int = 25            # /documents/upload hard cap — streamed, never buffered whole
 
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72
