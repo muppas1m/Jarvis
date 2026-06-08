@@ -40,6 +40,9 @@ def register_all_tools() -> None:
     from app.agent.tools.email_history import register as register_email_history
     register_email_history()
 
+    from app.agent.tools.document_search import register as register_document_search
+    register_document_search()
+
     # Phase 2 / Phase 3 / Phase 4 tool registrations land below as each
     # tool module ships. Keep them commented until their underlying module
     # exists, so this function never raises ImportError on a fresh build.

@@ -80,8 +80,12 @@ dependencies = [
     "openpyxl>=3.1.0",                        # Excel extraction
     "tiktoken>=0.7.0",                        # Token-aware text chunking
 
-    # Reranking (RAG retrieval quality)
-    "FlagEmbedding>=1.3.0",                   # bge-reranker-v2-m3 (CPU-friendly)
+    # Reranking (RAG retrieval quality) — bge-reranker-v2-m3 via sentence-transformers
+    # CrossEncoder (CPU-friendly). Was FlagEmbedding, but FlagEmbedding 1.4.0's
+    # tokenizer path broke under the transformers 5.x that sentence-transformers/peft
+    # pin; CrossEncoder loads the same weights and works with that stack. Upper bound
+    # guards against a future major silently breaking the loader the same way.
+    "sentence-transformers>=5.0,<6",
 
     # Utils
     "httpx>=0.27.0",

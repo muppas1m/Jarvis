@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "ollama/bge-m3"
     EMBEDDING_DIMS: int = 1024
 
+    # --- RAG retrieval (Phase 2, Turn 19) ------------------------------------
+    # Hybrid search (vector + BM25) → RRF fusion → bge-reranker-v2-m3 → threshold.
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RERANK_USE_FP16: bool = False           # CPU deployment; set True only on GPU
+    RAG_CANDIDATE_POOL: int = 50            # per-retriever candidate cap fed to fusion
+    RAG_TOP_K: int = 5                      # final passages returned after rerank+threshold
+    RAG_RERANK_THRESHOLD: float = 0.3       # permissive; drops below-score chunks (logged)
+    RAG_RRF_K: int = 60                     # Reciprocal Rank Fusion smoothing constant
+
     # --- Telegram (Phase 1) --------------------------------------------------
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_MASTER_CHAT_ID: str = ""

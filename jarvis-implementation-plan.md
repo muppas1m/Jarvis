@@ -6449,6 +6449,8 @@ async def ingest_document(file_path: str, filename: str) -> dict:
 
 #### Task 2.15b — Reranker (bge-reranker-v2-m3)
 
+> **⚠️ Loader superseded (Turn 19.3, 2026-06-08):** the `FlagEmbedding.FlagReranker` sketch below does not run on the shipped stack — FlagEmbedding 1.4.0's tokenizer path was removed in transformers 5.x (pinned by `sentence-transformers`/`peft`). Implementation uses `sentence_transformers.CrossEncoder` over the **same** `BAAI/bge-reranker-v2-m3` weights (sigmoid-by-default → identical 0.3-threshold semantics). See the Turn 19.3–19.7 retroactive entry in `jarvis-frontier-upgrade.md` for the full rationale. The "why a reranker" + pipeline shape below remain accurate.
+
 > **Why a reranker:**
 > Vector search returns the top-K most-similar candidates by cosine distance, but cosine distance doesn't always correlate with answer quality. A reranker is a small cross-encoder that scores `(query, candidate)` *pairs* directly — giving 20-30% precision lift on real-world RAG. Standard 2026 indie pattern: vector search → top-50 candidates → reranker → top-5.
 >
