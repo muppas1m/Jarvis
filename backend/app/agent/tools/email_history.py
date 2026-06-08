@@ -59,8 +59,8 @@ class EmailHistorySearchArgs(BaseModel):
     call format instead of OpenAI structured tool_calls. Empty-string
     sentinels stand in for None; the handler maps them back.
 
-    See project_open_weights_tool_schema_anyof_null.md (saved in this turn)
-    for the full diagnosis."""
+    See project_open_weights_tool_schema_and_conversation_poisoning.md (saved
+    in this turn) for the full diagnosis."""
 
     days_back: int = Field(
         default=7,

@@ -1,11 +1,18 @@
 """Hourly sweeper — auto-rejects approvals whose expires_at has passed.
-Resumes the paused graphs with a rejection so the agent can move on."""
+Resumes the paused graphs with a rejection so the agent can move on.
+
+Wrapped in @critical_task because a silently-failing sweep leaves interrupted
+turns stuck mid-graph (paused on the original interrupt) AND lets stale
+approvals accumulate without bound. Both are the exact 3-day-silent-regression
+risk that `feedback_verify_before_claiming.md` originated on this surface to
+prevent. Sibling discipline to gmail_check / gmail_renew / morning_brief
+wrappers — every belt-and-braces scheduled task should be fail-loud."""
 import asyncio
 from datetime import datetime, timezone
 from sqlalchemy import select
 
-from app.scheduler.celery_app import celery_app
 from app.scheduler.task_helpers import reset_async_state_for_task
+from app.scheduler.task_wrapper import critical_task
 from app.db.engine import async_session
 from app.db.models import PendingApproval
 import structlog
@@ -13,8 +20,9 @@ import structlog
 logger = structlog.get_logger()
 
 
-@celery_app.task(name="app.scheduler.tasks.approval_expiry.sweep_expired_approvals")
+@critical_task(name="app.scheduler.tasks.approval_expiry.sweep_expired_approvals")
 def sweep_expired_approvals():
+    """Wrapped in @critical_task — alerts master after 3 failed runs."""
     asyncio.run(_sweep())
 
 

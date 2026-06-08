@@ -55,7 +55,7 @@ class GmailSendArgs(BaseModel):
     `anyOf: [{"type": "string"}, {"type": "null"}]` which breaks tool-calling
     on Groq's llama-3.3-70b-versatile (and likely other open-weights models).
     Empty-string sentinels for "not provided"; handler maps back to None.
-    See project_open_weights_tool_schema_anyof_null.md."""
+    See project_open_weights_tool_schema_and_conversation_poisoning.md."""
 
     to: str = Field(description="Recipient email address. Single recipient only for Phase 2.")
     subject: str = Field(description="Subject line. 'Re: <original>' for replies.")
