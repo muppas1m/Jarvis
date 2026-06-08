@@ -6617,6 +6617,8 @@ op.execute("CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding_hnsw "
 
 #### Task 2.17 — Document API Endpoints
 
+> **⚠️ Hardened on implementation (Turn 20, 2026-06-08):** the sketch below ships unauthenticated and `await file.read()` buffers the whole upload (OOM). As implemented: `documents_router` is mounted under the **protected** router (`Depends(get_current_user)`), the upload **streams** to a temp file with a `settings.MAX_UPLOAD_SIZE_MB` cap (413), and `ingest_document` now **dedups on content_hash** so re-upload isn't silent duplication — with `owner_id` threaded as a multi-user seam. See the Turn 20 entry in `jarvis-frontier-upgrade.md`.
+
 Create `backend/app/api/documents.py`:
 
 ```python
@@ -6663,6 +6665,8 @@ async def search(q: str, top_k: int = 5):
 #### Task 2.18 — Cost Visibility API
 
 > **Why this matters:** Token usage in agentic systems is non-linear — one complex task can cost 10x a simple chat. Without visibility, you're flying blind.
+
+> **⚠️ Honesty hardening on implementation (Turn 20, 2026-06-08):** `costs.py` already existed (Phase-1). The sketch's `/summary` mixes a Redis cap number with LLMUsageLog rollups as if one authoritative total — but they're different sources (diverge after a Redis restart) and LLMUsageLog misses the gateway-bypass surfaces (agent_node / embeddings / Mem0). As implemented, the response labels `coverage` (what's excluded → subset of real spend) and `cap` (Redis enforcement counter, separate source) explicitly, plus a `/history` series. Full gateway-bypass reconciliation stays Phase-4. See the Turn 20 entry in `jarvis-frontier-upgrade.md`.
 
 Create `backend/app/api/costs.py`:
 
