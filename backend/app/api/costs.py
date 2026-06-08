@@ -1,41 +1,65 @@
 """
-GET /api/costs — LLM spend snapshot.
+GET /api/costs — LLM spend snapshot, honestly labelled.
 
-Powers the dashboard cost panel and gives ops the answer to "how much
-did I spend today" without opening Langfuse. Two windows for the Phase
-1 surface — today (UTC) and the trailing 7 days (rolling, not calendar
-week). Both windows aggregate across model + task_type so a sudden
-spike in memory_extraction tokens vs primary-agent tokens is visible.
+This endpoint reports two numbers from two DIFFERENT sources, and is explicit
+about what each does and does not measure — presenting a single mixed "total
+spend" would be a lie on two axes:
 
-Source: LLMUsageLog rows. The LiteLLM success callback writes one row
-per completion call; this endpoint just sums them. No dedup logic
-because each callback fires per-completion (no duplicates).
+  1. COVERAGE (what's counted at all). The token/cost rollups come from
+     `LLMUsageLog`, which only captures completions routed through
+     `LLMGateway.complete()`. Three surfaces bypass the gateway and write
+     nothing: agent_node (ChatLiteLLM via FallbackChatLLM), the embedding paths
+     (`litellm.aembedding`), and Mem0's extraction LLM. So these numbers are a
+     strict SUBSET of real spend — `coverage.excludes` says so in the payload,
+     not just here. Full reconciliation is the Phase-4 gateway-bypass fix
+     (Option C hybrid helper — `project_agent_llm_cost_attribution_gap.md`).
 
-CAVEAT — what this endpoint is NOT authoritative about:
-LLMUsageLog itself only captures completions that flow through
-`LLMGateway.complete()`. Three current surfaces bypass the gateway and
-write nothing to LLMUsageLog: agent_node (uses ChatLiteLLM via
-FallbackChatLLM directly), the embedding paths (`litellm.aembedding`),
-and Mem0's extraction LLM (`provider: litellm` in Mem0 config). See
-`project_agent_llm_cost_attribution_gap.md` for the full landscape.
-So /api/costs is authoritative for what the GATEWAY tracked — a strict
-subset of real LLM spend. Real spend reconciliation lands with Phase 4
-dashboard cost-visibility work (Option C hybrid helper in the memory
-note closes all three bypass surfaces in one structural change).
+  2. SOURCE (which store). The `cap` block is the live Redis enforcement counter
+     (`jarvis:llm_cost:<UTC_DATE>`) the gateway actually checks before each call;
+     the window rollups are the durable `LLMUsageLog` ledger. They track the same
+     gateway events but diverge after a Redis restart — the counter resets (TTL),
+     the ledger persists — so `cap.spend_usd` can read LOWER than
+     `today_utc.cost_usd` (`project_cost_cap_redis_only.md`). `cap.note` says so.
 
-Phase 3 will add per-thread / per-tool breakdowns + a daily history
-chart. For Phase 1 just the rollups.
+Windows: today (UTC) + trailing 7 days on the summary; daily series on /history.
+Per-thread / per-tool drill-downs land with the Phase-4 dashboard.
 """
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
+from app.config import settings
 from app.db.engine import async_session
 from app.db.models import LLMUsageLog
+from app.llm.cost_tracker import CostTracker
 
 router = APIRouter(prefix="/costs", tags=["costs"])
+
+
+# --------------------------------------------------------------------------- #
+# Response models                                                             #
+# --------------------------------------------------------------------------- #
+class CostCoverage(BaseModel):
+    """What the LLMUsageLog-sourced numbers do and do NOT measure."""
+
+    source: str
+    measures: str
+    excludes: list[str]
+    note: str
+
+
+class CapStatus(BaseModel):
+    """The live Redis enforcement counter — a different source from the ledger."""
+
+    source: str
+    spend_usd: float
+    soft_cap_usd: float
+    hard_cap_usd: float
+    soft_cap_hit: bool
+    hard_cap_hit: bool
+    note: str
 
 
 class WindowSummary(BaseModel):
@@ -49,9 +73,66 @@ class WindowSummary(BaseModel):
 
 
 class CostsResponse(BaseModel):
-    today_utc: WindowSummary
-    last_7d: WindowSummary
+    coverage: CostCoverage        # what's counted (gateway-only subset)
+    cap: CapStatus                # live Redis enforcement counter (separate source)
+    today_utc: WindowSummary      # LLMUsageLog ledger, today UTC
+    last_7d: WindowSummary        # LLMUsageLog ledger, trailing 7 days
     generated_at: str
+
+
+class DailyCost(BaseModel):
+    day: str
+    cost_usd: float
+    request_count: int
+
+
+class CostHistoryResponse(BaseModel):
+    coverage: CostCoverage
+    days: int
+    history: list[DailyCost]
+    generated_at: str
+
+
+# --------------------------------------------------------------------------- #
+# Honest-labelling helpers                                                    #
+# --------------------------------------------------------------------------- #
+def _coverage() -> CostCoverage:
+    """The coverage caveat, surfaced IN the payload (not just the docstring)."""
+    return CostCoverage(
+        source="LLMUsageLog (completions routed through LLMGateway.complete())",
+        measures="USD + token counts for gateway-tracked completions",
+        excludes=[
+            "agent_node (ChatLiteLLM via FallbackChatLLM)",
+            "embeddings (litellm.aembedding)",
+            "Mem0 extraction LLM",
+        ],
+        note=(
+            "These three surfaces bypass the gateway and are NOT counted here, so "
+            "this is a strict subset of real LLM spend. Full reconciliation is the "
+            "Phase-4 gateway-bypass fix (project_agent_llm_cost_attribution_gap.md)."
+        ),
+    )
+
+
+async def _cap_status() -> CapStatus:
+    tracker = CostTracker(
+        daily_cap=settings.DAILY_LLM_SPEND_CAP_USD,
+        soft_cap_pct=settings.DAILY_LLM_SOFT_CAP_PCT,
+    )
+    spend = await tracker.get_today_spend()
+    return CapStatus(
+        source="Redis counter jarvis:llm_cost:<UTC_DATE> (live cap enforcement)",
+        spend_usd=spend,
+        soft_cap_usd=round(tracker.soft_cap, 4),
+        hard_cap_usd=settings.DAILY_LLM_SPEND_CAP_USD,
+        soft_cap_hit=spend >= tracker.soft_cap,
+        hard_cap_hit=spend >= settings.DAILY_LLM_SPEND_CAP_USD,
+        note=(
+            "Same gateway-only coverage as the ledger. This is the counter the cap "
+            "enforcer reads; it resets if Redis restarts mid-day, so it can read "
+            "lower than today_utc.cost_usd after a restart (project_cost_cap_redis_only.md)."
+        ),
+    )
 
 
 async def _summarize_window(start: datetime) -> WindowSummary:
@@ -100,17 +181,56 @@ async def _summarize_window(start: datetime) -> WindowSummary:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Endpoints                                                                   #
+# --------------------------------------------------------------------------- #
 @router.get("", response_model=CostsResponse)
 async def get_costs() -> CostsResponse:
     now = datetime.now(timezone.utc)
     start_of_day_utc = now.replace(hour=0, minute=0, second=0, microsecond=0)
     seven_days_ago = now - timedelta(days=7)
 
-    today_summary = await _summarize_window(start_of_day_utc)
-    week_summary = await _summarize_window(seven_days_ago)
-
     return CostsResponse(
-        today_utc=today_summary,
-        last_7d=week_summary,
+        coverage=_coverage(),
+        cap=await _cap_status(),
+        today_utc=await _summarize_window(start_of_day_utc),
+        last_7d=await _summarize_window(seven_days_ago),
+        generated_at=now.isoformat(),
+    )
+
+
+@router.get("/history", response_model=CostHistoryResponse)
+async def cost_history(
+    days: int = Query(default=30, ge=1, le=365, description="Trailing days of daily spend"),
+) -> CostHistoryResponse:
+    """Daily gateway-tracked spend for the trailing N days (LLMUsageLog ledger)."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+    day_col = func.date(LLMUsageLog.created_at).label("day")
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                day_col,
+                func.coalesce(func.sum(LLMUsageLog.cost_usd), 0.0).label("cost"),
+                func.count(LLMUsageLog.id).label("count"),
+            )
+            .where(LLMUsageLog.created_at >= since)
+            .group_by(day_col)
+            .order_by(day_col.desc())
+        )
+        history = [
+            DailyCost(
+                day=str(row.day),
+                cost_usd=round(float(row.cost or 0.0), 6),
+                request_count=int(row.count or 0),
+            )
+            for row in result
+        ]
+
+    return CostHistoryResponse(
+        coverage=_coverage(),
+        days=days,
+        history=history,
         generated_at=now.isoformat(),
     )
