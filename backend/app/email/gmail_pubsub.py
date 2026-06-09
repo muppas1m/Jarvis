@@ -96,13 +96,13 @@ async def _process_single_email(service, message_data: dict):
     sender = headers.get("From", "Unknown")
     body = _extract_body(full_msg)
 
-    # Step 1: Classify (cheap classification call against fast model).
-    classification = await classify_email(subject=subject, sender=sender, body=body)
+    # Step 1: Five-axis triage (cheap classification call against the fast model).
+    triage = await classify_email(subject=subject, sender=sender, body=body)
 
     # Step 2: Generate draft if needed BEFORE the gate, so the EmailLog
     # row carries the draft fields on first INSERT (no follow-up UPDATE).
     draft = None
-    if classification == "action_required":
+    if triage.classification == "action_required":
         draft = await generate_draft(subject=subject, sender=sender, body=body)
 
     # GATE: claim ownership of this msg_id by INSERTing EmailLog FIRST.
@@ -113,7 +113,10 @@ async def _process_single_email(service, message_data: dict):
             gmail_message_id=msg_id,
             subject=subject,
             sender=sender,
-            classification=classification,
+            # Dual-write from the SAME triage result so the top-level column
+            # (backward-compat) and meta->>'classification' can't drift.
+            classification=triage.classification,
+            meta=triage.model_dump(),
             draft_response=draft["response"] if draft else None,
             response_complexity=draft.get("complexity") if draft else None,
         )
@@ -125,19 +128,34 @@ async def _process_single_email(service, message_data: dict):
             logger.info("email_log_already_exists", gmail_message_id=msg_id)
             return  # CRITICAL: stop processing, the other delivery owns it.
 
-    # Step 3: Route based on classification — only reached when this delivery
-    # successfully claimed ownership of msg_id via the EmailLog INSERT above.
-    if classification == "spam":
+    # Step 3: Route — only reached when this delivery claimed ownership of msg_id
+    # via the EmailLog INSERT above. Low-confidence spam is NOT auto-archived: it
+    # routes to the digest so a misclassified real email stays visible. The stored
+    # classification stays "spam" with its low confidence — the record is honest,
+    # only the action is conservative (confidence wired to a real decision).
+    route = triage.classification
+    if route == "spam" and triage.confidence < settings.EMAIL_TRIAGE_CONFIDENCE_FLOOR:
+        logger.info(
+            "spam_downgraded_low_confidence",
+            subject=subject,
+            confidence=triage.confidence,
+            floor=settings.EMAIL_TRIAGE_CONFIDENCE_FLOOR,
+        )
+        route = "fyi"
+
+    if route == "spam":
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
         ).execute()
         logger.info("email_archived_spam", subject=subject)
 
-    elif classification == "fyi":
-        await add_to_digest(subject=subject, sender=sender, body_preview=body[:300])
-        logger.info("email_added_to_digest", subject=subject)
+    elif route == "fyi":
+        await add_to_digest(
+            subject=subject, sender=sender, body_preview=body[:300], urgency=triage.urgency
+        )
+        logger.info("email_added_to_digest", subject=subject, urgency=triage.urgency)
 
-    elif classification == "action_required":
+    elif route == "action_required":
         # RFC822 Message-ID header — used by gmail_send for In-Reply-To
         # threading. Distinct from msg_id (Gmail-internal). Stored in
         # PendingApproval.payload so the dispatch path can skip a Gmail

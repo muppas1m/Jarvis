@@ -126,5 +126,11 @@ class Settings(BaseSettings):
     APPROVAL_EXPIRY_HOURS: int = 72
     AUTO_APPROVE_REPLY_MAX_WORDS: int = 80
 
+    # --- Email triage (Turn 17.8) --------------------------------------------
+    # Below this classifier confidence, a "spam" verdict is NOT auto-archived —
+    # it routes to the digest instead, so a misclassified real email stays
+    # visible rather than silently vanishing from the inbox.
+    EMAIL_TRIAGE_CONFIDENCE_FLOOR: float = 0.5
+
 
 settings = Settings()

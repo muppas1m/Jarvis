@@ -40,6 +40,7 @@ from sqlalchemy import select
 from app.agent.tools.registry import tool_registry
 from app.db.engine import async_session
 from app.db.models import EmailLog, PendingApproval
+from app.email.classifier import URGENCY_TAG
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -78,6 +79,10 @@ class EmailHistorySearchArgs(BaseModel):
         default="",
         description="Approval status: 'pending' | 'approved' | 'rejected' | 'expired'. Empty string for no filter.",
     )
+    urgency: str = Field(
+        default="",
+        description="Triage urgency: 'immediate' | 'today' | 'this_week' | 'none'. Empty string for all.",
+    )
     limit: int = Field(
         default=20,
         description="Max detail rows (1-100, default 20).",
@@ -89,6 +94,7 @@ async def email_history_search(
     classification: str = "",
     sender: str = "",
     status: str = "",
+    urgency: str = "",
     limit: int = 20,
 ) -> str:
     """Query email_logs (LEFT JOIN pending_approvals) and return a natural-
@@ -100,6 +106,7 @@ async def email_history_search(
 
     valid_classifications = {"spam", "fyi", "action_required"}
     valid_statuses = {"pending", "approved", "rejected", "expired"}
+    valid_urgencies = {"immediate", "today", "this_week", "none"}
 
     classification_filter: Optional[str] = classification.strip() or None
     if classification_filter and classification_filter not in valid_classifications:
@@ -111,6 +118,10 @@ async def email_history_search(
     if status_filter and status_filter not in valid_statuses:
         status_filter = None
 
+    urgency_filter: Optional[str] = urgency.strip() or None
+    if urgency_filter and urgency_filter not in valid_urgencies:
+        urgency_filter = None
+
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days_back)
 
@@ -121,6 +132,7 @@ async def email_history_search(
             EmailLog.sender,
             EmailLog.subject,
             EmailLog.classification,
+            EmailLog.meta,
             EmailLog.response_complexity,
             EmailLog.auto_sent,
             PendingApproval.status.label("approval_status"),
@@ -141,6 +153,11 @@ async def email_history_search(
         stmt = stmt.where(EmailLog.sender.ilike(f"%{sender_filter}%"))
     if status_filter:
         stmt = stmt.where(PendingApproval.status == status_filter)
+    if urgency_filter:
+        # Un-indexed JSONB filter — negligible at single-inbox volume, same
+        # pattern as the doc content_hash lookup (promote to an indexed column
+        # if email ever goes multi-user / high-volume).
+        stmt = stmt.where(EmailLog.meta["urgency"].astext == urgency_filter)
 
     stmt = stmt.order_by(EmailLog.created_at.desc()).limit(limit)
 
@@ -155,6 +172,7 @@ async def email_history_search(
         classification=classification_filter,
         sender=sender_filter,
         status=status_filter,
+        urgency=urgency_filter,
     )
 
 
@@ -165,6 +183,7 @@ def _format_summary(
     classification: Optional[str],
     sender: Optional[str],
     status: Optional[str],
+    urgency: Optional[str] = None,
 ) -> str:
     """Build the natural-language summary from query results.
 
@@ -180,6 +199,8 @@ def _format_summary(
         filter_bits.append(f"sender~'{sender}'")
     if status:
         filter_bits.append(f"status={status}")
+    if urgency:
+        filter_bits.append(f"urgency={urgency}")
     filter_str = f" [filters: {', '.join(filter_bits)}]" if filter_bits else ""
 
     window_str = f"last {days_back} day{'s' if days_back != 1 else ''}"
@@ -231,7 +252,24 @@ def _format_action_row(r, now: datetime) -> str:
     subject = (r.subject or "(no subject)")[:80]
     sender = _shorten_sender(r.sender or "(unknown)")
     status_phrase = _status_phrase(r, now)
-    return f'"{subject}" — {sender} — {status_phrase}'
+
+    # Surface the triage axes from meta. urgency as a leading tag (immediate/today/
+    # this_week); intent + suggested_action as a trailing hint. suggested_action is
+    # DISPLAY/eval signal only — nothing dispatches on it (an auto-action dispatcher
+    # is Phase-3 scope); shown so master sees the recommendation.
+    meta = getattr(r, "meta", None) or {}
+    tag = URGENCY_TAG.get(meta.get("urgency", "none"), "")
+    prefix = f"{tag} " if tag else ""
+    triage_bits = []
+    intent = meta.get("intent")
+    if intent and intent not in ("none", "fyi"):
+        triage_bits.append(f"intent: {intent}")
+    action = meta.get("suggested_action")
+    if action and action != "none":
+        triage_bits.append(f"suggested: {action}")
+    triage_str = f" ({', '.join(triage_bits)})" if triage_bits else ""
+
+    return f'{prefix}"{subject}" — {sender} — {status_phrase}{triage_str}'
 
 
 def _shorten_sender(raw: str) -> str:
@@ -315,10 +353,12 @@ def register() -> None:
             "sent them, were they replied to, what's pending. "
             "Does NOT search conversation memory; use memory_search for that. "
             "Use for: 'what emails came in', 'any messages from X', 'did the "
-            "email from Y get answered', 'what's still pending reply'. "
+            "email from Y get answered', 'what's still pending reply', 'what's "
+            "urgent today'. Filter by urgency (immediate/today/this_week/none) to "
+            "answer 'what urgent emails came in'. "
             "Returns a grouped summary by classification (action_required gets "
-            "per-item detail; fyi/spam get counts) plus approval status for "
-            "each pending or sent reply."
+            "per-item detail with an urgency tag + intent/suggested-action; "
+            "fyi/spam get counts) plus approval status for each pending or sent reply."
         ),
         args_schema=EmailHistorySearchArgs,
     )

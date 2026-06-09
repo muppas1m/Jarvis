@@ -58,11 +58,14 @@ class LLMGateway:
         temperature: float = 0.7,
         thread_id: str | None = None,
         tool_name_context: str | None = None,
+        response_format: dict | None = None,
     ) -> dict:
         """Dispatch a chat-completion. Returns the LiteLLM response dict.
 
         `task_type` selects the slot in TASK_ROUTING; `force_model` overrides
-        the routing if you need a specific slot for one call.
+        the routing if you need a specific slot for one call. `response_format`
+        is passed through to the provider (e.g. `{"type": "json_object"}` for
+        JSON mode) — supported by Groq + OpenAI, so it survives the fallback hop.
         """
         # Hard cap → halt for the rest of the day.
         if await self.cost_tracker.is_over_hard_cap():
@@ -88,7 +91,7 @@ class LLMGateway:
 
         try:
             response = await self._call_llm(
-                model.model_id, messages, tools, temperature, thread_id, task_type
+                model.model_id, messages, tools, temperature, thread_id, task_type, response_format
             )
         except Exception as exc:
             logger.error(
@@ -107,7 +110,7 @@ class LLMGateway:
                 to=fallback.model_id,
             )
             response = await self._call_llm(
-                fallback.model_id, messages, tools, temperature, thread_id, task_type
+                fallback.model_id, messages, tools, temperature, thread_id, task_type, response_format
             )
             model = fallback   # cost-tracking should reflect the fallback model
             model_key = "fallback"
@@ -147,6 +150,7 @@ class LLMGateway:
         temperature: float,
         thread_id: str | None,
         task_type: str,
+        response_format: dict | None = None,
     ) -> dict:
         # Langfuse-readable metadata. session_id groups all calls for a
         # conversation; tags surface in the trace browser for filtering.
@@ -163,6 +167,8 @@ class LLMGateway:
         }
         if tools:
             kwargs["tools"] = tools
+        if response_format:
+            kwargs["response_format"] = response_format
 
         response = await acompletion(**kwargs)
         # LiteLLM responses are pydantic models; pin to dict for stable downstream access.

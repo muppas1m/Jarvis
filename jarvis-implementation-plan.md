@@ -9568,6 +9568,8 @@ Full design + implementation sketch lives in `project_agent_node_bypasses_gatewa
 
 These are paired by design — extending classifier output without persistence is a half-step.
 
+> **⚠️ As-built (Turn 17.8, 2026-06-08) — two deviations:** (1) **Migration is `003`, not `004`** — disk had only `001`+`002` and `alembic current` was `002`, so the next number is 003 (disk is canonical, `project_phase1_monolithic_migration.md`); the "004" below is stale intent. (2) **task-n digest stays Redis-queue-based, not EmailLog-pull** — `digest.py` reads the Redis FYI queue, so urgency ordering is a deterministic Python sort via the pure `urgency_rank` ordinal (the plan's literal `sort by meta->>'urgency'` would be an alphabetical TEXT sort — wrong). Also hardened beyond the sketch: classifier uses gateway JSON mode + Literal-enum validation + fence-stripping; confidence is wired (low-confidence spam → digest, not auto-archive); suggested_action is display/eval-only. See the Turn 17.8 entry in `jarvis-frontier-upgrade.md`.
+
 **Tasks:**
 
 `2.X-closeout-k` — Alembic migration `004_email_logs_meta`

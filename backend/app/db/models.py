@@ -152,6 +152,11 @@ class EmailLog(Base):
     response_complexity = Column(String(20), nullable=True)     # "simple", "complex"
     auto_sent = Column(Boolean, default=False, nullable=False)
     approved = Column(Boolean, nullable=True)
+    # Multi-dimensional triage (Turn 17.8, migration 003): the full
+    # EmailTriageResult — classification (dual-written with the column above so
+    # they can't drift), urgency, intent, confidence, suggested_action. Also the
+    # natural owner_id home if the inbox goes multi-user (Phase 4).
+    meta = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
