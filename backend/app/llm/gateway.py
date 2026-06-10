@@ -31,6 +31,7 @@ from app.db.models import LLMUsageLog
 from app.llm.bootstrap import wire_all
 from app.llm.cost_tracker import CostTracker
 from app.llm.models import TASK_ROUTING, get_models
+from app.llm.eval_mode import eval_mode
 from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
 
@@ -67,15 +68,20 @@ class LLMGateway:
         is passed through to the provider (e.g. `{"type": "json_object"}` for
         JSON mode) — supported by Groq + OpenAI, so it survives the fallback hop.
         """
+        # Eval runs bypass cap enforcement entirely (consistent behavior, no halt,
+        # no degrade) — their spend is isolated to the eval counter (see
+        # app.llm.eval_mode + cost_tracker._today_key).
+        in_eval = eval_mode.get()
+
         # Hard cap → halt for the rest of the day.
-        if await self.cost_tracker.is_over_hard_cap():
+        if not in_eval and await self.cost_tracker.is_over_hard_cap():
             raise CostCapExceededError(
                 f"Daily LLM spend cap (${settings.DAILY_LLM_SPEND_CAP_USD:.2f}) reached. "
                 "Agent halted until UTC midnight."
             )
 
         # Soft cap → degrade everything to fast.
-        soft_cap_hit = await self.cost_tracker.is_over_soft_cap()
+        soft_cap_hit = (not in_eval) and await self.cost_tracker.is_over_soft_cap()
         if soft_cap_hit and not force_model:
             model_key = "fast"
             logger.warning(

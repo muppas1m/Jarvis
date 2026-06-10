@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import redis.asyncio as redis
 
 from app.config import settings
+from app.llm.eval_mode import eval_mode
 from app.llm.models import get_models
 
 
@@ -33,7 +34,11 @@ class CostTracker:
     @staticmethod
     def _today_key() -> str:
         # Use UTC so the counter rolls at the same instant for every caller.
-        return f"jarvis:llm_cost:{datetime.now(timezone.utc).date().isoformat()}"
+        # Eval runs route to a separate counter so they can't trip the master's
+        # production cap (see app.llm.eval_mode).
+        date = datetime.now(timezone.utc).date().isoformat()
+        prefix = "jarvis:eval_cost" if eval_mode.get() else "jarvis:llm_cost"
+        return f"{prefix}:{date}"
 
     async def record(self, input_tokens: int, output_tokens: int, model_key: str) -> float:
         """Compute cost for one call and add it to today's counter. Returns the

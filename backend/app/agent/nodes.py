@@ -431,6 +431,12 @@ async def persist_node(state: AgentState) -> dict:
     """End-of-turn: extract memories via Mem0. LangGraph already persisted
     raw messages; this hands the (user, assistant) pair to Mem0 so it can
     extract durable facts."""
+    from app.llm.eval_mode import eval_mode
+
+    # Eval runs skip persistence so they don't pollute the master's Mem0.
+    if eval_mode.get():
+        return {}
+
     user_msg = state.get("user_message", "")
     final = state.get("final_response", "")
     if user_msg and final and final != "rate_limited":
