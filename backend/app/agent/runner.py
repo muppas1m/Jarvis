@@ -33,9 +33,31 @@ from langgraph.types import Command
 
 from app.agent.graph import build_graph
 from app.llm.observability import langfuse_callback_handler
+from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# Exit-path → stop_reason. status and stop_reason are derived together at each
+# exit so they can't disagree (same dual-field discipline as 17.8's classification
+# column + meta). Vocabulary follows the Claude SDK:
+#   end_turn    — natural completion                  (status "complete")
+#   rate_limit  — per-hour turn cap hit; agent returned a graceful notice
+#                 (status "complete", final_response sentinel "rate_limited")
+#   interrupted — paused on an approval               (status "interrupted")
+#   cost_cap    — gateway refused on the daily hard cap (status "error")
+#   error       — any other exception                 (status "error")
+# Note: the per-turn TOOL budget (MAX_TOOL_CALLS_PER_TURN) is NOT a turn-terminal
+# reason — a blocked tool degrades to a ToolMessage and the agent still ends the
+# turn naturally (end_turn). That event is captured per-tool in audit_trail +
+# rate_limit_events, not at the envelope level.
+def _stop_reason_for_completion(result: dict) -> str:
+    return "rate_limit" if result.get("final_response") == "rate_limited" else "end_turn"
+
+
+def _stop_reason_for_error(exc: BaseException) -> str:
+    return "cost_cap" if isinstance(exc, CostCapExceededError) else "error"
 
 
 _graph = None
@@ -90,9 +112,13 @@ async def run_turn(
     except Exception as exc:
         logger.exception("graph_invoke_failed", thread_id=thread_id, error=str(exc))
         logger.info(
-            "turn_complete", thread_id=thread_id, status="error", tool_calls=None
+            "turn_complete", thread_id=thread_id, status="error",
+            stop_reason=_stop_reason_for_error(exc), tool_calls=None,
         )
-        return _error_envelope(thread_id, "I hit an internal error. Please try again.")
+        return _error_envelope(
+            thread_id, "I hit an internal error. Please try again.",
+            stop_reason=_stop_reason_for_error(exc),
+        )
 
     duration_ms = int((time.monotonic() - started_ms) * 1000)
     envelope = await _build_envelope(
@@ -107,6 +133,7 @@ async def run_turn(
         "turn_complete",
         thread_id=thread_id,
         status=envelope["status"],
+        stop_reason=envelope.get("stop_reason"),
         tool_calls=sum(
             1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
         ),
@@ -132,7 +159,10 @@ async def resume_turn(
         result = await graph().ainvoke(Command(resume=decision), config=config)
     except Exception as exc:
         logger.exception("graph_resume_failed", thread_id=thread_id, error=str(exc))
-        return _error_envelope(thread_id, "I hit an internal error while resuming. Please try again.")
+        return _error_envelope(
+            thread_id, "I hit an internal error while resuming. Please try again.",
+            stop_reason=_stop_reason_for_error(exc),
+        )
 
     duration_ms = int((time.monotonic() - started_ms) * 1000)
     return await _build_envelope(
@@ -165,10 +195,13 @@ async def _existing_message_count(thread_id: str) -> int:
     return len(state.values.get("messages") or [])
 
 
-def _error_envelope(thread_id: str, response_text: str) -> dict[str, Any]:
+def _error_envelope(
+    thread_id: str, response_text: str, stop_reason: str = "error"
+) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
         "status": "error",
+        "stop_reason": stop_reason,
         "response": response_text,
         "messages": [],
         "interrupt": None,
@@ -207,6 +240,7 @@ async def _build_envelope(
             return {
                 "thread_id": thread_id,
                 "status": "interrupted",
+                "stop_reason": "interrupted",
                 "response": "",
                 "messages": serialized,
                 "interrupt": payload,
@@ -217,6 +251,7 @@ async def _build_envelope(
     return {
         "thread_id": thread_id,
         "status": "complete",
+        "stop_reason": _stop_reason_for_completion(result),
         "response": result.get("final_response") or _extract_last_assistant_text(result),
         "messages": serialized,
         "interrupt": None,

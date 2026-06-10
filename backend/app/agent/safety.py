@@ -23,6 +23,10 @@ accumulation layer (Phase 2).
 from enum import Enum
 from typing import Any
 
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class SafetyLevel(str, Enum):
     SAFE = "safe"
@@ -105,6 +109,16 @@ class SafetyClassifier:
             # explicit approval to avoid accidental outbound messages.
             chat_id = str(tool_args.get("chat_id", ""))
             if chat_id and chat_id != settings.TELEGRAM_MASTER_CHAT_ID:
+                # Surface the escalation: reading audit_trail alone can't tell a
+                # default-APPROVE from an args-escalated one (Phase-4 dashboard
+                # wants "how often does args-escalation fire?"). q2 / Step 6 F2.
+                logger.warning(
+                    "safety_args_override_escalated",
+                    tool=tool_name,
+                    from_level=base.value,
+                    to_level=SafetyLevel.APPROVE.value,
+                    override_reason="telegram_send_to_non_master",
+                )
                 return SafetyLevel.APPROVE
 
         # Add future args-based escalations here. e.g. gmail_archive of a

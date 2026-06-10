@@ -9611,6 +9611,8 @@ These are paired by design — extending classifier output without persistence i
 
 3. **AuditTrail has no latency_ms column** (verified: `app/db/models.py:AuditTrail`). `_log_audit` in `app/agent/nodes.py:501-525` writes tool execution rows but doesn't capture latency. Tool execution time is the single most valuable signal for tool-performance investigation (which tool is slow, which is fast, which is the bottleneck on multi-tool turns). This is the L3 retroactive correction.
 
+> **⚠️ As-built (Turn 17.9, 2026-06-09):** (1) **task-r migration is `004`, not `005`** — disk had `001/002/003` (`alembic current` = 003), so next is 004; the plan's numbers ran ahead because the 2.16b documents migration was a verified no-op that never consumed a number. Disk is canonical. (2) **task-q3:** `tool_budget` is NOT a turn-terminal `stop_reason` in this architecture — a per-turn tool-budget block degrades to a ToolMessage and the agent still ends naturally (`end_turn`); shipped values are `end_turn` / `rate_limit` (graceful per-hour-cap complete) / `cost_cap` / `interrupted` / `error`, derived together with `status`. (3) **task-s latency** is captured in the node around `tool_registry.execute()` (covers all paths) + mirrored in `gmail_send._audit`, not inside execute(). See the Turn 17.9 entry in `jarvis-frontier-upgrade.md`.
+
 **Tasks:**
 
 `2.X-closeout-p` — Calendar tool description sharpening

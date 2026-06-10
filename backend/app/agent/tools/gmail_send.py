@@ -31,6 +31,7 @@ audit semantics."""
 from __future__ import annotations
 
 import base64
+import time
 import uuid
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -122,6 +123,11 @@ async def gmail_send(
                 error=str(exc),
             )
 
+    # Latency captured around the send dispatch and threaded into _audit —
+    # mirrors tool_executor_node's capture so the two genuinely-separate audit
+    # paths (agent-loop via tool_registry.execute vs. this approval-dispatch
+    # direct call) record latency_ms consistently and can't drift.
+    send_start = time.monotonic()
     try:
         result = service.users().messages().send(
             userId="me", body=request_body
@@ -138,6 +144,7 @@ async def gmail_send(
         await _audit(
             to=to, subject=subject, gmail_message_id=gmid,
             success=False, error=str(exc)[:500],
+            latency_ms=int((time.monotonic() - send_start) * 1000),
         )
         logger.error("gmail_send_failed", to=to, subject=subject[:80], error=str(exc))
         raise
@@ -145,6 +152,7 @@ async def gmail_send(
     await _audit(
         to=to, subject=subject, gmail_message_id=gmid,
         success=True, error=None, sent_message_id=sent_id,
+        latency_ms=int((time.monotonic() - send_start) * 1000),
     )
 
     # Close the audit loop on the original EmailLog row — mark auto_sent=True
@@ -163,6 +171,7 @@ async def _audit(
     success: bool,
     error: Optional[str],
     sent_message_id: Optional[str] = None,
+    latency_ms: Optional[int] = None,
 ) -> None:
     """Write an AuditTrail row for the send attempt. Same shape that
     tool_executor_node uses for SAFE/NOTIFY/APPROVE tool calls so audit
@@ -186,6 +195,7 @@ async def _audit(
                 success=success,
                 error=error,
                 cost_usd=0.0,
+                latency_ms=latency_ms,
             )
         )
         await session.commit()

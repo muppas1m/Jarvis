@@ -31,6 +31,7 @@ Resume safety (the load-bearing design choice, see test_resume_dedup.py):
   resume re-executed them.
 """
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -330,6 +331,13 @@ async def tool_executor_node(state: AgentState) -> dict:
         # Approved — fall through to execution below.
 
     # ---- execute (SAFE, NOTIFY, or approved-APPROVE) -----------------------
+    # Latency is measured here, wrapping the dispatch chokepoint
+    # (tool_registry.execute), so a single capture covers BOTH the success and
+    # every failure path uniformly — the node is the only vantage that sees all
+    # of them (execute() can't return latency on the exception paths). The
+    # deferred per-tool timeout wrap (project_per_tool_execution_timeout_gap)
+    # lives inside execute(); this measurement already times whatever it does.
+    dispatch_start = time.monotonic()
     try:
         raw_result = await tool_registry.execute(tool_name, tool_args)
         success = True
@@ -363,6 +371,7 @@ async def tool_executor_node(state: AgentState) -> dict:
         raw_result = f"[ERROR] Tool '{tool_name}' failed: {exc}"
         success = False
         err = str(exc)
+    latency_ms = int((time.monotonic() - dispatch_start) * 1000)
 
     # ---- sanitize + archive if oversized -----------------------------------
     sanitized, archived_full = sanitize_tool_result(
@@ -379,7 +388,10 @@ async def tool_executor_node(state: AgentState) -> dict:
         )
         sanitized += f"\n[archived:{archive_id}]"
 
-    await _log_audit(thread_id, tool_name, level, tool_args, success=success, error=err)
+    await _log_audit(
+        thread_id, tool_name, level, tool_args,
+        success=success, error=err, latency_ms=latency_ms,
+    )
 
     if level == SafetyLevel.NOTIFY:
         await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
@@ -505,8 +517,13 @@ async def _log_audit(
     args: dict,
     success: bool,
     error: str | None = None,
+    latency_ms: int | None = None,
 ) -> None:
-    """Best-effort audit row. Never propagate logging failures into the agent path."""
+    """Best-effort audit row. Never propagate logging failures into the agent path.
+
+    ``latency_ms`` is set only on rows that actually dispatched a tool (the
+    execution path); the rate-limited / blocked / rejected rows leave it None —
+    they have no execution to time."""
     try:
         async with async_session() as session:
             session.add(
@@ -518,6 +535,7 @@ async def _log_audit(
                     input_summary=str(args)[:500],
                     success=success,
                     error=error,
+                    latency_ms=latency_ms,
                 )
             )
             await session.commit()

@@ -128,8 +128,16 @@ def register():
         name="calendar_read",
         handler=calendar_read,
         description=(
-            "Read upcoming events from the master's Google Calendar. "
-            "Use when asked about schedule, meetings, availability, or what's coming up."
+            "Read upcoming events from the master's Google Calendar — what's "
+            "scheduled, meetings, what's coming up. "
+            "Does NOT detect conflicts or compute free/busy availability, does NOT "
+            "normalize timezones (event times come back as Google stores them), and "
+            "does NOT modify anything — to add an event use calendar_create. If asked "
+            "about availability, read the events and reason over the times yourself; "
+            "don't claim you 'checked for conflicts' — the tool doesn't. "
+            "Use for: 'what's on my calendar', 'what meetings this week', 'am I free "
+            "Thursday afternoon', 'what's coming up'. "
+            "Returns a flat list (title, start→end, location, attendees)."
         ),
         args_schema=CalendarReadArgs,
     )
@@ -137,8 +145,17 @@ def register():
         name="calendar_create",
         handler=calendar_create,
         description=(
-            "Create a new event on the master's Google Calendar. Requires approval. "
-            "Use when the master asks to schedule, book, or set up a meeting."
+            "Create a new event on the master's Google Calendar. Requires master "
+            "approval before it executes. "
+            "Does NOT add a Google Meet / video link, does NOT detect conflicts with "
+            "existing events (browse first with calendar_read), and returns only a "
+            "view link — NOT a reusable event_id for later edits. Provide start/end "
+            "as ISO-8601 with a timezone offset; the tool does not infer or normalize "
+            "timezones. "
+            "Use for: 'schedule a 30-min sync with alice@example.com tomorrow at 2pm', "
+            "'book a dentist appointment Friday morning', 'set up a team standup with "
+            "the team'. "
+            "To browse or check existing events first, use calendar_read."
         ),
         args_schema=CalendarCreateArgs,
     )

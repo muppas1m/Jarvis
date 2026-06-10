@@ -176,6 +176,7 @@ class AuditTrail(Base):
     success = Column(Boolean, default=True, nullable=False)
     error = Column(Text, nullable=True)
     cost_usd = Column(Float, default=0.0, nullable=False)
+    latency_ms = Column(Integer, nullable=True)                 # tool execution time (Turn 17.9, migration 004)
     executed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
