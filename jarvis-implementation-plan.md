@@ -9668,6 +9668,8 @@ This gap is invisible at Phase 2 scale (single master notices regressions manual
 
 Frontier agent systems (Claude, ChatGPT custom GPTs, Cursor) all maintain golden-query suites + LLM-as-judge scoring + integration smoke tests. This turn lifts Jarvis to that floor before Phase 3 begins.
 
+> **⚠️ As-built — split into 20.5a + 20.5b (2026-06-09):** **20.5a** shipped t/u/x/y-config + a new cost-isolation layer (`app/llm/eval_mode.py` — the eval can't trip the master's production cap or pollute Mem0). **20.5b** (next turn) ships the real-stack integration tests **v** + **w** + the coverage *baseline number* (the plan itself wants the baseline post-v/w). Deviations from the sketch: (1) the **hard rule** `set(expected_tools) ⊆ set(actual)` is the regression GATE; the LLM-judge runs temp=0 and its 1-5 scores are a reported NOISY TREND, NOT a gate (a judge drop can't be distinguished from judge noise). (2) Real runtime is reported, not the optimistic "<60s". (3) `make evals` (not a CI hook — no CI until Phase 4) runs in-container; eval kept separate from the deterministic tests. (4) golden_queries is empirically calibrated. See the Turn 20.5a entry in `jarvis-frontier-upgrade.md`.
+
 **Tasks:**
 
 `2.X-closeout-t` — `backend/evals/` golden queries

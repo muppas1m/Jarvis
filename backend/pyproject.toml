@@ -135,6 +135,17 @@ ignore = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+# Line-coverage config (Turn 20.5 task y). Config only — NO CI gate yet; the
+# gate lands with the Phase-4 CI pipeline, once a stable baseline exists post
+# closeout-v/w. Run: `make coverage` (or pytest --cov=app).
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/__init__.py", "*/__pycache__/*", "*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true

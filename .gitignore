@@ -46,3 +46,7 @@ langfuse_clickhouse_data/
 
 # Local-only commit depth log — reference for the human, never version-controlled
 commits.md
+
+# Eval run artifacts — keep only the committed baseline.json
+backend/evals/results/*.json
+!backend/evals/results/baseline.json

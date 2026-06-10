@@ -1,0 +1,239 @@
+{
+  "generated_at": "2026-06-10T03:53:44.841426+00:00",
+  "runtime_seconds": 22.3,
+  "eval_cost_usd": 0.0003,
+  "break_tool": null,
+  "summary": {
+    "general_count": 8,
+    "rag_probe_count": 3,
+    "hard_rule_failures": [],
+    "hard_rule_pass_rate": 1.0,
+    "avg_scores": {
+      "relevance": 4.12,
+      "accuracy": 4.38,
+      "tone": 4.25,
+      "completeness": 3.5
+    },
+    "avg_overall": 4.06,
+    "judge_threshold": 4.0,
+    "hyde_candidates": [
+      "rag_mismatch_espresso",
+      "rag_mismatch_tax",
+      "rag_mismatch_plants"
+    ]
+  },
+  "records": [
+    {
+      "id": "recall_preferences",
+      "category": "recall",
+      "kind": "general",
+      "query": "What do you remember about how I like to communicate?",
+      "expected_tools": [],
+      "actual_tools": [],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-82d8e2c2f8",
+      "scores": {
+        "relevance": 5.0,
+        "accuracy": 5.0,
+        "tone": 5.0,
+        "completeness": 4.0
+      }
+    },
+    {
+      "id": "recall_person",
+      "category": "recall",
+      "kind": "general",
+      "query": "Who is Alice to me, based on what I've told you?",
+      "expected_tools": [
+        "memory_search"
+      ],
+      "actual_tools": [
+        "memory_search"
+      ],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-20dc76de5c",
+      "scores": {
+        "relevance": 5.0,
+        "accuracy": 5.0,
+        "tone": 5.0,
+        "completeness": 5.0
+      }
+    },
+    {
+      "id": "classify_urgent_emails",
+      "category": "classification",
+      "kind": "general",
+      "query": "Any urgent emails today?",
+      "expected_tools": [
+        "email_history_search"
+      ],
+      "actual_tools": [
+        "email_history_search"
+      ],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-3f4b1ceefe",
+      "audit_latency_ms": {
+        "email_history_search": 23
+      },
+      "scores": {
+        "relevance": 5.0,
+        "accuracy": 5.0,
+        "tone": 5.0,
+        "completeness": 4.0
+      }
+    },
+    {
+      "id": "action_schedule_meeting",
+      "category": "action",
+      "kind": "general",
+      "query": "Schedule a 30-minute sync with alice@example.com tomorrow at 2pm.",
+      "expected_tools": [
+        "calendar_create"
+      ],
+      "actual_tools": [
+        "calendar_create"
+      ],
+      "hard_rule_pass": true,
+      "stop_reason": "interrupted",
+      "thread_id": "eval-699e8dde18",
+      "stop_reason_match": true,
+      "scores": {
+        "relevance": 1.0,
+        "accuracy": 1.0,
+        "tone": 1.0,
+        "completeness": 1.0
+      }
+    },
+    {
+      "id": "action_read_calendar",
+      "category": "action",
+      "kind": "general",
+      "query": "What's on my calendar this week?",
+      "expected_tools": [
+        "calendar_read"
+      ],
+      "actual_tools": [
+        "calendar_read"
+      ],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-bf2da382ac",
+      "scores": {
+        "relevance": 4.0,
+        "accuracy": 5.0,
+        "tone": 4.0,
+        "completeness": 3.0
+      }
+    },
+    {
+      "id": "synthesis_this_week",
+      "category": "synthesis",
+      "kind": "general",
+      "query": "What's on my plate this week \u2014 meetings and anything I need to reply to?",
+      "expected_tools": [
+        "calendar_read"
+      ],
+      "actual_tools": [
+        "calendar_read",
+        "email_history_search"
+      ],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-e6f6749bbb",
+      "scores": {
+        "relevance": 3.0,
+        "accuracy": 4.0,
+        "tone": 4.0,
+        "completeness": 3.0
+      }
+    },
+    {
+      "id": "edge_trivial_greeting",
+      "category": "edge",
+      "kind": "general",
+      "query": "hey",
+      "expected_tools": [],
+      "actual_tools": [],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-babf4c32b3",
+      "scores": {
+        "relevance": 5.0,
+        "accuracy": 5.0,
+        "tone": 5.0,
+        "completeness": 4.0
+      }
+    },
+    {
+      "id": "edge_unknown_capability",
+      "category": "edge",
+      "kind": "general",
+      "query": "Cancel my Netflix subscription.",
+      "expected_tools": [],
+      "actual_tools": [],
+      "hard_rule_pass": true,
+      "stop_reason": "end_turn",
+      "thread_id": "eval-0c1a3a5875",
+      "scores": {
+        "relevance": 5.0,
+        "accuracy": 5.0,
+        "tone": 5.0,
+        "completeness": 4.0
+      }
+    },
+    {
+      "id": "rag_mismatch_espresso",
+      "category": "rag_phrasing_mismatch",
+      "kind": "rag_probe",
+      "query": "how long do I run the machine and how much ground beans for a strong morning cup?",
+      "expect_hit_filename": "eval_espresso.md",
+      "kept_files": [],
+      "kept_scores": [],
+      "hyde_candidate": true,
+      "expect_dropped_scores": [
+        {
+          "rerank": 0.0033,
+          "reason": "below_threshold"
+        }
+      ],
+      "corpus_size": 4
+    },
+    {
+      "id": "rag_mismatch_tax",
+      "category": "rag_phrasing_mismatch",
+      "kind": "rag_probe",
+      "query": "when is the cutoff to send the government my yearly paperwork?",
+      "expect_hit_filename": "eval_tax.md",
+      "kept_files": [],
+      "kept_scores": [],
+      "hyde_candidate": true,
+      "expect_dropped_scores": [
+        {
+          "rerank": 0.0203,
+          "reason": "below_threshold"
+        }
+      ],
+      "corpus_size": 4
+    },
+    {
+      "id": "rag_mismatch_plants",
+      "category": "rag_phrasing_mismatch",
+      "kind": "rag_probe",
+      "query": "why do the leaves on my indoor greenery keep going brown and mushy?",
+      "expect_hit_filename": "eval_plants.md",
+      "kept_files": [],
+      "kept_scores": [],
+      "hyde_candidate": true,
+      "expect_dropped_scores": [
+        {
+          "rerank": 0.0071,
+          "reason": "below_threshold"
+        }
+      ],
+      "corpus_size": 4
+    }
+  ]
+}

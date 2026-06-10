@@ -1,0 +1,152 @@
+# Golden-query suite — Phase-2 measurement floor (Turn 20.5, task t).
+#
+# Each entry drives one eval. Two kinds:
+#
+#   general (default): run through run_turn(). Graded by
+#     - HARD RULE (deterministic, the regression gate): the agent must EMIT a
+#       tool_call for every name in `expected_tools` (subset — extra calls OK).
+#     - JUDGE (noisy trend signal, temp=0): GPT-4o-mini scores `traits` 1-5.
+#     `capture_audit: true` additionally reads audit_trail latency_ms + the turn
+#     stop_reason — exercises the 17.9 signals.
+#
+#   rag_probe: true — seed `corpus` into document_chunks, call search_documents
+#     directly, capture the rag_search_complete kept/dropped audit. These exist
+#     to make the DEFERRED LIFTS measurable:
+#       - HyDE trigger (project_hyde_deferral): the query vocabulary is
+#         deliberately ≠ the corpus vocabulary; if the on-topic chunk is NOT kept,
+#         that's a phrasing-mismatch recall failure → a HyDE candidate.
+#       - LLM-relevance-grading trigger (project_llm_relevance_grading_deferral):
+#         the captured kept/dropped rerank scores let leak-through be detected.
+
+# ---------------------------------------------------------------------------
+# recall
+# ---------------------------------------------------------------------------
+- id: recall_preferences
+  category: recall
+  # Communication style lives in the always-on profile (system-prompt prefix), so
+  # the agent may legitimately answer from context WITHOUT a memory_search tool
+  # call — no tool is REQUIRED. Calibrated empirically (Turn 20.5): the agent
+  # answers from profile. The judge checks the answer is grounded, not fabricated.
+  query: "What do you remember about how I like to communicate?"
+  expected_tools: []
+  traits:
+    - "Answers from what is actually known about the master; does not fabricate."
+    - "Concise and direct."
+
+- id: recall_person
+  category: recall
+  query: "Who is Alice to me, based on what I've told you?"
+  expected_tools: [memory_search]
+  traits:
+    - "Consults memory."
+    - "If nothing is known, says so plainly instead of inventing a relationship."
+
+# ---------------------------------------------------------------------------
+# classification — exercises 17.8 confidence + 17.9 latency_ms / stop_reason
+# ---------------------------------------------------------------------------
+- id: classify_urgent_emails
+  category: classification
+  query: "Any urgent emails today?"
+  expected_tools: [email_history_search]
+  capture_audit: true
+  traits:
+    - "Uses the email-history tool to answer."
+    - "Does not invent emails that weren't returned."
+    - "Distinguishes urgent from routine if any are present."
+
+# ---------------------------------------------------------------------------
+# action — calendar_create is APPROVE-tier, so the turn should INTERRUPT
+# (stop_reason == interrupted); the agent must still EMIT the tool_call.
+# ---------------------------------------------------------------------------
+- id: action_schedule_meeting
+  category: action
+  query: "Schedule a 30-minute sync with alice@example.com tomorrow at 2pm."
+  expected_tools: [calendar_create]
+  expect_stop_reason: interrupted
+  traits:
+    - "Requests approval before creating the event (does not claim it was created)."
+    - "Captures the right title, attendee, and time in the proposed event."
+
+- id: action_read_calendar
+  category: action
+  query: "What's on my calendar this week?"
+  expected_tools: [calendar_read]
+  traits:
+    - "Reads the calendar."
+    - "Handles an empty calendar gracefully without fabricating events."
+
+# ---------------------------------------------------------------------------
+# synthesis — multi-tool; subset rule allows the agent to call more than listed
+# ---------------------------------------------------------------------------
+- id: synthesis_this_week
+  category: synthesis
+  query: "What's on my plate this week — meetings and anything I need to reply to?"
+  expected_tools: [calendar_read]
+  traits:
+    - "Pulls from more than one source (calendar and/or email)."
+    - "Synthesizes rather than dumping raw tool output."
+    - "No fabrication when a source is empty."
+
+# ---------------------------------------------------------------------------
+# edge cases
+# ---------------------------------------------------------------------------
+- id: edge_trivial_greeting
+  category: edge
+  query: "hey"
+  expected_tools: []
+  traits:
+    - "Answers briefly and directly."
+    - "Does NOT spam tools or emit step-by-step reasoning preamble for a greeting."
+
+- id: edge_unknown_capability
+  category: edge
+  query: "Cancel my Netflix subscription."
+  expected_tools: []
+  traits:
+    - "Does not pretend to have done it."
+    - "States plainly that it has no tool for that."
+
+# ---------------------------------------------------------------------------
+# rag_probe — phrasing-mismatch (HyDE trigger) + kept/dropped capture
+# ---------------------------------------------------------------------------
+- id: rag_mismatch_espresso
+  category: rag_phrasing_mismatch
+  rag_probe: true
+  query: "how long do I run the machine and how much ground beans for a strong morning cup?"
+  corpus:
+    filename: eval_espresso.md
+    content: |
+      # Espresso Extraction Parameters
+
+      A balanced double shot uses approximately eighteen grams of finely ground
+      coffee, extracted over twenty-five to thirty seconds at ninety-three degrees
+      Celsius, yielding about thirty-six grams of liquid espresso in the cup.
+  expect_hit_filename: eval_espresso.md
+
+- id: rag_mismatch_tax
+  category: rag_phrasing_mismatch
+  rag_probe: true
+  query: "when is the cutoff to send the government my yearly paperwork?"
+  corpus:
+    filename: eval_tax.md
+    content: |
+      # Tax Filing Deadlines
+
+      Individual federal income tax returns are generally due on April fifteenth.
+      Requesting an extension moves the filing deadline to October fifteenth, but
+      it does not extend the time to pay any balance owed.
+  expect_hit_filename: eval_tax.md
+
+- id: rag_mismatch_plants
+  category: rag_phrasing_mismatch
+  rag_probe: true
+  query: "why do the leaves on my indoor greenery keep going brown and mushy?"
+  corpus:
+    filename: eval_plants.md
+    content: |
+      # Houseplant Root Rot
+
+      Overwatering is the single most common cause of root rot in tropical
+      houseplants like pothos and monstera. Use well-draining soil and only water
+      once the top inch has dried out.
+  expect_hit_filename: eval_plants.md
