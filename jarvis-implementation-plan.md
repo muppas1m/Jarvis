@@ -5,8 +5,22 @@
 > Execution halted after commit `4a327fb` at Turn 19.2 close (mid-Phase-2). Currently producing `jarvis-frontier-upgrade.md` — the frontier-grade upgrade doc. Backward lifts (Turn 1 through 19.2) are being drafted first. Once backward lifts up through the halt point are completed and applied, forward execution resumes from the halt point per base plan, with forward turns also routed through the upgrade doc.
 >
 > This document remains the historical baseline. The upgrade document is authoritative for what is actually being executed under the frontier-grade discipline.
+>
+> **Status (2026-06-11):** the backward audit is closed and forward execution resumed from the Turn-19.2 halt — it has run through the Phase-2-Week-6 close-out (Turns 17.8 → 17.9 → 19.3–19.7 → 20 → 20.5a/b). **Phase 2 is complete.**
 
 ---
+
+> ## ⚙️ Decision — Phase-1.5 lift sequencing: TRIGGER-GATED, not lift-first (2026-06-11)
+>
+> The four Phase-1.5 lifts surfaced by the backward audit (1.5a-1/1.5a-2 MCP-readiness; 1.5b-1/1.5b-2 multi-user-readiness; see `jarvis-frontier-upgrade.md` Phase 1.5) are **NOT executed up front before resuming forward work.** Forward execution continues from the Turn-19.2 halt; each lift lands **at its trigger**, before its dependents:
+> - **1.5a (MCP-readiness)** → trigger: Phase 3 / a real MCP-client use case (Claude Desktop / Cursor) or a multi-agent cross-process handoff.
+> - **1.5b (multi-user-readiness)** → trigger: Phase 4 entry (the first multi-user task).
+>
+> **Rationale:** (1) the lifts are **design-known** — the audit de-risked them, so they don't need to be built early to reduce uncertainty; (2) multi-user is **N=1-distant** — building it now is YAGNI; (3) you **can't meaningfully test multi-tenant isolation at N=1** — the lift can't be validated until there's a second user; (4) each lift lands **at trigger-time before its dependents**, so foundation-before-dependent holds *without* front-loading.
+>
+> **What this requires of forward work:** build **multi-user-FRIENDLY** — keep clean threadable seams so the eventual retrofit is mechanical, not a rewrite: the channel layer carries sender identity, tool signatures stay clean (no single-user globals baked into call paths), and `owner_id` is a threadable field in `meta` (already done for documents + the EmailLog.meta home). The reviewer **flags any seam-cementing** per turn — a single-user assumption that would make the retrofit costly.
+>
+> **Hinge:** if multi-user becomes near-term-**certain** (not speculative), re-cut — start threading a real `user_id` through from that point forward, and pull 1.5b earlier. Until that signal, trigger-gated stands.
 
 > **Audience:** Full-stack AI Software Engineer with file-level instructions.
 > **Stack:** Python (FastAPI + Celery) backend · Next.js 16 + TypeScript frontend · PostgreSQL + pgvector · Redis · Mem0 (self-hosted, BGE-M3 embeddings) · LiteLLM (provider-agnostic — plug any LLM) · LangGraph 1.0 (agent orchestration with checkpointing + HITL) · Langfuse (self-hosted observability) · Patchright (stealth browser automation)
