@@ -1,0 +1,40 @@
+Line-coverage baseline — Turn 20.5b (2026-06-10), task closeout-y.
+
+Command:  make coverage   (== pytest --cov=app --cov-report=term-missing tests/)
+Config:   [tool.coverage] in backend/pyproject.toml
+
+TOTAL: 44%  (1410 / 3213 statements covered)
+
+NO CI gate yet — the gate lands with the Phase-4 CI pipeline (per the plan). This
+file is a baseline number for next-pass comparison, not a threshold.
+
+Named gaps (surfaces that stay uncovered at this baseline — informational):
+  - app/scheduler/*                 0%   Celery tasks/beat — run by the worker, not
+                                         unit-tested (approval_expiry, gmail_check/renew,
+                                         morning_brief, memory_consolidation stub).
+  - app/messaging/channels/telegram.py  0%   The channel layer — known gap (the plan
+                                         flags channel layer + classifier as the
+                                         coverage holes). The channel ABC IS covered (96%).
+  - app/main.py                     0%   FastAPI lifespan/startup — exercised by the
+                                         running server, not the test process.
+  - app/security/auth.py            0%   Auth dependency — no direct unit test yet.
+  - app/memory/user_profile.py     27%   UserProfileManager — thin coverage.
+  - app/email/responder.py         31%   draft generation — only the happy path via v
+                                         (which mocks generate_draft).
+  - app/messaging/router.py        44%   the gmail-approval dispatch IS now exercised by
+                                         the v integration test (was lower pre-20.5b).
+
+What 20.5b ADDED to coverage: the email pipeline (gmail_pubsub 63%, gmail_send,
+_resolve_gmail_approval) via v, and the cross-source recall path via w.
+
+KNOWN full-suite flakiness (pre-existing, NOT a 20.5b regression — proven by
+running with/without the new conftest; both pass in isolation):
+  - test_resume_dedup            — full-suite ORDERING (checkpointer connection bound
+                                   to a prior test's now-closed loop). Passes alone.
+  - test_tool_selector_structural::test_selector_returns_only_always_loaded_when_no_rankables
+                                 — intra-file registry-singleton pollution (a sibling
+                                   test leaves real tools registered). Fails even alone.
+  20.5b's new tests/conftest.py engine-rebind fixture fixed the engine-level part
+  (4 -> 2 full-suite failures). The remaining 2 need test-isolation hardening
+  (registry-singleton reset + checkpointer per-test rebind) — a test-infra follow-up,
+  tracked for a later pass. The coverage % is measured regardless of these.
