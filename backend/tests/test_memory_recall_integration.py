@@ -49,29 +49,31 @@ async def test_thread_id():
     return f"test-memrecall-{uuid.uuid4().hex[:8]}"
 
 
-@pytest.fixture
-async def memory_cleanup(mem_manager, test_thread_id):
-    """Yield, then delete any Mem0 entries tagged with the test thread_id."""
-    yield
-    # get_all() is user-scoped to "master"; we filter by thread_id ourselves.
-    try:
-        all_memories = await mem_manager.mem0.get_all()
-    except Exception:
-        return  # best-effort cleanup — if Mem0 is unhappy, log and move on
+async def _wipe_thread(thread_id: str) -> None:
+    """RELIABLE Mem0 teardown: direct SQL on the marker thread_id.
 
-    for m in all_memories:
-        meta = m.get("metadata") or {}
-        if meta.get("thread_id") == test_thread_id:
-            mem_id = m.get("id")
-            if not mem_id:
-                continue
-            try:
-                await mem_manager.mem0.delete(mem_id)
-            except Exception:
-                # Don't let cleanup failures cascade — orphans are
-                # identifiable by the test thread_id and can be wiped
-                # manually if accumulated.
-                pass
+    The prior pattern (get_all → filter by metadata.thread_id → mem0.delete)
+    silently failed and accumulated residue: Mem0 v2's get_all PAGES (so a test's
+    entries may not be in the returned page) and its delete() API is flaky. Hitting
+    the pgvector backing table by thread_id is deterministic. (Residue cleaned +
+    teardown fixed in Turn 20.5b.)"""
+    from sqlalchemy import text
+
+    from app.db.engine import async_session
+
+    async with async_session() as session:
+        await session.execute(
+            text("DELETE FROM mem0_memories WHERE payload->>'thread_id' = :t"),
+            {"t": thread_id},
+        )
+        await session.commit()
+
+
+@pytest.fixture
+async def memory_cleanup(test_thread_id):
+    """Yield, then reliably delete any Mem0 entries tagged with the test thread_id."""
+    yield
+    await _wipe_thread(test_thread_id)
 
 
 async def _add_no_infer(
@@ -129,16 +131,9 @@ async def test_recall_filters_by_thread_id_and_excludes_other_threads(
                 f"{test_thread_id!r}. Cross-thread leakage."
             )
     finally:
-        # Clean up the second thread's memory too — our memory_cleanup
-        # fixture only handles test_thread_id.
-        all_memories = await mem_manager.mem0.get_all()
-        for m in all_memories:
-            meta = m.get("metadata") or {}
-            if meta.get("thread_id") == other_thread:
-                try:
-                    await mem_manager.mem0.delete(m.get("id"))
-                except Exception:
-                    pass
+        # Clean up the second thread's memory too — the memory_cleanup fixture
+        # only handles test_thread_id. Reliable SQL teardown (see _wipe_thread).
+        await _wipe_thread(other_thread)
 
 
 @pytest.mark.asyncio
