@@ -37,6 +37,23 @@ async def reset_async_state_for_task() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("engine_dispose_failed_swallowed", error=str(exc))
 
+    # redis.asyncio pools bind to the loop that first touched them, same as the
+    # engine. The Celery email path (gmail_check → classifier/responder →
+    # gateway → cost_tracker) touches both pools below, so a second task on a
+    # fresh asyncio.run loop would hit "Event loop is closed" without this
+    # rebind. aclose disconnects; the next command reconnects on the current
+    # loop. Best-effort — a dead-loop pool can raise on close.
+    try:
+        from app.agent.rate_limits import rate_limiter
+        await rate_limiter.redis.aclose()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.llm.gateway import llm_gateway
+        await llm_gateway.cost_tracker.redis.aclose()
+    except Exception:  # noqa: BLE001
+        pass
+
     if graph_module._checkpointer_cm is not None:
         try:
             await graph_module._checkpointer_cm.__aexit__(None, None, None)
