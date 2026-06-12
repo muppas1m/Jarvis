@@ -150,7 +150,10 @@ def register() -> None:
             "Each passage is prefixed with a citation like [report.pdf, p.3, "
             "§Results]. When you use a passage to answer, cite it with that exact "
             "bracket so the master can verify the source; never state a document "
-            "fact without its citation."
+            "fact without its citation. Answer ONLY from the returned passages — "
+            "if they don't contain the answer, say the documents don't cover it; "
+            "do NOT fall back to your own general knowledge for a question about "
+            "the master's documents."
         ),
         args_schema=DocumentSearchArgs,
     )

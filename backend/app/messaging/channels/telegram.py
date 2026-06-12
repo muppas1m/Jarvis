@@ -17,6 +17,8 @@ TELEGRAM_BOT_TOKEN is unset, and we don't want that crash to fire at
 module-import time (it'd happen before lifespan can guard).
 """
 import json
+import os
+import tempfile
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -34,6 +36,26 @@ from app.messaging.channel import Channel, NormalizedMessage
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _format_ingest_reply(filename: str, result: dict) -> str:
+    """Master-facing confirmation for a completed ingestion. Pure (testable) —
+    maps the ``ingest_document`` result dict to a reply, distinguishing a fresh
+    ingest from a content-hash dedup (no-op) and a pipeline-version replace."""
+    chunks = result.get("chunks_stored", 0)
+    if result.get("deduplicated"):
+        return (
+            f"📄 *{filename}* is already in my knowledge base — no changes needed. "
+            "Ask me anything about it."
+        )
+    if result.get("replaced"):
+        return (
+            f"📄 Updated *{filename}* — re-indexed {chunks} chunk(s) with the latest "
+            "pipeline. Ask me anything about it."
+        )
+    return (
+        f"📄 Ingested *{filename}* — {chunks} chunk(s) indexed. Ask me anything about it."
+    )
 
 
 class TelegramChannel(Channel):
@@ -151,6 +173,89 @@ class TelegramChannel(Channel):
             logger.debug("telegram_typing_failed", error=str(exc))
 
     # ------------------------------------------------------------------
+    # Document ingestion (RAG corpus uploads)
+    # ------------------------------------------------------------------
+    async def handle_document(self, message: Any) -> None:
+        """Ingest a document attached to a Telegram message into the RAG corpus.
+
+        Telegram attachments arrive as ``message.document``; the polling driver's
+        TEXT-only handler silently dropped them (the master's "uploaded doc never
+        ingested" gap). This downloads the file and runs the same
+        ``ingest_document`` pipeline the /documents/upload API uses, then confirms.
+
+        Master-only: an open ingest path is corpus poisoning by anyone who can DM
+        the bot (every later search reads what was ingested). Unsupported types
+        and oversized files get a plain reply — never a silent drop.
+        """
+        doc = getattr(message, "document", None)
+        if doc is None:
+            return
+        chat_id = str(message.chat_id)
+        if chat_id != settings.TELEGRAM_MASTER_CHAT_ID:
+            logger.warning("telegram_document_non_master_ignored", chat_id=chat_id)
+            return
+
+        # Canonical allowed set + pipeline live in the documents layer; reuse the
+        # API's constant so Telegram and HTTP accept exactly the same formats.
+        from app.api.documents import ALLOWED_EXTENSIONS
+
+        filename = doc.file_name or "upload"
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            await self._send_with_markdown_fallback(
+                chat_id,
+                f"I can't ingest `{ext or 'that'}` files. I handle: "
+                + ", ".join(sorted(ALLOWED_EXTENSIONS)) + ".",
+                "Markdown",
+            )
+            return
+
+        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if doc.file_size and doc.file_size > max_bytes:
+            await self._send_with_markdown_fallback(
+                chat_id,
+                f"That file is too large (~{doc.file_size // (1024 * 1024)} MB). "
+                f"My limit is {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                "Markdown",
+            )
+            return
+
+        try:  # typing indicator is best-effort
+            await self.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass
+
+        tmp_path: str | None = None
+        try:
+            tg_file = await self.bot.get_file(doc.file_id)
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp_path = tmp.name
+            await tg_file.download_to_drive(tmp_path)
+
+            from app.documents.ingestion import ingest_document
+
+            result = await ingest_document(tmp_path, filename, owner_id="master")
+            reply = _format_ingest_reply(filename, result)
+            logger.info(
+                "telegram_document_ingested",
+                filename=filename,
+                chunks=result.get("chunks_stored"),
+                deduplicated=result.get("deduplicated"),
+                replaced=result.get("replaced"),
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a failure, never silent-drop
+            logger.error("telegram_document_ingest_failed", filename=filename, error=str(exc))
+            reply = (
+                f"Sorry, I couldn't ingest *{filename}* ({exc.__class__.__name__}). "
+                "Try again, or send it as a different format."
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        await self._send_with_markdown_fallback(chat_id, reply, "Markdown")
+
+    # ------------------------------------------------------------------
     # Long-polling driver (dev mode)
     # ------------------------------------------------------------------
     def build_polling_application(self) -> Application:
@@ -169,6 +274,11 @@ class TelegramChannel(Channel):
             if msg is None:
                 return
             await route_inbound(msg)
+
+        async def _on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if not update.message or not update.message.document:
+                return
+            await self.handle_document(update.message)
 
         async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             from app.api.approvals import resolve_approval
@@ -213,6 +323,7 @@ class TelegramChannel(Channel):
                 await route_approval_decision(thread_id, "telegram", decision)
 
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
+        app.add_handler(MessageHandler(filters.Document.ALL, _on_document))
         app.add_handler(CallbackQueryHandler(_on_callback))
         return app
 
