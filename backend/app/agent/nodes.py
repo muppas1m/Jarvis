@@ -44,6 +44,7 @@ from langchain_core.messages import (
 )
 from langchain_litellm import ChatLiteLLM
 from langgraph.types import interrupt
+from sqlalchemy import select
 
 from app.agent.message_repair import repair_orphaned_tool_calls
 from app.agent.prompts import build_system_prompt
@@ -298,17 +299,30 @@ async def tool_executor_node(state: AgentState) -> dict:
 
     # ---- APPROVE → pause via interrupt --------------------------------------
     if level == SafetyLevel.APPROVE:
-        approval_id = await _create_pending_approval(
-            thread_id=thread_id,
-            interrupt_id=tool_call_id,
-            tool_name=tool_name,
-            tool_args=tool_args,
-        )
-        await send_approval_request_to_master(
-            approval_id=str(approval_id),
-            tool_name=tool_name,
-            description=_describe_action(tool_name, tool_args),
-        )
+        # Idempotency guard: LangGraph re-runs this node from the top on every
+        # resume, so creating the row + pinging the master here unconditionally
+        # produced a DUPLICATE PendingApproval row + a second Telegram prompt on
+        # each resume (the Jun-11 double-prompt bug). interrupt_id is unique per
+        # tool call — if a row already exists for it, the first pass already did
+        # the create + send; skip straight to re-entering interrupt().
+        approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
+        if approval_id is None:
+            approval_id = await _create_pending_approval(
+                thread_id=thread_id,
+                interrupt_id=tool_call_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+            )
+            await send_approval_request_to_master(
+                approval_id=str(approval_id),
+                tool_name=tool_name,
+                description=_describe_action(tool_name, tool_args),
+            )
+        else:
+            logger.info(
+                "approval_already_pending_skip_duplicate",
+                thread_id=thread_id, interrupt_id=tool_call_id, tool_name=tool_name,
+            )
         # interrupt() snapshots state and exits. On resume, this same call
         # returns the resume value. Resume payload shape:
         #   {"approved": True}              -> proceed to execution below
@@ -381,28 +395,39 @@ async def tool_executor_node(state: AgentState) -> dict:
         err = str(exc)
     latency_ms = int((time.monotonic() - dispatch_start) * 1000)
 
-    # ---- sanitize + archive if oversized -----------------------------------
-    sanitized, archived_full = sanitize_tool_result(
-        tool_name=tool_name,
-        raw_result=raw_result,
-        max_chars=settings.TOOL_RESULT_MAX_CHARS,
-    )
-    if archived_full is not None:
-        archive_id = await _archive_tool_result(
-            thread_id=thread_id,
+    # ---- post-execute: sanitize / archive / audit / notify -----------------
+    # Wrapped as a whole: a failure in ANY of these — sanitize, the
+    # _archive_tool_result or _log_audit DB writes, or the notify_tool_executed
+    # Telegram send — must NOT leave the tool_call unanswered. An orphaned
+    # tool_call poisons the history and 400s the next LLM call (the P1 terminal
+    # error), so the ToolMessage ALWAYS returns, with a fallback body if
+    # rendering itself failed. (_log_audit is already best-effort internally;
+    # this is belt-and-suspenders for it and the real cover for archive/notify.)
+    sanitized = f"[ERROR] Tool '{tool_name}' ran but its result could not be recorded."
+    try:
+        sanitized, archived_full = sanitize_tool_result(
             tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            full_result=archived_full,
+            raw_result=raw_result,
+            max_chars=settings.TOOL_RESULT_MAX_CHARS,
         )
-        sanitized += f"\n[archived:{archive_id}]"
+        if archived_full is not None:
+            archive_id = await _archive_tool_result(
+                thread_id=thread_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                full_result=archived_full,
+            )
+            sanitized += f"\n[archived:{archive_id}]"
 
-    await _log_audit(
-        thread_id, tool_name, level, tool_args,
-        success=success, error=err, latency_ms=latency_ms,
-    )
+        await _log_audit(
+            thread_id, tool_name, level, tool_args,
+            success=success, error=err, latency_ms=latency_ms,
+        )
 
-    if level == SafetyLevel.NOTIFY:
-        await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
+        if level == SafetyLevel.NOTIFY:
+            await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
+    except Exception as exc:  # noqa: BLE001 — never drop the ToolMessage (P1 orphan guard)
+        logger.error("tool_post_execute_failed", tool=tool_name, error=str(exc))
 
     return {
         "messages": [ToolMessage(content=sanitized, tool_call_id=tool_call_id)]
@@ -477,6 +502,29 @@ def _describe_action(tool_name: str, tool_args: dict) -> str:
     """Human-readable description for approval messages."""
     args_pretty = json.dumps(tool_args, indent=2, default=str)
     return f"Execute `{tool_name}` with arguments:\n```json\n{args_pretty}\n```"
+
+
+async def _find_pending_approval(thread_id: str, interrupt_id: str) -> uuid.UUID | None:
+    """Return the id of an existing PendingApproval for this interrupt_id, else None.
+
+    The APPROVE branch re-runs from the top on every resume (``interrupt()``
+    doesn't commit the node's partial return), so without this check each resume
+    created a fresh PendingApproval row AND re-pinged the master — the duplicate-
+    prompt bug (27 rows for ~14 requests in the Jun-11 test). ``interrupt_id`` is
+    the tool_call_id, unique per tool call, so a row's existence (ANY status —
+    it may already be approved/rejected by the time we re-run) means we've
+    already created + sent for it. Scoped by thread_id to use that index."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(PendingApproval.id)
+            .where(
+                PendingApproval.thread_id == thread_id,
+                PendingApproval.interrupt_id == interrupt_id,
+            )
+            .limit(1)
+        )
+        row = result.first()
+        return row[0] if row else None
 
 
 async def _create_pending_approval(

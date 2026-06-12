@@ -288,3 +288,82 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
         f"Final state missing ToolMessage for tool B (id={call_b_id!r}). "
         f"Tool messages found: {sorted(tool_message_ids)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_duplicate_pending_approval_or_prompt(
+    real_checkpointer, reset_runner_graph, redis_client
+) -> None:
+    """P3: the APPROVE branch re-runs from the top on resume. Without the
+    interrupt_id idempotency guard it created a SECOND PendingApproval row AND
+    re-pinged the master each resume (the Jun-11 double-prompt bug: 27 rows for
+    ~14 requests). After the guard, a full run+resume yields exactly ONE row and
+    ONE prompt. (Execution exactly-once is covered by the sibling test; this
+    pins the approval-creation side.)"""
+    from unittest.mock import AsyncMock
+    from sqlalchemy import select
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+
+    thread_id = f"test-approval-dedup-{uuid.uuid4().hex[:8]}"
+    call_id = f"call_APV_{uuid.uuid4().hex[:6]}"
+
+    initial_response = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "gmail_send",
+            "args": {"to": "test@example.com", "body": "test"},
+            "id": call_id,
+        }],
+    )
+    final_response = AIMessage(content="Sent. Done.")
+    fake_llm = FakeMessagesListChatModel(responses=[initial_response, final_response])
+
+    def fake_build_chat_model(tools):  # noqa: ARG001
+        return fake_llm
+
+    async def fake_execute(name: str, args: dict) -> str:  # noqa: ARG001
+        return "fake gmail_send result"
+
+    async def count_pending() -> int:
+        async with async_session() as session:
+            rows = await session.execute(
+                select(PendingApproval.id).where(PendingApproval.interrupt_id == call_id)
+            )
+            return len(rows.all())
+
+    # AsyncMock so we can count how many times the master was pinged.
+    send_mock = AsyncMock(return_value=None)
+
+    with patch("app.agent.nodes._build_chat_model", fake_build_chat_model), \
+         patch.object(tool_registry, "execute", side_effect=fake_execute), \
+         patch("app.messaging.failure_alerter.send_approval_request_to_master", send_mock):
+        # ---- first leg: run_turn → interrupt; exactly one row + one ping ----
+        result = await run_turn(
+            user_message="send an email",
+            thread_id=thread_id,
+            platform="web",
+            channel_user_id="test-runner",
+        )
+        assert result["status"] == "interrupted", (
+            f"graph should pause at the APPROVE tool; got {result['status']!r}"
+        )
+        assert await count_pending() == 1, "first pass should create exactly one PendingApproval"
+        assert send_mock.await_count == 1, "first pass should ping the master exactly once"
+
+        # ---- second leg: resume re-runs the APPROVE branch from the top ----
+        resume_result = await resume_turn(thread_id=thread_id, decision={"approved": True})
+        assert resume_result["status"] == "complete", (
+            f"after resume expected 'complete', got {resume_result['status']!r}"
+        )
+
+        # ---- the P3 regression assertions ----
+        final_rows = await count_pending()
+        assert final_rows == 1, (
+            f"REGRESSION: resume created a duplicate PendingApproval row "
+            f"(count={final_rows}). The interrupt_id idempotency guard is broken."
+        )
+        assert send_mock.await_count == 1, (
+            f"REGRESSION: resume re-pinged the master (await_count="
+            f"{send_mock.await_count}). The duplicate-prompt guard is broken."
+        )
