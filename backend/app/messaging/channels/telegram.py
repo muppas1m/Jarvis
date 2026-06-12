@@ -255,6 +255,24 @@ class TelegramChannel(Channel):
 
         await self._send_with_markdown_fallback(chat_id, reply, "Markdown")
 
+    async def handle_photo(self, message: Any) -> None:
+        """Acknowledge a photo/image upload instead of silently dropping it.
+
+        A "photographed document" arrives as ``message.photo`` (a list of
+        PhotoSize), NOT ``message.document`` — so the document handler misses it
+        and `filters.Document.ALL` doesn't catch it. We don't OCR images yet
+        (deferred), but the master must get a reply, not silence."""
+        chat_id = str(message.chat_id)
+        if chat_id != settings.TELEGRAM_MASTER_CHAT_ID:
+            return
+        await self._send_with_markdown_fallback(
+            chat_id,
+            "I can't read photos or images yet (no OCR). If that's a document, "
+            "send it as a file — `.pdf`, `.docx`, `.xlsx`, `.txt`, `.md`, `.csv` "
+            "— and I'll ingest it.",
+            "Markdown",
+        )
+
     # ------------------------------------------------------------------
     # Long-polling driver (dev mode)
     # ------------------------------------------------------------------
@@ -279,6 +297,11 @@ class TelegramChannel(Channel):
             if not update.message or not update.message.document:
                 return
             await self.handle_document(update.message)
+
+        async def _on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if not update.message or not update.message.photo:
+                return
+            await self.handle_photo(update.message)
 
         async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             from app.api.approvals import resolve_approval
@@ -324,6 +347,7 @@ class TelegramChannel(Channel):
 
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
         app.add_handler(MessageHandler(filters.Document.ALL, _on_document))
+        app.add_handler(MessageHandler(filters.PHOTO, _on_photo))
         app.add_handler(CallbackQueryHandler(_on_callback))
         return app
 

@@ -90,3 +90,30 @@ async def test_handle_document_happy_path_ingests_and_confirms():
     # owner is pinned to master (multi-user seam), filename threaded through
     assert ingest.await_args.kwargs.get("owner_id") == "master"
     ch.bot.send_message.assert_awaited()  # confirmation sent
+
+
+# --------------------------------------------------------------------------- #
+# photo upload — acknowledge, never silent-drop                               #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_handle_photo_acknowledges_master():
+    """A photographed document arrives as message.photo (not .document) — we
+    don't OCR yet, but must reply rather than drop."""
+    ch = _make_channel()
+    msg = MagicMock()
+    msg.chat_id = "12345"
+    msg.photo = [MagicMock()]  # a PhotoSize list
+    with patch("app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"):
+        await ch.handle_photo(msg)
+    ch.bot.send_message.assert_awaited()  # acknowledged, not dropped
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_ignores_non_master():
+    ch = _make_channel()
+    msg = MagicMock()
+    msg.chat_id = "99999"
+    msg.photo = [MagicMock()]
+    with patch("app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"):
+        await ch.handle_photo(msg)
+    ch.bot.send_message.assert_not_called()
