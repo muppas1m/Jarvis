@@ -19,6 +19,7 @@ import asyncio
 from app.email.gmail_pubsub import sweep_recent_inbox
 from app.scheduler.task_helpers import reset_async_state_for_task
 from app.scheduler.task_wrapper import critical_task
+from app.scheduler.tasks.inbound_health import mark_inbound_poll_success
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -36,3 +37,9 @@ async def _check():
     swept = await sweep_recent_inbox(history_id=None)
     if swept > 0:
         logger.info("gmail_check_swept", recent_inbox_count=swept)
+
+    # Heartbeat: this poll completed without error. The inbound-health canary
+    # reads it — keying on poll success (not on captured email) so a quiet
+    # inbox never false-alarms while a real failure (the Jun-11 invalid_grant)
+    # is caught. Reached only if sweep_recent_inbox didn't raise.
+    mark_inbound_poll_success()

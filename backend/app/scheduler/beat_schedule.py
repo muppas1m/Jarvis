@@ -66,4 +66,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.scheduler.tasks.approval_expiry.sweep_expired_approvals",
         "schedule": crontab(minute=0),
     },
+    # Hourly inbound-email health canary — alerts (in plain language) when no
+    # Gmail poll has succeeded within INBOUND_HEALTH_MAX_STALE_HOURS. Closes the
+    # silent-outage gap the Jun-11 manual test surfaced (gmail_check failing on
+    # an expired token for ~2 weeks with no symptom-named alert).
+    "inbound-health-check": {
+        "task": "app.scheduler.tasks.inbound_health.check_inbound_health",
+        "schedule": crontab(minute=30),
+    },
 }

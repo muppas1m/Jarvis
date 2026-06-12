@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     GOOGLE_CREDENTIALS_PATH: str = "backend/secrets/google_credentials.json"
     WEBHOOK_SECRET_GMAIL: str = ""
 
+    # --- Inbound-email health canary (P2) ------------------------------------
+    # gmail_check writes a heartbeat on every clean poll; the canary alerts the
+    # master in plain language when no poll has succeeded within MAX_STALE_HOURS
+    # (the Jun-11 outage was silent ~2 weeks). REALERT_HOURS bounds re-pinging
+    # during a sustained outage; recovery clears the alert flag immediately.
+    INBOUND_HEALTH_MAX_STALE_HOURS: int = 3
+    INBOUND_HEALTH_REALERT_HOURS: int = 12
+
     # --- Search / Crawl (Phase 3) -------------------------------------------
     # Tavily is the active research provider — Brave is kept declared for
     # future swap if/when their free tier returns. See memory:

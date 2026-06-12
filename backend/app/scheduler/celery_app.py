@@ -34,6 +34,7 @@ celery_app = Celery(
         "app.scheduler.task_wrapper",   # @critical_task uses celery_app.task at import time
         "app.scheduler.tasks.gmail_renew",
         "app.scheduler.tasks.gmail_check",
+        "app.scheduler.tasks.inbound_health",
         "app.scheduler.tasks.morning_brief",
         "app.scheduler.tasks.memory_consolidation",
         "app.scheduler.tasks.approval_expiry",
