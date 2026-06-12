@@ -46,6 +46,8 @@ logger = get_logger(__name__)
 #   rate_limit  — per-hour turn cap hit; agent returned a graceful notice
 #                 (status "complete", final_response sentinel "rate_limited")
 #   interrupted — paused on an approval               (status "interrupted")
+#   pending_approval — free-text turn declined because an approval is still
+#                 pending; nudge to use the buttons    (status "complete")
 #   cost_cap    — gateway refused on the daily hard cap (status "error")
 #   error       — any other exception                 (status "error")
 # Note: the per-turn TOOL budget (MAX_TOOL_CALLS_PER_TURN) is NOT a turn-terminal
@@ -91,6 +93,20 @@ async def run_turn(
 ) -> dict[str, Any]:
     """Execute one user turn through the agent graph."""
     config, handler = _config_with_handler(thread_id)
+
+    # Prevent-at-source: if this thread is paused at an approval interrupt, a
+    # fresh free-text turn would append a HumanMessage *after* the pending
+    # AIMessage tool_call — orphaning it (no ToolMessage) and poisoning the
+    # history, so the next LLM call (the OpenAI fallback) 400s the whole thread.
+    # That was the Jun-11 terminal "internal error": the master confirmed an
+    # approval by typing instead of tapping the button. Don't start a new turn;
+    # leave the interrupt intact (its Approve/Reject buttons still resolve it)
+    # and nudge. Honoring free text AS the approval is the deferred
+    # conversational-send path (project_email_action_capability_gap) — out of
+    # scope here; this only stops the crash.
+    if await _is_awaiting_approval(thread_id):
+        logger.info("run_turn_blocked_pending_interrupt", thread_id=thread_id)
+        return _pending_interrupt_envelope(thread_id)
 
     # Snapshot existing message count so we can slice "this turn's" messages
     # out of the post-invoke state. Cheaper and more reliable than timestamp-
@@ -195,6 +211,25 @@ async def _existing_message_count(thread_id: str) -> int:
     return len(state.values.get("messages") or [])
 
 
+async def _is_awaiting_approval(thread_id: str) -> bool:
+    """True if the thread is paused at an interrupt (an unresolved approval).
+
+    A non-empty ``state.next`` means the graph stopped mid-step waiting on
+    ``Command(resume=...)`` — the same signal `_build_envelope` uses to surface
+    an interrupt payload. A fresh `run_turn` here would orphan the pending
+    tool_call, so the caller routes to the nudge instead. Fail-open (return
+    False) on any state-read error: never block a normal turn because the
+    checkpoint read hiccuped."""
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = await graph().aget_state(config)
+    except Exception:  # noqa: BLE001
+        return False
+    # getattr-defensive: a StateSnapshot always has .next, but never block a
+    # normal turn if some state shape lacks it.
+    return bool(state and getattr(state, "next", None))
+
+
 def _error_envelope(
     thread_id: str, response_text: str, stop_reason: str = "error"
 ) -> dict[str, Any]:
@@ -203,6 +238,28 @@ def _error_envelope(
         "status": "error",
         "stop_reason": stop_reason,
         "response": response_text,
+        "messages": [],
+        "interrupt": None,
+        "trace_id": None,
+        "usage": _empty_usage(0),
+    }
+
+
+def _pending_interrupt_envelope(thread_id: str) -> dict[str, Any]:
+    """Envelope for a free-text turn that arrived while an approval is still
+    pending. status='complete' (nothing failed — we deliberately declined to
+    start a turn) with a nudge to use the Approve/Reject buttons. No interrupt
+    payload: the original approval message already carries the live buttons, so
+    we don't re-send them (which would mint a duplicate approval row). The
+    pending interrupt is left untouched and still resolves via those buttons."""
+    return {
+        "thread_id": thread_id,
+        "status": "complete",
+        "stop_reason": "pending_approval",
+        "response": (
+            "You've got an action waiting for your approval. Please tap "
+            "**Approve** or **Reject** on that message first, then send this again."
+        ),
         "messages": [],
         "interrupt": None,
         "trace_id": None,

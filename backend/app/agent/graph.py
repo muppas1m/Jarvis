@@ -84,6 +84,18 @@ def get_checkpointer() -> AsyncPostgresSaver:
     return _checkpointer
 
 
+async def reset_thread(thread_id: str) -> None:
+    """Delete all persisted checkpoint state for a thread.
+
+    Recovery hatch for a poisoned conversation — e.g. a thread whose history
+    carries an orphaned tool_call that makes the LLM reject every subsequent
+    turn (the Jun-11 terminal error). After a reset the next message to that
+    thread starts a clean turn. Irreversible: drops the thread's checkpoints,
+    blobs, and pending writes. Used by scripts/reset_thread.py."""
+    await get_checkpointer().adelete_thread(thread_id)
+    logger.info("thread_reset", thread_id=thread_id)
+
+
 def build_graph():
     """Compile the agent StateGraph. Call AFTER init_checkpointer().
 

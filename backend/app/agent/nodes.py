@@ -45,6 +45,7 @@ from langchain_core.messages import (
 from langchain_litellm import ChatLiteLLM
 from langgraph.types import interrupt
 
+from app.agent.message_repair import repair_orphaned_tool_calls
 from app.agent.prompts import build_system_prompt
 from app.agent.rate_limits import rate_limiter
 from app.agent.safety import SafetyClassifier, SafetyLevel
@@ -171,6 +172,13 @@ async def agent_node(state: AgentState) -> dict:
 
     msgs: list[BaseMessage] = [SystemMessage(content=system_prompt)]
     msgs.extend(state["messages"])
+
+    # Defense-in-depth: an orphaned tool_call (an AIMessage tool_call with no
+    # answering ToolMessage — e.g. a pending approval interrupt that a free-text
+    # turn landed on top of) makes the OpenAI fallback 400 the whole history.
+    # run_turn prevents that orphan at source; this neutralizes any that slip
+    # through so the fallback can never choke. See app.agent.message_repair.
+    msgs = repair_orphaned_tool_calls(msgs)
 
     llm = _build_chat_model(selected_tools)
     response = await llm.ainvoke(msgs)
