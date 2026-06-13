@@ -78,10 +78,13 @@ def _service():
     return build("calendar", "v3", credentials=_build_credentials(), cache_discovery=False)
 
 
-def _fmt_time(iso: str) -> str:
-    """Compact local time for a warning line; falls back to the raw value."""
+def _fmt_time(iso: str, with_day: bool = True) -> str:
+    """Compact local time for a warning line; falls back to the raw value.
+
+    ``with_day`` carries the weekday on the range START only — the END drops it
+    so a same-day slot reads "Sat 12:00–12:30", not "Sat 12:00–Sat 12:30"."""
     try:
-        return datetime.fromisoformat(iso).strftime("%a %H:%M")
+        return datetime.fromisoformat(iso).strftime("%a %H:%M" if with_day else "%H:%M")
     except Exception:  # noqa: BLE001 — all-day events carry a date, not a datetime
         return iso
 
@@ -241,7 +244,7 @@ async def calendar_conflict_warning(start_iso: str, end_iso: str) -> str | None:
         title = ev.get("summary", "(untitled)")
         es = ev["start"].get("dateTime", ev["start"].get("date"))
         ee = ev["end"].get("dateTime", ev["end"].get("date"))
-        overlaps.append(f"{title} ({_fmt_time(es)}–{_fmt_time(ee)})")
+        overlaps.append(f"{title} ({_fmt_time(es)}–{_fmt_time(ee, with_day=False)})")
 
     if not overlaps:
         return None
