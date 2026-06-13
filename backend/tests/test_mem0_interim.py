@@ -21,12 +21,18 @@ from app.memory.mem0_client import Mem0Client
     ("got it", True),
     ("ok", True),
     ("k", True),
+    ("ok thanks", True),     # multi-word ack in the explicit set
+    ("sounds good", True),
     ("", True),
     ("  ", True),
     # personal facts — NEVER trivial (spontaneous-save intent preserved)
     ("I'm allergic to peanuts", False),
     ("my dentist is Dr. Smith", False),
     ("I prefer morning meetings", False),
+    # terse one-word fact (answering "what are you allergic to?") — must persist;
+    # this is exactly why we dropped the length cutoff
+    ("peanuts", False),
+    ("Dr. Smith", False),
     # substantive non-facts — persisted (conservative over-persist is the safe side)
     ("Schedule a meeting Friday at 2pm", False),
     ("What is Project Zephyr?", False),
@@ -45,11 +51,14 @@ def _make_client() -> Mem0Client:
     return c
 
 
+# MEM0_DEDUP_ENABLED defaults to False (dormant until Turn 26.5 fixes search),
+# so tests that exercise the dedup PATH must turn it on explicitly.
 @pytest.mark.asyncio
 async def test_dedup_skips_near_identical():
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.95, "content": "User likes tea"}])
-    res = await c.add("User: I like tea")
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        res = await c.add("User: I like tea")
     assert res.get("skipped_duplicate") is True
     c.client.add.assert_not_called()  # never written
 
@@ -58,7 +67,8 @@ async def test_dedup_skips_near_identical():
 async def test_dedup_writes_novel_fact():
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.40}])  # below threshold
-    await c.add("User: I just adopted a dog named Rex")
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        await c.add("User: I just adopted a dog named Rex")
     c.client.add.assert_awaited_once()
 
 
@@ -66,7 +76,8 @@ async def test_dedup_writes_novel_fact():
 async def test_dedup_writes_when_no_existing_memory():
     c = _make_client()
     c.search = AsyncMock(return_value=[])
-    await c.add("User: first fact ever")
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        await c.add("User: first fact ever")
     c.client.add.assert_awaited_once()
 
 
@@ -74,16 +85,19 @@ async def test_dedup_writes_when_no_existing_memory():
 async def test_dedup_fails_open_on_search_error():
     c = _make_client()
     c.search = AsyncMock(side_effect=RuntimeError("vector store down"))
-    await c.add("User: a fact")
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        await c.add("User: a fact")
     c.client.add.assert_awaited_once()  # dedup error must not block the write
 
 
 @pytest.mark.asyncio
-async def test_dedup_disabled_writes_despite_duplicate():
+async def test_dedup_disabled_by_default_skips_the_search():
+    """Default-off: no dedup search runs (the P5c calibration finding — it can't
+    fire today, so don't burn a dead search per write)."""
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.99}])
-    with patch("app.config.settings.MEM0_DEDUP_ENABLED", False):
-        await c.add("User: exact duplicate")
+    await c.add("User: anything")  # MEM0_DEDUP_ENABLED defaults False
+    c.search.assert_not_called()
     c.client.add.assert_awaited_once()
 
 
@@ -91,6 +105,7 @@ async def test_dedup_disabled_writes_despite_duplicate():
 async def test_dedup_can_be_bypassed_per_call():
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.99}])
-    await c.add("User: forced write", dedup=False)
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        await c.add("User: forced write", dedup=False)
     c.client.add.assert_awaited_once()
-    c.search.assert_not_called()  # dedup=False skips the check entirely
+    c.search.assert_not_called()  # dedup=False skips the check even when enabled

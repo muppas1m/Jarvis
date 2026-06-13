@@ -47,14 +47,14 @@ class Settings(BaseSettings):
 
     # --- Mem0 interim bloat controls (P5c) -----------------------------------
     # Dedup-on-write: skip a write when an existing memory is near-identical
-    # (cosine score >= threshold). Kept at a SAFE-high threshold that never drops
-    # a distinct fact. NOTE (P5c calibration): today's Mem0 search scores
-    # near-identical content at only ~0.45 (raw-turn query vs condensed-fact
-    # store + degraded recall), so this guard is effectively DORMANT — it
-    # auto-activates once Turn 26.5 fixes search/recall quality (the same
+    # (cosine score >= threshold). DISABLED by default — P5c calibration showed
+    # today's Mem0 search scores near-identical content at only ~0.45 (raw-turn
+    # query vs condensed-fact store + degraded recall), so it can never fire at a
+    # safe threshold and would just burn one dead search per write. Flip ON +
+    # tune the threshold once Turn 26.5 fixes search/recall quality (the same
     # degraded search is why Mem0's own infer-dedup fails and the bloat grows).
     # The ACTIVE interim lever is trivial-turn gating (manager._is_trivial_turn).
-    MEM0_DEDUP_ENABLED: bool = True
+    MEM0_DEDUP_ENABLED: bool = False
     MEM0_DEDUP_THRESHOLD: float = 0.92
 
     # --- Embedding model (LOCKED at BGE-M3, schema depends on dim) -----------

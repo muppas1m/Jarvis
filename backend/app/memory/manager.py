@@ -30,9 +30,11 @@ logger = get_logger(__name__)
 # "spontaneously save my personal info" is preserved.
 _TRIVIAL_MESSAGES = {
     "hi", "hello", "hey", "yo", "hiya", "sup", "hey there",
-    "thanks", "thank you", "ty", "thx", "cheers", "thanks!",
+    "thanks", "thank you", "ty", "thx", "cheers", "thanks so much",
     "ok", "okay", "k", "kk", "cool", "nice", "great", "awesome", "perfect",
+    "ok thanks", "cool thanks", "thanks!", "sounds good", "will do", "alright",
     "yes", "no", "yep", "nope", "yeah", "nah", "sure", "got it", "gotcha",
+    "no problem", "no worries", "makes sense", "fair enough",
     "lol", "haha", "good", "good morning", "good night", "gn", "bye", "goodbye",
 }
 
@@ -42,16 +44,17 @@ _FACT_MARKERS = (" i ", " i'm", " im ", " i've", " my ", " me ", " mine ")
 def _is_trivial_turn(user_message: str) -> bool:
     """True for a greeting/ack with no durable fact — skip Mem0 extraction.
 
-    Conservative by design: when in doubt, persist. Any first-person fact marker
-    ('I'm…', 'my…') forces persistence, so personal info is never dropped."""
+    CONSERVATIVE: only the explicit trivial set (+ empty) is skipped; anything
+    else persists. We deliberately do NOT use a length cutoff — a terse one-word
+    reply can be a real personal fact ("peanuts" answering "what are you allergic
+    to?"), and dropping it would cut against spontaneous personal-info capture.
+    Any first-person fact marker also forces persistence."""
     u = user_message.strip().lower().rstrip("!.?")
     if not u:
         return True
     if any(marker in f" {u} " for marker in _FACT_MARKERS):
         return False  # carries a personal fact — always persist
-    if u in _TRIVIAL_MESSAGES:
-        return True
-    return len(u) <= 12  # short + no fact marker (e.g. "ok thanks", "got it!")
+    return u in _TRIVIAL_MESSAGES
 
 
 class MemoryManager:
