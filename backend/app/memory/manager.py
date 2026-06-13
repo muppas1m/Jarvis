@@ -19,6 +19,39 @@ from typing import Any
 
 from app.memory.mem0_client import Mem0Client
 from app.memory.user_profile import UserProfileManager
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+# Greetings / acknowledgements with no durable personal fact. Skipping Mem0
+# extraction on these (P5c) cuts a big slice of the per-session bloat without
+# risking fact loss — CONSERVATIVE: a first-person fact is never trivial, so
+# "spontaneously save my personal info" is preserved.
+_TRIVIAL_MESSAGES = {
+    "hi", "hello", "hey", "yo", "hiya", "sup", "hey there",
+    "thanks", "thank you", "ty", "thx", "cheers", "thanks!",
+    "ok", "okay", "k", "kk", "cool", "nice", "great", "awesome", "perfect",
+    "yes", "no", "yep", "nope", "yeah", "nah", "sure", "got it", "gotcha",
+    "lol", "haha", "good", "good morning", "good night", "gn", "bye", "goodbye",
+}
+
+_FACT_MARKERS = (" i ", " i'm", " im ", " i've", " my ", " me ", " mine ")
+
+
+def _is_trivial_turn(user_message: str) -> bool:
+    """True for a greeting/ack with no durable fact — skip Mem0 extraction.
+
+    Conservative by design: when in doubt, persist. Any first-person fact marker
+    ('I'm…', 'my…') forces persistence, so personal info is never dropped."""
+    u = user_message.strip().lower().rstrip("!.?")
+    if not u:
+        return True
+    if any(marker in f" {u} " for marker in _FACT_MARKERS):
+        return False  # carries a personal fact — always persist
+    if u in _TRIVIAL_MESSAGES:
+        return True
+    return len(u) <= 12  # short + no fact marker (e.g. "ok thanks", "got it!")
 
 
 class MemoryManager:
@@ -60,6 +93,9 @@ class MemoryManager:
         """After a turn closes, hand the (user, assistant) pair to Mem0 so it
         can extract durable memories. Raw messages stay with LangGraph; only
         Mem0 extractions land in our memory store."""
+        if _is_trivial_turn(user_message):
+            logger.debug("mem0_persist_skipped_trivial", user_preview=user_message[:60])
+            return
         combined = f"User: {user_message}\nAssistant: {assistant_response}"
         await self.mem0.add(content=combined, thread_id=thread_id)
 

@@ -102,8 +102,29 @@ class Mem0Client:
         content: str,
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        dedup: bool = True,
     ) -> Any:
-        """Extract and store memories from a turn or fact statement."""
+        """Extract and store memories from a turn or fact statement.
+
+        Dedup-on-write (P5c interim, slows the per-session bloat): if an existing
+        memory is near-identical to ``content`` (cosine score >= MEM0_DEDUP_THRESHOLD),
+        skip the write entirely. High threshold by default so only true duplicates
+        are dropped, never a distinct fact — full semantic consolidation/supersession
+        is Turn 26.5. Best-effort: a dedup-check failure never blocks the write."""
+        if dedup and settings.MEM0_DEDUP_ENABLED:
+            try:
+                hits = await self.search(query=content, top_k=1)
+                if hits and hits[0].get("score", 0.0) >= settings.MEM0_DEDUP_THRESHOLD:
+                    logger.info(
+                        "mem0_add_skipped_duplicate",
+                        score=round(float(hits[0]["score"]), 4),
+                        existing_preview=(hits[0].get("content") or "")[:80],
+                        new_preview=content[:80],
+                    )
+                    return {"results": [], "skipped_duplicate": True}
+            except Exception as exc:  # noqa: BLE001 — dedup is best-effort
+                logger.warning("mem0_dedup_check_failed", error=str(exc))
+
         meta = dict(metadata or {})
         if thread_id:
             meta["thread_id"] = thread_id
