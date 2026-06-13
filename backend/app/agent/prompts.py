@@ -41,14 +41,13 @@ You CAN:
 - Recall facts from memory and past conversations — `memory_search`.
 - Answer questions about the master's OWN uploaded documents (PDFs, Word/Excel, notes, markdown) — `document_search`. Use this when the master asks about a document, file, report, contract, or a named project/topic specific to their world. Answer from the retrieved passage and cite it; don't answer a question about the master's OWN documents from general knowledge.
 - Search the master's past email history — `email_history_search`.
-- Read the calendar — `calendar_read` — and create new calendar events — `calendar_create` (creation pauses for the master's approval).
+- Read, create, reschedule, and delete calendar events — `calendar_read`, `calendar_create`, `calendar_update`, `calendar_delete` (create/update/delete pause for approval). To RENAME or RESCHEDULE an event, use `calendar_update` with its event_id from `calendar_read` — do NOT create a new event for that (it leaves a duplicate). When you create an event, the system automatically checks the calendar and shows any overlapping events in the approval prompt — so never claim YOU verified the slot is free; the master sees the overlaps.
 - Send an email — `gmail_send` (pauses for the master's approval).
 
 You CANNOT — these need LIVE or external data you have no tool to reach. Say so plainly (and offer the nearest real capability); never fake it or misroute it to `document_search`:
 - Search the internet / open URLs / give "the latest news" or "what's happening right now" — there is NO web-search tool.
 - Get LIVE data: today's or this week's weather, current news headlines, live stock or market prices, anything happening "right now". (This is ONLY about live/changing data — static facts you already know, you answer directly, see above.)
 - Set reminders or alarms, or manage a to-do / task list. (The closest real thing is a calendar EVENT via `calendar_create` — offer that.)
-- Update, move, or delete a calendar event, or check for scheduling conflicts. You can only READ and CREATE events — never claim you checked for conflicts or that you modified or cancelled an event.
 - Read the live email inbox on demand, delete emails, or change email labels. (`email_history_search` reads already-processed email; it is not a live inbox.)
 
 **Search before you decline — but only for the master's OWN world.** When the master asks about something specific to THEM that you wouldn't know from training — a person, project, product, file, or term tied to their work ("Project Zephyr", "the Gatsy spec", "my Q3 report") — call `document_search` first (and `memory_search` if it might be remembered) BEFORE saying you can't find it; an unfamiliar proper noun is a strong signal to search. But if it's general knowledge you already know ("capital of France", "who wrote Hamlet"), just answer it directly — do NOT search for it.
@@ -119,10 +118,48 @@ VOLATILE_TEMPLATE = """## Master's Profile (always-on)
 
 <context>
 - Platform: {platform}
-- Date/Time: {current_datetime}
-- Timezone: {timezone}
+{date_context}
 </context>
 """
+
+
+def _date_context(current_datetime: str, tz_name: str) -> str:
+    """Explicit, pre-computed date references for the volatile context.
+
+    The model is poor at date arithmetic and the raw datetime is UTC, so
+    relative phrases ("this weekend", "Friday") landed on the wrong day (the
+    Jun-11 weekend-tasks-on-the-test-day bug — a UTC-vs-local gap). We compute
+    everything in the MASTER's timezone and hand the model the actual calendar
+    dates so it doesn't have to (and shouldn't) do the math itself.
+
+    Falls back to the raw datetime if the timezone DB or the ISO string can't be
+    resolved — never raise into prompt construction."""
+    from datetime import datetime as _dt, timedelta as _td
+
+    try:
+        from zoneinfo import ZoneInfo
+        local = _dt.fromisoformat(current_datetime).astimezone(ZoneInfo(tz_name))
+    except Exception:  # noqa: BLE001 — missing tzdata / unparseable input
+        return f"- Date/Time: {current_datetime}\n- Timezone: {tz_name}"
+
+    today = local.date()
+    # A concrete week of dates lets the model resolve ANY weekday reference
+    # ("Friday", "next Tuesday") without date math; the explicit weekend callout
+    # covers the common "this weekend" case (the Jun-11 weekend-on-test-day bug).
+    upcoming = ", ".join(
+        (today + _td(days=i)).strftime("%a %Y-%m-%d") for i in range(1, 8)
+    )
+    saturday = today + _td(days=(5 - today.weekday()) % 7)
+    sunday = today + _td(days=(6 - today.weekday()) % 7)
+    return (
+        f"- Now ({tz_name}): {local.strftime('%A, %Y-%m-%d %H:%M')}\n"
+        f"- Today is {today.strftime('%A %Y-%m-%d')}.\n"
+        f"- The next 7 days are: {upcoming}.\n"
+        f"- 'This weekend' = Saturday {saturday.isoformat()} and Sunday {sunday.isoformat()}.\n"
+        "- Resolve any relative date the master gives ('this weekend', 'Friday', "
+        "'next week', 'tomorrow') to its actual calendar date using THESE "
+        "references — do not compute dates yourself."
+    )
 
 
 def build_system_prompt(
@@ -181,8 +218,7 @@ def build_system_prompt(
         on_demand_section=on_demand_section,
         memories_section=memories_section,
         platform=platform,
-        current_datetime=current_datetime,
-        timezone=timezone,
+        date_context=_date_context(current_datetime, timezone),
     )
 
     return (

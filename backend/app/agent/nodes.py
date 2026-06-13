@@ -307,6 +307,12 @@ async def tool_executor_node(state: AgentState) -> dict:
         # the create + send; skip straight to re-entering interrupt().
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
         if approval_id is None:
+            # Enrich the prompt with a pre-approval warning (calendar conflict
+            # check today) so the master sees overlaps before deciding.
+            description = _describe_action(tool_name, tool_args)
+            warning = await _approval_warning(tool_name, tool_args)
+            if warning:
+                description = f"{description}\n\n{warning}"
             approval_id = await _create_pending_approval(
                 thread_id=thread_id,
                 interrupt_id=tool_call_id,
@@ -316,7 +322,7 @@ async def tool_executor_node(state: AgentState) -> dict:
             await send_approval_request_to_master(
                 approval_id=str(approval_id),
                 tool_name=tool_name,
-                description=_describe_action(tool_name, tool_args),
+                description=description,
             )
         else:
             logger.info(
@@ -502,6 +508,21 @@ def _describe_action(tool_name: str, tool_args: dict) -> str:
     """Human-readable description for approval messages."""
     args_pretty = json.dumps(tool_args, indent=2, default=str)
     return f"Execute `{tool_name}` with arguments:\n```json\n{args_pretty}\n```"
+
+
+async def _approval_warning(tool_name: str, tool_args: dict) -> str | None:
+    """Pre-approval enrichment surfaced in the master's Approve/Reject prompt.
+
+    Today only calendar_create (a named conflict check). Keyed on tool_name so a
+    second enricher is a one-line add here, not an if-ladder in the APPROVE
+    branch. Best-effort by contract — the enricher itself fails open (returns
+    None) so a check failure never blocks the approval."""
+    if tool_name == "calendar_create":
+        from app.agent.tools.calendar_tool import calendar_conflict_warning
+        return await calendar_conflict_warning(
+            tool_args.get("start_iso", ""), tool_args.get("end_iso", ""),
+        )
+    return None
 
 
 async def _find_pending_approval(thread_id: str, interrupt_id: str) -> uuid.UUID | None:
