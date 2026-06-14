@@ -16,6 +16,7 @@ Lazy factory `get_telegram_channel()` — the constructor raises if
 TELEGRAM_BOT_TOKEN is unset, and we don't want that crash to fire at
 module-import time (it'd happen before lifespan can guard).
 """
+import asyncio
 import json
 import os
 import tempfile
@@ -220,14 +221,32 @@ class TelegramChannel(Channel):
             )
             return
 
-        try:  # typing indicator is best-effort
+        # Ack immediately, then ingest in the BACKGROUND. Ingestion (download +
+        # extract/chunk/contextualize/embed) takes many seconds and MUST NOT block
+        # the Telegram polling loop — awaiting it inline froze the whole bot ~20min
+        # on a 1.2 MB PDF. create_task detaches it; the sync extract/chunk stages
+        # run off-thread inside ingest_document so this genuinely yields.
+        await self._send_with_markdown_fallback(
+            chat_id,
+            f"📄 Got *{filename}* — ingesting now, I'll confirm when it's ready.",
+            "Markdown",
+        )
+        asyncio.create_task(self._ingest_document_bg(chat_id, doc.file_id, filename, ext))
+
+    async def _ingest_document_bg(
+        self, chat_id: str, file_id: str, filename: str, ext: str
+    ) -> None:
+        """Download + ingest detached from the poller, then reply with the outcome.
+        Never raises (it's a fire-and-forget task); a failure replies instead of
+        silently dropping."""
+        try:
             await self.bot.send_chat_action(chat_id=chat_id, action="typing")
         except Exception:
             pass
 
         tmp_path: str | None = None
         try:
-            tg_file = await self.bot.get_file(doc.file_id)
+            tg_file = await self.bot.get_file(file_id)
             with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                 tmp_path = tmp.name
             await tg_file.download_to_drive(tmp_path)

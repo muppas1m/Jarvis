@@ -64,7 +64,7 @@ async def test_handle_document_ignores_non_master():
     msg = _fake_message(chat_id="99999", file_name="x.md")  # not the master
     with patch("app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"):
         await ch.handle_document(msg)
-    ch.bot.get_file.assert_not_called()  # never downloaded
+    ch.bot.send_message.assert_not_called()  # no ack, nothing scheduled
 
 
 @pytest.mark.asyncio
@@ -78,17 +78,38 @@ async def test_handle_document_rejects_unsupported_ext():
 
 
 @pytest.mark.asyncio
-async def test_handle_document_happy_path_ingests_and_confirms():
+async def test_handle_document_acks_immediately_and_offloads(monkeypatch):
+    """handle_document must NOT block on ingest — it acks and schedules the work
+    on a background task (the freeze fix). The poller stays responsive."""
+    ch = _make_channel()
+    msg = _fake_message(chat_id="12345", file_name="report.md")
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()  # don't run it here; avoids an un-awaited-coroutine warning
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "app.messaging.channels.telegram.asyncio.create_task", fake_create_task
+    )
+    with patch("app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"):
+        await ch.handle_document(msg)
+    ch.bot.send_message.assert_awaited()        # the "ingesting" ack
+    assert len(scheduled) == 1                  # ingest offloaded to a task
+    ch.bot.get_file.assert_not_called()         # download is in the bg task, not here
+
+
+@pytest.mark.asyncio
+async def test_ingest_bg_ingests_and_confirms():
+    """The background worker actually ingests + sends the outcome reply."""
     ch = _make_channel()
     ch.bot.get_file = AsyncMock(return_value=AsyncMock())  # File with download_to_drive
-    msg = _fake_message(chat_id="12345", file_name="report.md")
     ingest = AsyncMock(return_value={"chunks_stored": 3, "deduplicated": False, "replaced": False})
-    with patch("app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"), \
-         patch("app.documents.ingestion.ingest_document", new=ingest):
-        await ch.handle_document(msg)
+    with patch("app.documents.ingestion.ingest_document", new=ingest):
+        await ch._ingest_document_bg("12345", "FILEID", "report.md", ".md")
     ingest.assert_awaited_once()
-    # owner is pinned to master (multi-user seam), filename threaded through
-    assert ingest.await_args.kwargs.get("owner_id") == "master"
+    assert ingest.await_args.kwargs.get("owner_id") == "master"  # multi-user seam
     ch.bot.send_message.assert_awaited()  # confirmation sent
 
 

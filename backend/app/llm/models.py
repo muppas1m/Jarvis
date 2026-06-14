@@ -77,6 +77,9 @@ def get_models() -> dict[str, ModelConfig]:
         "primary": _build_model(settings.PRIMARY_MODEL),
         "fast": _build_model(settings.FAST_MODEL),
         "fallback": _build_model(settings.FALLBACK_MODEL),
+        # Dedicated slot for document contextualization — the paid Gemini, OFF
+        # the agent's saturating Groq. Routed via force_model="contextualizer".
+        "contextualizer": _build_model(settings.CONTEXTUALIZER_MODEL),
     }
 
 

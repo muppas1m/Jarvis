@@ -7,10 +7,10 @@ the chunk PLUS this preface — rather than the raw chunk alone — gives a
 measurable retrieval precision lift on real-world RAG tasks (Anthropic's
 published ~5-15% on BEIR-style benchmarks).
 
-Public API: one batch-friendly async function. Sequential ``await`` for now;
-the batch interface preserves the option to add ``asyncio.gather`` +
-semaphore concurrent dispatch later without rippling into callers (per the
-locked design constraint on plan Task 2.14b).
+Public API: one batch-friendly async function — concurrent dispatch via
+``asyncio.gather`` + a bounded ``Semaphore`` (``CONTEXTUALIZE_CONCURRENCY``),
+routed to the paid Gemini ``contextualizer`` slot OFF the agent's Groq. The
+batch interface meant adding this didn't ripple into callers (plan Task 2.14b).
 
 Failure model: never raises at batch level. Per-chunk failures degrade to
 empty strings in the output, with distinct structlog events for diagnosis:
@@ -28,6 +28,9 @@ degraded but not feature-broken.
 """
 from __future__ import annotations
 
+import asyncio
+
+from app.config import settings
 from app.documents.chunker import Chunk
 from app.llm.gateway import llm_gateway
 from app.utils.logging import get_logger
@@ -72,45 +75,50 @@ async def contextualize_chunks(
     if not chunks:
         return []
 
-    summaries: list[str] = []
+    # Concurrent dispatch with a bounded semaphore — the batch interface was
+    # built for exactly this. Routed to the `contextualizer` slot (paid Gemini),
+    # off the agent's Groq, so a 74-chunk doc doesn't saturate Groq and starve
+    # chat. asyncio.gather preserves input order. Per-call timeout + per-chunk
+    # failure → "" (caller falls back to raw-chunk embedding).
+    sem = asyncio.Semaphore(settings.CONTEXTUALIZE_CONCURRENCY)
 
-    for chunk in chunks:
+    async def _one(chunk: Chunk) -> str:
         chunk_text = chunk.content.strip()
         if not chunk_text:
-            summaries.append("")
-            continue
-
+            return ""
         prompt = CONTEXT_PROMPT.format(
             full_doc_excerpt=full_doc_excerpt,
             chunk_text=chunk_text,
         )
-
-        try:
-            response = await llm_gateway.complete(
-                messages=[{"role": "user", "content": prompt}],
-                task_type="summarization",
-                temperature=0.0,
-            )
-            content = (response["choices"][0]["message"].get("content") or "").strip()
-        except Exception as exc:
-            logger.warning(
-                "contextualize_failed",
-                chunk_index=chunk.chunk_index,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            summaries.append("")
-            continue
-
+        async with sem:
+            try:
+                response = await asyncio.wait_for(
+                    llm_gateway.complete(
+                        messages=[{"role": "user", "content": prompt}],
+                        task_type="summarization",
+                        force_model="contextualizer",
+                        temperature=0.0,
+                    ),
+                    timeout=settings.CONTEXTUALIZE_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("contextualize_timeout", chunk_index=chunk.chunk_index)
+                return ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "contextualize_failed",
+                    chunk_index=chunk.chunk_index,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                return ""
+        content = (response["choices"][0]["message"].get("content") or "").strip()
         if not content:
             logger.warning(
                 "contextualize_empty_response",
                 chunk_index=chunk.chunk_index,
                 response_snapshot=str(response)[:500],
             )
-            summaries.append("")
-            continue
+        return content
 
-        summaries.append(content)
-
-    return summaries
+    return list(await asyncio.gather(*(_one(c) for c in chunks)))

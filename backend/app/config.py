@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "ollama/bge-m3"
     EMBEDDING_DIMS: int = 1024
 
+    # --- Document ingestion robustness (regression fix) ----------------------
+    # Contextualization runs on the PAID Gemini, NOT Groq: a per-chunk fan-out
+    # on Groq free-tier saturates TPM (same reason MEMORY_EXTRACTION_MODEL is on
+    # Gemini) and starves the agent's chat. Concurrent dispatch + bounded fan-out
+    # turns a sequential 166s/74-chunk crawl into seconds. Per-call timeouts so a
+    # hung Ollama embed / slow LLM degrades (skip) instead of freezing ingestion.
+    CONTEXTUALIZER_MODEL: str = "gemini/gemini-2.5-flash-lite"
+    CONTEXTUALIZE_CONCURRENCY: int = 5
+    CONTEXTUALIZE_TIMEOUT_S: int = 30
+    EMBED_TIMEOUT_S: int = 30
+
     # --- RAG retrieval (Phase 2, Turn 19) ------------------------------------
     # Hybrid search (vector + BM25) → RRF fusion → bge-reranker-v2-m3 → threshold.
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"

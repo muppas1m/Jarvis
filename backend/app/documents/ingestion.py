@@ -42,6 +42,7 @@ and friends):
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -219,7 +220,9 @@ async def ingest_document(
     # --- Stage 1: extract ---
     start = time.monotonic()
     try:
-        blocks = extract_blocks(file_path)
+        # extract_blocks is sync CPU (PDF parsing) — off-thread so it never
+        # blocks the event loop / Telegram poller, even inside a background task.
+        blocks = await asyncio.to_thread(extract_blocks, file_path)
         if not blocks:
             raise ValueError(f"No text extracted from {filename}")
         logger.info(
@@ -245,7 +248,10 @@ async def ingest_document(
     # --- Stage 2: chunk ---
     start = time.monotonic()
     try:
-        chunks: list[Chunk] = chunk_blocks(blocks, source_file=filename)
+        # chunk_blocks is sync CPU (tokenization) — off-thread, same reason.
+        chunks: list[Chunk] = await asyncio.to_thread(
+            chunk_blocks, blocks, source_file=filename
+        )
         fallback_count = sum(1 for c in chunks if c.meta.get("fallback"))
         logger.info(
             "chunk_complete",
@@ -312,9 +318,14 @@ async def ingest_document(
 
             embedding: list[float] | None = None
             try:
-                embed_response = await aembedding(
-                    model=settings.EMBEDDING_MODEL,
-                    input=[content_with_context],
+                # Timeout so a hung Ollama degrades this chunk (embedding=None)
+                # instead of freezing the whole ingest with no error/recovery.
+                embed_response = await asyncio.wait_for(
+                    aembedding(
+                        model=settings.EMBEDDING_MODEL,
+                        input=[content_with_context],
+                    ),
+                    timeout=settings.EMBED_TIMEOUT_S,
                 )
                 candidate = embed_response.data[0]["embedding"]
                 if len(candidate) != settings.EMBEDDING_DIMS:
