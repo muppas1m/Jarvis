@@ -22,6 +22,7 @@ def _make_channel() -> TelegramChannel:
     mocked Bot."""
     ch = TelegramChannel.__new__(TelegramChannel)
     ch.bot = AsyncMock()
+    ch._bg_tasks = set()  # __init__ is bypassed; the offload needs this
     return ch
 
 
@@ -97,6 +98,7 @@ async def test_handle_document_acks_immediately_and_offloads(monkeypatch):
         await ch.handle_document(msg)
     ch.bot.send_message.assert_awaited()        # the "ingesting" ack
     assert len(scheduled) == 1                  # ingest offloaded to a task
+    assert len(ch._bg_tasks) == 1               # strong ref held (no mid-run GC)
     ch.bot.get_file.assert_not_called()         # download is in the bg task, not here
 
 

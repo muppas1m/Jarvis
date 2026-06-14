@@ -66,6 +66,10 @@ class TelegramChannel(Channel):
         if not settings.TELEGRAM_BOT_TOKEN:
             raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
         self.bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        # Strong refs to detached background tasks (ingestion). Without this the
+        # event loop only keeps a weak ref and can GC a task mid-run — a real
+        # upload would silently vanish after the "ingesting…" ack.
+        self._bg_tasks: set = set()
 
     # ------------------------------------------------------------------
     # Channel interface
@@ -231,7 +235,11 @@ class TelegramChannel(Channel):
             f"📄 Got *{filename}* — ingesting now, I'll confirm when it's ready.",
             "Markdown",
         )
-        asyncio.create_task(self._ingest_document_bg(chat_id, doc.file_id, filename, ext))
+        task = asyncio.create_task(
+            self._ingest_document_bg(chat_id, doc.file_id, filename, ext)
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _ingest_document_bg(
         self, chat_id: str, file_id: str, filename: str, ext: str
