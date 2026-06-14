@@ -74,14 +74,23 @@ def _tree(root: Path) -> list[str]:
 def gen_module_map() -> str:
     import app  # noqa: PLC0415
 
-    root = Path(app.__file__).parent
-    body = "\n".join(_tree(root))
-    n = sum(1 for _ in root.rglob("*.py") if "__pycache__" not in str(_))
-    return (
-        "# Module Map\n\n"
-        f"The `app/` package — {n} modules, one-line role from each module's docstring.\n\n"
-        "```\n" + body + "\n```\n"
-    )
+    app_root = Path(app.__file__).parent
+    scripts_root = app_root.parent / "scripts"
+    n = sum(1 for _ in app_root.rglob("*.py") if "__pycache__" not in str(_))
+
+    parts = [
+        "# Module Map\n",
+        "The running system (`app/`) plus operational entry points (`scripts/`). One-line role "
+        "from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)\n",
+        f"## `app/` — the system ({n} modules)\n",
+        "```\n" + "\n".join(_tree(app_root)) + "\n```\n",
+    ]
+    if scripts_root.exists():
+        parts += [
+            "## `scripts/` — operational entry points\n",
+            "```\n" + "\n".join(_tree(scripts_root)) + "\n```\n",
+        ]
+    return "\n".join(parts)
 
 
 # ===========================================================================
@@ -243,22 +252,113 @@ async def gen_agent_graph() -> str:
 
 
 # ===========================================================================
+# 06 — LLM gateway routing (slots, TASK_ROUTING, force_model, caps).
+# ===========================================================================
+def gen_llm_gateway() -> str:
+    from app.config import settings  # noqa: PLC0415
+    from app.llm.models import TASK_ROUTING, get_models  # noqa: PLC0415
+
+    models = get_models()
+    slot_rows = [f"| `{slot}` | `{mc.model_id}` | {mc.provider} |" for slot, mc in models.items()]
+    routing_rows = [f"| `{tt}` | `{slot}` |" for tt, slot in sorted(TASK_ROUTING.items())]
+    hard = settings.DAILY_LLM_SPEND_CAP_USD
+    soft_pct = int(settings.DAILY_LLM_SOFT_CAP_PCT * 100)
+    return (
+        "# LLM Gateway Routing\n\n"
+        "Every chat completion routes through `app/llm/gateway.py:LLMGateway.complete()`. Slots are "
+        "built in `app/llm/models.py:get_models()`; `task_type` picks a slot via `TASK_ROUTING`; "
+        "`force_model=\"<slot>\"` overrides routing for one call.\n\n"
+        "## Model slots (also the valid `force_model` targets)\n\n"
+        "| Slot | Model ID | Provider |\n|---|---|---|\n" + "\n".join(slot_rows) + "\n\n"
+        "## `task_type` → slot (`TASK_ROUTING`)\n\n"
+        "| task_type | Slot |\n|---|---|\n" + "\n".join(routing_rows) + "\n\n"
+        "Any unmapped `task_type` falls back to `primary`.\n\n"
+        "## Routing precedence (in `complete()`)\n\n"
+        f"1. **Hard cap** — if today's LLM spend ≥ `DAILY_LLM_SPEND_CAP_USD` (${hard:.2f}), the gateway "
+        "raises `CostCapExceededError` and the agent halts until UTC midnight.\n"
+        f"2. **Soft cap** — at ≥ {soft_pct}% of the hard cap (`DAILY_LLM_SOFT_CAP_PCT`), every call is "
+        "degraded to the `fast` slot (unless `force_model` is set).\n"
+        "3. **force_model** — routes to that named slot (e.g. document contextualization uses "
+        "`force_model=\"contextualizer\"` to stay OFF the agent's Groq).\n"
+        "4. Otherwise **`TASK_ROUTING[task_type]`**, else `primary`.\n\n"
+        "On a provider failure the gateway falls over to the `fallback` slot once (no recursion past it).\n"
+    )
+
+
+# ===========================================================================
+# 07 — external services & dependencies (compose infra + config providers).
+# Secret-safe: setting NAMES + non-secret descriptors only; never values of
+# tokens/keys/passwords/credential URLs.
+# ===========================================================================
+def gen_external_services(compose_file: str | None) -> str:
+    import yaml  # noqa: PLC0415
+
+    from app.config import settings  # noqa: PLC0415
+    from app.llm.models import get_models  # noqa: PLC0415
+
+    parts = [
+        "# External Services & Dependencies\n",
+        "Every external / infrastructure dependency the system talks to. Interconnection FLOWS are "
+        "the Phase-2 DFD; this is the mechanical inventory.\n",
+        "## Infrastructure (docker-compose services)\n",
+    ]
+    if compose_file and Path(compose_file).exists():
+        data = yaml.safe_load(Path(compose_file).read_text(encoding="utf-8")) or {}
+        services = data.get("services", {}) or {}
+        rows = []
+        for name, cfg in sorted(services.items()):
+            cfg = cfg or {}
+            img = cfg.get("image")
+            if not img and cfg.get("build"):
+                b = cfg["build"]
+                img = f"build: {b if isinstance(b, str) else b.get('context', '.')}"
+            rows.append(f"| `{name}` | {img or '?'} |")
+        parts.append("| Service | Image / build |\n|---|---|\n" + "\n".join(rows) + "\n")
+    else:
+        parts.append("> _Compose file not provided (`--compose-file`); infra services not introspected._\n")
+
+    providers = sorted({mc.provider for mc in get_models().values()})
+    parts.append("\n## LLM providers (reached via the gateway slots — see `06_llm_gateway.md`)\n")
+    parts.append("| Provider |\n|---|\n" + "\n".join(f"| {p} |" for p in providers) + "\n")
+
+    rows = [
+        ("Ollama (local model server)", "embeddings + reranker",
+         f"`OLLAMA_BASE_URL` · embed `{settings.EMBEDDING_MODEL}` · rerank `{settings.RERANK_MODEL}`"),
+        ("Postgres + pgvector", "datastore + vector store",
+         "`DATABASE_URL` — LangGraph checkpoints, app tables, mem0 + tool + document vectors"),
+        ("Redis", "cache / counters / Celery broker", "`REDIS_URL` — cost cap, rate limits, Celery"),
+        ("Telegram Bot API", "chat channel (long-poll / webhook)", "`TELEGRAM_BOT_TOKEN`"),
+        ("Google / Gmail", "email + calendar + Pub/Sub push",
+         "`GOOGLE_*` OAuth · `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION`"),
+        ("Langfuse", "LLM observability / tracing", "`LANGFUSE_HOST`"),
+    ]
+    parts.append("\n## APIs, datastores & observability (from config — secrets omitted)\n")
+    parts.append(
+        "| Dependency | Role | Configured via |\n|---|---|---|\n"
+        + "\n".join(f"| {n} | {r} | {d} |" for (n, r, d) in rows) + "\n"
+    )
+    return "\n".join(parts)
+
+
+# ===========================================================================
 # Orchestration
 # ===========================================================================
-ARTIFACTS = [
-    ("00_module_map.md", gen_module_map),
-    ("01_database_erd.md", gen_db_erd),
-    ("02_api_routes.md", gen_api_routes),
-    ("03_tools.md", gen_tools),
-    ("04_celery_schedule.md", gen_celery_schedule),
-    ("05_agent_graph.md", gen_agent_graph),
-]
+async def generate_all(out: Path, compose_file: str | None) -> None:
+    from functools import partial  # noqa: PLC0415
 
-
-async def generate_all(out: Path) -> None:
+    artifacts = [
+        ("00_module_map.md", gen_module_map),
+        ("01_database_erd.md", gen_db_erd),
+        ("02_api_routes.md", gen_api_routes),
+        ("03_tools.md", gen_tools),
+        ("04_celery_schedule.md", gen_celery_schedule),
+        ("05_agent_graph.md", gen_agent_graph),
+        ("06_llm_gateway.md", gen_llm_gateway),
+        ("07_external_services.md", partial(gen_external_services, compose_file)),
+    ]
     out.mkdir(parents=True, exist_ok=True)
     written = []
-    for fname, fn in ARTIFACTS:
+    for fname, fn in artifacts:
         try:
             content = await fn() if inspect.iscoroutinefunction(fn) else fn()
         except Exception as exc:  # noqa: BLE001 — one failure must not kill the set
@@ -289,8 +389,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="docs/architecture/generated",
                         help="Output directory (in-container path).")
+    parser.add_argument("--compose-file", default=None,
+                        help="Path to docker-compose.yml (copy it into the container first — it "
+                             "lives outside the /app mount). Omitted → infra-services section degrades.")
     args = parser.parse_args()
-    asyncio.run(generate_all(Path(args.out)))
+    asyncio.run(generate_all(Path(args.out), args.compose_file))
 
 
 if __name__ == "__main__":

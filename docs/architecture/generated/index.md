@@ -12,3 +12,5 @@ Mechanical, introspected from the live code — **do not hand-edit**; run `make 
 - [Tools](03_tools.md)
 - [Celery Schedule](04_celery_schedule.md)
 - [Agent Graph](05_agent_graph.md)
+- [Llm Gateway](06_llm_gateway.md)
+- [External Services](07_external_services.md)

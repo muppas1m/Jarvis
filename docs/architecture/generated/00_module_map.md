@@ -4,7 +4,9 @@
 
 # Module Map
 
-The `app/` package — 86 modules, one-line role from each module's docstring.
+The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
+
+## `app/` — the system (86 modules)
 
 ```
 app/
@@ -109,4 +111,29 @@ app/
 ├── __init__.py — —
 ├── config.py — Settings — single source of truth for runtime configuration.
 └── main.py — FastAPI app factory + lifespan.
+```
+
+## `scripts/` — operational entry points
+
+```
+scripts/
+├── gen_architecture.py — Architecture-doc generator — introspects the LIVE code and emits Markdown +
+├── google_oauth.py — One-time Google OAuth refresh-token bootstrap.
+├── issue_jwt.py — Mint an HS256 JWT for the master so we can curl protected endpoints
+├── reset_thread.py — Reset (delete) a conversation thread's checkpoint state.
+├── seed_profile.py — Seed (or re-seed) the master's profile row.
+├── setup_gmail_watch.py — One-shot Gmail watch registration. Phase 2 Task 2.2 closer.
+├── smoke_agent.py — Turn 9 smoke test — one full agent turn end-to-end.
+├── smoke_documents.py — Turn 20 smoke — document API (upload/search) + ingestion dedup + cost honesty.
+├── smoke_email_triage.py — Turn 17.8 smoke — email triage enrichment (classifier → meta → consumers).
+├── smoke_extractors.py — Turn 18 smoke test — document extractors + semantic chunker round-trip.
+├── smoke_fallback_chain.py — Turn 11a Smoke 3 — fallback chain fires when PRIMARY provider returns an error.
+├── smoke_langfuse_nodes.py — Turn 11a Smoke 2 — verify all four graph nodes appear as discrete spans
+├── smoke_llm.py — Turn 5 smoke test — one round-trip through the gateway, then verify
+├── smoke_mem0_rpm.py — Turn 11a Smoke 1 — Mem0 sustained throughput on Gemini 2.0-flash.
+├── smoke_memory.py — Turn 6 smoke test — the memory system end-to-end.
+├── smoke_observability.py — Turn 17.9 smoke — observability + reasoning lifts (p/q/q2/q3/s).
+├── smoke_rag.py — Turn 19.6 smoke — RAG retrieval pipeline correctness (NOT retrieval quality).
+├── smoke_telegram_route.py — Turn 11b — deterministic Telegram channel smoke.
+└── smoke_tools.py — Turn 10 smoke test — tool registry end-to-end.
 ```
