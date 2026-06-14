@@ -40,6 +40,9 @@ TOOL_SPECIFIC_LIMITS_PER_TURN: dict[str, int] = {
     "firecrawl_crawl":      3,
     "gmail_send":           5,
     "browser_form_submit":  2,
+    # Cap the expensive RAG re-hunt: each call reranks the whole corpus. Two
+    # tries is plenty; the prompt tells the agent to stop after an empty result.
+    "document_search":      2,
 }
 
 

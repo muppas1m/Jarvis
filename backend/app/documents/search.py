@@ -50,6 +50,7 @@ the scale cliff is observable rather than silent; the swap to Postgres
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -122,7 +123,12 @@ async def search_documents(
     fused_pool = _rrf_fuse(vector_hits, bm25_hits, settings.RAG_RRF_K, candidate_pool)
 
     # --- precision stage: cross-encoder scores every fused candidate ---
-    reranked = rerank(query=query, candidates=fused_pool, content_key="content")
+    # Off the event loop: rerank() is sync CPU (CrossEncoder.predict) and the
+    # first call lazy-loads the ~30s model — running it inline froze the agent
+    # loop / webhook. asyncio.to_thread keeps it off the loop.
+    reranked = await asyncio.to_thread(
+        rerank, query=query, candidates=fused_pool, content_key="content"
+    )
 
     # --- policy stage: threshold + top_k + dropped-candidate audit ---
     kept, dropped = _apply_threshold(reranked, threshold, top_k)

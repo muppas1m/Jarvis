@@ -35,6 +35,7 @@ that ever surfaces as a complaint (lifts ship on real-usage signal).
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from sentence_transformers import CrossEncoder
@@ -46,17 +47,22 @@ logger = get_logger(__name__)
 
 
 _reranker: CrossEncoder | None = None
+# Now that rerank() runs via asyncio.to_thread, concurrent first-searches could
+# load the ~30s model twice. Double-checked locking loads it exactly once.
+_load_lock = threading.Lock()
 
 
 def _get_reranker() -> CrossEncoder:
     """Lazy-load the cross-encoder on first call. ~30s initial load on CPU."""
     global _reranker
     if _reranker is None:
-        logger.info("loading_reranker", model=settings.RERANK_MODEL)
-        # fp16 only helps on GPU; CrossEncoder takes it via model_kwargs.
-        model_kwargs = {"torch_dtype": "float16"} if settings.RERANK_USE_FP16 else {}
-        _reranker = CrossEncoder(settings.RERANK_MODEL, model_kwargs=model_kwargs)
-        logger.info("reranker_loaded", model=settings.RERANK_MODEL)
+        with _load_lock:
+            if _reranker is None:  # re-check under the lock
+                logger.info("loading_reranker", model=settings.RERANK_MODEL)
+                # fp16 only helps on GPU; CrossEncoder takes it via model_kwargs.
+                model_kwargs = {"torch_dtype": "float16"} if settings.RERANK_USE_FP16 else {}
+                _reranker = CrossEncoder(settings.RERANK_MODEL, model_kwargs=model_kwargs)
+                logger.info("reranker_loaded", model=settings.RERANK_MODEL)
     return _reranker
 
 
