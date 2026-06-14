@@ -5,7 +5,7 @@
 # The golden-query eval is LLM-driven (costs real $, takes minutes) and is kept
 # SEPARATE from the deterministic integration tests on purpose.
 
-.PHONY: evals evals-quick evals-baseline evals-compare evals-break coverage test
+.PHONY: evals evals-quick evals-baseline evals-compare evals-break coverage test architecture
 
 # Full golden-query eval (real LLM turns + judge). Cost-isolated from the
 # production cap via eval_mode. Writes a timestamped report under evals/results/.
@@ -35,3 +35,15 @@ coverage:
 # Deterministic test suite (no LLM eval).
 test:
 	docker compose exec -T backend python -m pytest tests/ -q
+
+# Regenerate the auto-generated architecture docs (the mechanical half). The host
+# conda env lacks the deps, so the generator runs IN the container; docker-compose.yml
+# lives OUTSIDE the /app mount, so it's copied in (--compose-file is required, else the
+# external-services doc flips to a degrade-note and the drift-gate would false-fire).
+# Output is copied back to docs/architecture/generated/. Review + commit the result.
+architecture:
+	docker cp docker-compose.yml jarvis-backend:/tmp/dc.yml
+	docker compose exec -T backend sh -c 'rm -rf /tmp/arch && python scripts/gen_architecture.py --out /tmp/arch --compose-file /tmp/dc.yml'
+	rm -rf docs/architecture/generated && mkdir -p docs/architecture/generated
+	docker cp jarvis-backend:/tmp/arch/. docs/architecture/generated/
+	@echo "✓ Regenerated docs/architecture/generated/ — review + 'git add docs/architecture/generated'."

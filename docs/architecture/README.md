@@ -265,8 +265,35 @@ sequenceDiagram
 
 ---
 
+## Keeping the docs in sync (the drift-gate)
+
+The mechanical half is regenerated, never hand-edited; the intent half (this file + `decisions.md`)
+is hand-maintained. A committed pre-commit hook enforces the first and nudges for the second.
+
+**One-time activation per clone** (git doesn't auto-enable committed hooks):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+**`make architecture`** regenerates `generated/` (runs the generator in the `jarvis-backend`
+container — the host lacks the deps — and copies the result out). Run it after any change the
+generated docs introspect, then `git add docs/architecture/generated`.
+
+**The hook (`.githooks/pre-commit`):**
+- **(a) hard-fails** the commit if the generated docs are stale (it regenerates and diffs against
+  what's committed) — run `make architecture` and re-commit.
+- **(b) nudges** (non-failing) if a structural file (`db/models.py`, `agent/graph.py`,
+  `messaging/router.py`, `agent/tools/registry.py`, `scheduler/beat_schedule.py`) changed but
+  `docs/architecture/` wasn't touched — a reminder to check the DFD / narrative.
+- **Skips with a warning** (never blocks) when the backend container is down — the generator needs it.
+
+> **Commit habit:** when a change moves a box on the DFD or adds/retires a decision or deferred item,
+> update this file / `decisions.md` in the *same* commit. The gate keeps the mechanical half honest;
+> you keep the intent half current.
+
 ## Where to look next
 - **What each module does:** [generated/00_module_map.md](generated/00_module_map.md).
 - **Why it's built this way + what's deferred:** [decisions.md](decisions.md).
-- **Regenerating the mechanical docs:** `make architecture` (Phase 3) — or the in-container
+- **Regenerating the mechanical docs:** `make architecture` — or the in-container
   `scripts/gen_architecture.py` (see its module docstring).

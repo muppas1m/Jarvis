@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# Jarvis architecture drift-gate (committed). Keeps docs/architecture/generated/
+# in sync with the code, and nudges when the hand-authored intent may be stale.
+#
+# ONE-TIME ACTIVATION per clone (hooks aren't auto-enabled by git):
+#     git config core.hooksPath .githooks
+#
+# Behaviour:
+#   - The generator runs IN the backend container. If the stack is down (or docker
+#     is off), the gate SKIPS WITH A WARNING — it never blocks a commit just because
+#     Docker isn't running.
+#   (a) Re-generates the mechanical docs to a temp dir and DIFFS against the
+#       committed docs/architecture/generated/. Any difference HARD-FAILS the commit
+#       (you changed code the docs introspect without regenerating).
+#   (b) If a STRUCTURAL file changed but docs/architecture/ wasn't touched, prints a
+#       NON-FAILING nudge to check the DFD / narrative.
+#
+# Note: the diff reflects your WORKING TREE (the container bind-mounts it). If you
+# have unstaged structural WIP, regenerate (`make architecture`) before committing.
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)" || exit 0
+cd "$REPO" || exit 0
+GEN_DIR="$REPO/docs/architecture/generated"
+CONTAINER="jarvis-backend"
+
+# --- skip-with-warning when the stack (the generator's runtime) is down ----------
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+    echo "⚠️  [architecture] backend container not running — drift-gate skipped."
+    echo "    Run 'make architecture' once the stack is up if you changed structural code."
+    exit 0
+fi
+
+# --- (a) regenerate to a temp dir and diff against the committed docs -------------
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+docker cp "$REPO/docker-compose.yml" "$CONTAINER:/tmp/dc.yml" >/dev/null 2>&1
+if ! docker compose exec -T backend sh -c \
+        'rm -rf /tmp/arch_gate && python scripts/gen_architecture.py --out /tmp/arch_gate --compose-file /tmp/dc.yml' \
+        >/dev/null 2>&1; then
+    echo "⚠️  [architecture] generator errored — drift-gate skipped (not blocking)."
+    exit 0
+fi
+docker cp "$CONTAINER:/tmp/arch_gate/." "$TMP/" >/dev/null 2>&1
+
+if ! diff -rq "$TMP" "$GEN_DIR" >/dev/null 2>&1; then
+    echo "❌ [architecture] docs/architecture/generated/ is STALE — the code changed but the docs"
+    echo "   weren't regenerated. Differences:"
+    diff -rq "$TMP" "$GEN_DIR" 2>&1 | sed 's/^/     /' | head -8
+    echo "   Fix:  make architecture  &&  git add docs/architecture/generated  &&  re-commit."
+    exit 1
+fi
+
+# --- (b) non-failing nudge: structural change without a docs/architecture/ touch --
+STAGED="$(git diff --cached --name-only)"
+STRUCTURAL='backend/app/db/models\.py|backend/app/agent/graph\.py|backend/app/messaging/router\.py|backend/app/agent/tools/registry\.py|backend/app/scheduler/beat_schedule\.py'
+if echo "$STAGED" | grep -qE "$STRUCTURAL" && ! echo "$STAGED" | grep -q "docs/architecture/"; then
+    echo "⚠️  [architecture] a structural file changed but docs/architecture/ wasn't touched —"
+    echo "    does the DFD / narrative (README.md, decisions.md) need updating? (not blocking)"
+fi
+
+exit 0
