@@ -332,10 +332,23 @@ def gen_external_services(compose_file: str | None) -> str:
          "`GOOGLE_*` OAuth · `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION`"),
         ("Langfuse", "LLM observability / tracing", "`LANGFUSE_HOST`"),
     ]
-    parts.append("\n## APIs, datastores & observability (from config — secrets omitted)\n")
+    parts.append("\n## APIs, datastores & observability (curated roles — from config, secrets omitted)\n")
     parts.append(
         "| Dependency | Role | Configured via |\n|---|---|---|\n"
         + "\n".join(f"| {n} | {r} | {d} |" for (n, r, d) in rows) + "\n"
+    )
+
+    # Auto-scan: every endpoint-shaped setting NAME, so a NEW external dependency
+    # self-surfaces here (and the drift-gate then catches the omission) without
+    # the curated table above having to be hand-updated. Names only — many of
+    # these are credential-bearing URLs; values are never emitted.
+    suffixes = ("_URL", "_HOST", "_BASE_URL", "_TOPIC")
+    endpoints = sorted(f for f in type(settings).model_fields if f.endswith(suffixes))
+    parts.append("\n## Detected config endpoints (auto-scanned — self-surfaces new deps)\n")
+    parts.append(
+        "Setting names ending in `_URL` / `_HOST` / `_BASE_URL` / `_TOPIC`. A new endpoint-shaped "
+        "setting appears here automatically; give it a curated role in the table above.\n\n"
+        + "\n".join(f"- `{f}`" for f in endpoints) + "\n"
     )
     return "\n".join(parts)
 

@@ -33,7 +33,7 @@ Every external / infrastructure dependency the system talks to. Interconnection 
 | openai |
 
 
-## APIs, datastores & observability (from config — secrets omitted)
+## APIs, datastores & observability (curated roles — from config, secrets omitted)
 
 | Dependency | Role | Configured via |
 |---|---|---|
@@ -43,3 +43,16 @@ Every external / infrastructure dependency the system talks to. Interconnection 
 | Telegram Bot API | chat channel (long-poll / webhook) | `TELEGRAM_BOT_TOKEN` |
 | Google / Gmail | email + calendar + Pub/Sub push | `GOOGLE_*` OAuth · `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION` |
 | Langfuse | LLM observability / tracing | `LANGFUSE_HOST` |
+
+
+## Detected config endpoints (auto-scanned — self-surfaces new deps)
+
+Setting names ending in `_URL` / `_HOST` / `_BASE_URL` / `_TOPIC`. A new endpoint-shaped setting appears here automatically; give it a curated role in the table above.
+
+- `BASE_URL`
+- `DATABASE_URL`
+- `GMAIL_PUBSUB_TOPIC`
+- `LANGFUSE_HOST`
+- `OLLAMA_BASE_URL`
+- `REDIS_URL`
+- `TUNNEL_PUBLIC_URL`
