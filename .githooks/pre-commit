@@ -32,6 +32,16 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
     exit 0
 fi
 
+# --- fast-path: the generated docs are a pure function of the introspected surface
+#     (backend/app/**, backend/scripts/**, docker-compose.yml). If the staged set
+#     touches NONE of it, the docs can't have drifted — skip the ~10s regenerate
+#     entirely (zero false-negatives). Docs-only / test-only commits stay instant. ---
+STAGED="$(git diff --cached --name-only)"
+INTROSPECTED='^backend/app/|^backend/scripts/|^docker-compose\.yml$'
+if ! echo "$STAGED" | grep -qE "$INTROSPECTED"; then
+    exit 0
+fi
+
 # --- (a) regenerate to a temp dir and diff against the committed docs -------------
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -53,7 +63,6 @@ if ! diff -rq "$TMP" "$GEN_DIR" >/dev/null 2>&1; then
 fi
 
 # --- (b) non-failing nudge: structural change without a docs/architecture/ touch --
-STAGED="$(git diff --cached --name-only)"
 STRUCTURAL='backend/app/db/models\.py|backend/app/agent/graph\.py|backend/app/messaging/router\.py|backend/app/agent/tools/registry\.py|backend/app/scheduler/beat_schedule\.py'
 if echo "$STAGED" | grep -qE "$STRUCTURAL" && ! echo "$STAGED" | grep -q "docs/architecture/"; then
     echo "⚠️  [architecture] a structural file changed but docs/architecture/ wasn't touched —"

@@ -95,6 +95,7 @@ memory notes; this table is the navigable index.
 | Conversational "send it" (email) | Explicitly deferred — Approve/Reject button covers it | Indefinite; the button surface may suffice forever. |
 | Groq error-string-match fragility (fallback predicate) | String-matches `tool_use_failed` | Groq renames the error → monitor `agent_llm_fallback` rate as the canary. |
 | Native-`<function>`-text glitch (open-weights) | Intermittent text-as-tool-call; fallback catches only the error variant | Phase-3 agent-core hardening. |
+| Drift-gate validates the working tree, not the staged index | The hook regenerates from the live container (= working tree), so it false-fails on unstaged structural WIP, and "regenerated-but-forgot-to-stage-the-docs" downgrades to the nudge rather than the hard-fail | Multi-dev, OR the false-fail becomes a recurring annoyance. Fix: regenerate against a `git checkout-index` of the staged tree. |
 
 > **Recently closed** (this fix pass): inbound email + Celery (stale-token), approval double-prompt,
 > orphaned-tool_call crash, doc-upload freeze (offload + concurrent Gemini contextualize + timeouts),
