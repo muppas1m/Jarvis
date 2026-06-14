@@ -1,0 +1,18 @@
+<!-- AUTO-GENERATED — do not edit by hand.
+     Regenerate with `make architecture` (or scripts/gen_architecture.py).
+     Source of truth is the code; edit the code, then regenerate. -->
+
+# Tools & Safety Tiers
+
+8 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
+
+| Tool | Safety tier | Always-loaded | Backing module | Summary |
+|---|---|---|---|---|
+| `calendar_create` | APPROVE |  | `app.agent.tools.calendar_tool` | Create a new event on the master's Google Calendar |
+| `calendar_delete` | APPROVE |  | `app.agent.tools.calendar_tool` | Delete / cancel an existing calendar event by event_id |
+| `calendar_read` | SAFE |  | `app.agent.tools.calendar_tool` | Read upcoming events from the master's Google Calendar — what's scheduled, meetings, what'… |
+| `calendar_update` | APPROVE |  | `app.agent.tools.calendar_tool` | Update / reschedule an existing calendar event — change its title, time, description, or l… |
+| `document_search` | SAFE |  | `app.agent.tools.document_search` | Search the master's ingested documents (PDFs, Word/Excel files, notes, markdown) for passa… |
+| `email_history_search` | SAFE |  | `app.agent.tools.email_history` | Search the master's email history — what messages came in, who sent them, were they replie… |
+| `gmail_send` | APPROVE |  | `app.agent.tools.gmail_send` | Send an email via the master's Gmail account |
+| `memory_search` | SAFE | yes | `app.agent.tools.builtin_memory` | Search the master's persistent conversation memory — facts they've told you, preferences, … |
