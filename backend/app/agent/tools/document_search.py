@@ -155,7 +155,11 @@ def register() -> None:
             "state a document fact without its citation. Answer ONLY from the "
             "returned passages — if they don't contain the answer, say the "
             "documents don't cover it; do NOT fall back to your own general "
-            "knowledge for a question about the master's documents."
+            "knowledge for a question about the master's documents. The citation "
+            "names the SOURCE file: if the master asked about a specific file and "
+            "the passages are from a DIFFERENT file (or there are none), say you "
+            "don't have that file's content — never claim you read their file "
+            "because you found related content elsewhere."
         ),
         args_schema=DocumentSearchArgs,
     )
