@@ -32,22 +32,23 @@ flowchart TB
     master([Master])
 
     subgraph channels["Channels — messaging/"]
-        tg["Telegram<br/>channels/telegram.py<br/>(long-poll / webhook)"]
+        tg["Telegram<br/>messaging/channels/telegram.py<br/>(long-poll / webhook)"]
         gmailhook["Gmail Pub/Sub receiver<br/>api/webhooks/gmail.py"]
         router["Router<br/>messaging/router.py"]
     end
 
     subgraph agentcore["Agent — agent/"]
         runner["Runner (run/resume turn)<br/>agent/runner.py"]
-        lg["LangGraph StateGraph<br/>agent/graph.py · nodes.py"]
+        lg["LangGraph StateGraph<br/>agent/graph.py · agent/nodes.py"]
+        classify["Safety classifier (gates every tool call)<br/>agent/safety.py<br/>SAFE · NOTIFY · APPROVE · BLOCKED"]
     end
 
     subgraph llm["LLM — llm/"]
-        gateway["Gateway (routing, caps, fallback)<br/>llm/gateway.py · models.py"]
+        gateway["Gateway (routing, caps, fallback)<br/>llm/gateway.py · llm/models.py"]
     end
 
     subgraph tools["Tools — agent/tools/"]
-        toolset["memory · document · email_history<br/>calendar r/c/u/d · gmail_send<br/>registry.py + safety.py"]
+        toolset["memory · document · email_history<br/>calendar r/c/u/d · gmail_send<br/>agent/tools/registry.py"]
     end
 
     subgraph stores["Stores"]
@@ -73,7 +74,7 @@ flowchart TB
     gmailhook --> router
     router --> runner --> lg
     lg --> gateway --> providers
-    lg --> toolset
+    lg --> classify --> toolset
     toolset --> mem0 & google & ollama
     lg -. checkpoint .- pg
     lg & toolset --> pg
