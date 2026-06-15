@@ -6,10 +6,11 @@ the full turn (§D-1 latency lever). Best-effort by contract: a provider failure
 returns b"" and logs — a TTS miss must never kill the agent turn.
 
 Providers (settings.TTS_PROVIDER):
-  - "edge"        edge-tts, free, no key, British male (the default). MP3.
-  - "elevenlabs"  flash model, low first-audio, metered. MP3. Needs key + voice.
-  - "piper"       local community "JARVIS" voice. WAV. Lazy-imported; needs the
-                  piper-tts package + PIPER_VOICE_PATH set.
+  - "piper"  local jgkawell/jarvis "JARVIS" voice (baked into the image at
+             PIPER_VOICE_PATH). WAV. The default — $0, private, the real timbre,
+             sub-300ms/sentence on in-container CPU. ElevenLabs is intentionally
+             not wired (ruled out as a low-cost path).
+  - "edge"   edge-tts, free cloud British male — the fallback. MP3.
 The browser's decodeAudioData auto-detects MP3 vs WAV, so callers only forward
 the bytes + the advertised mime.
 """
@@ -35,12 +36,10 @@ async def synthesize(text: str) -> bytes:
         return b""
     provider = settings.TTS_PROVIDER.lower()
     try:
-        if provider == "edge":
-            return await _edge(text)
-        if provider == "elevenlabs":
-            return await _elevenlabs(text)
         if provider == "piper":
             return await _piper(text)
+        if provider == "edge":
+            return await _edge(text)
         logger.warning("tts_unknown_provider", provider=provider)
         return b""
     except Exception as exc:  # noqa: BLE001 — best-effort; never break the turn
@@ -57,29 +56,6 @@ async def _edge(text: str) -> bytes:
         if chunk["type"] == "audio":
             buf.extend(chunk["data"])
     return bytes(buf)
-
-
-async def _elevenlabs(text: str) -> bytes:
-    import httpx
-
-    key = settings.ELEVENLABS_API_KEY
-    voice = settings.ELEVENLABS_VOICE_ID
-    if not key or not voice:
-        logger.warning("elevenlabs_not_configured")
-        return b""
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            url,
-            headers={"xi-api-key": key, "accept": "audio/mpeg"},
-            json={
-                "text": text,
-                "model_id": settings.ELEVENLABS_MODEL,
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            },
-        )
-        resp.raise_for_status()
-        return resp.content
 
 
 _piper_voice = None
@@ -107,7 +83,8 @@ async def _piper(text: str) -> bytes:
         voice = _get_piper_voice()
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wav:
-            voice.synthesize(text, wav)
+            # piper-tts 1.4.x: synthesize_wav sets channels/rate/width itself.
+            voice.synthesize_wav(text, wav)
         return buf.getvalue()
 
     # Piper is CPU-bound + synchronous — keep it off the event loop.

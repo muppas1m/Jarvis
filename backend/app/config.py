@@ -164,15 +164,12 @@ class Settings(BaseSettings):
     # Instant filler masks heavy-tier latency — if first-token hasn't arrived
     # within this budget, Jarvis speaks a short "One moment, Sir…" line.
     VOICE_FILLER_DELAY_MS: int = 900
-    # Streaming TTS provider: "edge" (free, no key, British male — the default),
-    # "piper" (local community "JARVIS" voice; set PIPER_VOICE_PATH), or
-    # "elevenlabs" (flash; set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID).
-    TTS_PROVIDER: str = "edge"
+    # Streaming TTS provider: "piper" (local jgkawell/jarvis "JARVIS" voice baked
+    # into the image — the default, $0 + the real timbre), or "edge" (free cloud
+    # British male, the fallback). ElevenLabs is intentionally not wired.
+    TTS_PROVIDER: str = "piper"
+    PIPER_VOICE_PATH: str = "/opt/piper/en/en_GB/jarvis/medium/jarvis-medium.onnx"
     EDGE_TTS_VOICE: str = "en-GB-RyanNeural"
-    PIPER_VOICE_PATH: str = ""               # path to the .onnx voice inside the container
-    ELEVENLABS_API_KEY: str = ""
-    ELEVENLABS_VOICE_ID: str = ""
-    ELEVENLABS_MODEL: str = "eleven_flash_v2_5"
     # Metered-voice daily cap (only bites when a cloud TTS like ElevenLabs is on).
     VOICE_DAILY_COST_CAP_USD: float = 1.00
 

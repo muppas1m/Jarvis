@@ -18,8 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy only the manifest first so Docker's layer cache survives source-only edits.
-COPY pyproject.toml ./
+# Copy only the manifest + lockfile first so Docker's layer cache survives
+# source-only edits.
+COPY pyproject.toml constraints.txt ./
 
 # pip install -e . needs *something* to install. Until Turn 4 lands real code,
 # we seed a stub `app/` package so setuptools' editable install registers a
@@ -28,10 +29,19 @@ COPY pyproject.toml ./
 RUN mkdir -p app && touch app/__init__.py
 
 # Install dependencies + dev extras + register the local package as editable.
-# Editable mode lets uvicorn --reload pick up host changes via the volume mount
-# defined in docker-compose.yml.
+# `-c constraints.txt` locks the FULL transitive tree to the verified working set
+# (the lockfile) so a rebuild can't silently upgrade unpinned deps. Editable mode
+# lets uvicorn --reload pick up host changes via the volume mount in compose.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[dev]"
+    pip install --no-cache-dir -c constraints.txt -e ".[dev]"
+
+# Bake the Piper "JARVIS" voice (jgkawell/jarvis, medium) into the image at a
+# path OUTSIDE /app — the compose bind-mount (./backend:/app) would otherwise
+# hide anything under /app at runtime. Build-time download = no runtime fetch.
+RUN mkdir -p /opt/piper && \
+    python -c "from huggingface_hub import hf_hub_download as d; \
+b='en/en_GB/jarvis/medium/jarvis-medium.onnx'; \
+[d('jgkawell/jarvis', f, local_dir='/opt/piper') for f in (b, b + '.json')]"
 
 # Copy the rest of the source. The COPY of `./app` (when it exists locally)
 # overwrites the stub from above. Other top-level files (alembic.ini, scripts/)
