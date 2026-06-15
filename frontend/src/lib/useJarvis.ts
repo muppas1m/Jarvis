@@ -9,13 +9,12 @@ import type { AgentState, ChatMessage, StreamEvent } from "./types";
  *
  * Text mode → /api/chat/stream (tokens into the bubble).
  * Voice mode → /api/voice/stream: tokens build the transcript AND per-sentence
- * audio events are decoded + played in order through a shared AnalyserNode, so
- * `getAmplitude()` lets the orb pulse to Jarvis's voice. Captions track the
- * spoken sentence (not the faster-running token stream).
+ * audio events are decoded and **scheduled gaplessly on the AudioContext clock**
+ * (running cursor + short fades), through a shared AnalyserNode so the orb pulses
+ * to Jarvis's voice. Captions fire when each chunk actually starts playing.
  *
- * Turns are cancellable: starting a new turn (or `stop()`) aborts the in-flight
- * fetch (the backend cancels the graph turn) and silences playback — the
- * barge-in foundation architected from 4.1.
+ * Turns are cancellable: a new turn (or `stop()`) aborts the in-flight fetch and
+ * silences playback — the barge-in foundation.
  */
 export function useJarvis() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -30,10 +29,11 @@ export function useJarvis() {
   // Web Audio — lazily created on first send (a user gesture, per autoplay rules).
   const ctxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const queueRef = useRef<Array<{ buf: AudioBuffer; text: string }>>([]);
-  const playingRef = useRef(false);
+  const nextStartRef = useRef(0); // AudioContext time the next chunk should start
+  const activeSrcRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const pendingRef = useRef(0); // scheduled-but-not-yet-ended chunks
   const streamDoneRef = useRef(false);
-  const currentSrcRef = useRef<AudioBufferSourceNode | null>(null);
+  const capTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   const ensureAudio = useCallback((): AudioContext => {
     if (!ctxRef.current) {
@@ -62,29 +62,49 @@ export function useJarvis() {
     return sum / data.length / 255; // 0..1
   }, []);
 
-  const playNext = useCallback(() => {
+  // Schedule one decoded chunk back-to-back with the previous (no gap), with a
+  // few-ms fade in/out so chunk boundaries don't click.
+  const scheduleChunk = useCallback((buffer: AudioBuffer, text: string) => {
     const ctx = ctxRef.current;
     const analyser = analyserRef.current;
-    const item = queueRef.current.shift();
-    if (!ctx || !analyser || !item) {
-      playingRef.current = false;
-      currentSrcRef.current = null;
-      if (streamDoneRef.current) {
+    if (!ctx || !analyser) return;
+    const now = ctx.currentTime;
+    const startAt = Math.max(now + 0.02, nextStartRef.current);
+    const dur = buffer.duration;
+    const fade = Math.min(0.012, dur / 4);
+
+    const gain = ctx.createGain();
+    gain.connect(analyser);
+    gain.gain.setValueAtTime(0, startAt);
+    gain.gain.linearRampToValueAtTime(1, startAt + fade);
+    gain.gain.setValueAtTime(1, Math.max(startAt + fade, startAt + dur - fade));
+    gain.gain.linearRampToValueAtTime(0, startAt + dur);
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(gain);
+
+    activeSrcRef.current.add(src);
+    pendingRef.current += 1;
+    setAgentState("responding");
+
+    // Caption fires when this chunk actually starts (synced to audio, not tokens).
+    const timer = setTimeout(
+      () => setCaption(text),
+      Math.max(0, (startAt - now) * 1000),
+    );
+    capTimersRef.current.add(timer);
+
+    src.onended = () => {
+      activeSrcRef.current.delete(src);
+      pendingRef.current -= 1;
+      if (pendingRef.current <= 0 && streamDoneRef.current) {
         setAgentState("idle");
         setCaption("");
       }
-      return;
-    }
-    playingRef.current = true;
-    setCaption(item.text);
-    const src = ctx.createBufferSource();
-    src.buffer = item.buf;
-    src.connect(analyser);
-    src.onended = () => {
-      if (currentSrcRef.current === src) playNext();
     };
-    currentSrcRef.current = src;
-    src.start();
+    src.start(startAt);
+    nextStartRef.current = startAt + dur;
   }, []);
 
   const enqueueAudio = useCallback(
@@ -93,29 +113,30 @@ export function useJarvis() {
       try {
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         const buf = await ctx.decodeAudioData(bytes.buffer);
-        queueRef.current.push({ buf, text });
-        if (!playingRef.current) playNext();
+        scheduleChunk(buf, text);
       } catch {
         /* a bad audio chunk shouldn't break the turn */
       }
     },
-    [ensureAudio, playNext],
+    [ensureAudio, scheduleChunk],
   );
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    queueRef.current = [];
-    if (currentSrcRef.current) {
+    for (const src of activeSrcRef.current) {
       try {
-        currentSrcRef.current.onended = null;
-        currentSrcRef.current.stop();
+        src.onended = null;
+        src.stop();
       } catch {
         /* already stopped */
       }
-      currentSrcRef.current = null;
     }
-    playingRef.current = false;
+    activeSrcRef.current.clear();
+    for (const t of capTimersRef.current) clearTimeout(t);
+    capTimersRef.current.clear();
+    pendingRef.current = 0;
+    nextStartRef.current = 0;
     setAgentState("idle");
     setCaption("");
   }, []);
@@ -127,7 +148,10 @@ export function useJarvis() {
 
       stop(); // cancel any in-flight turn (barge-in foundation)
       const voice = voiceEnabled;
-      if (voice) ensureAudio();
+      if (voice) {
+        const ctx = ensureAudio();
+        nextStartRef.current = ctx.currentTime;
+      }
       streamDoneRef.current = false;
       setNeedsApproval(false);
 
@@ -185,7 +209,6 @@ export function useJarvis() {
                 patch(acc);
                 break;
               case "audio":
-                setAgentState("responding");
                 void enqueueAudio(ev.content.audio, ev.content.text);
                 break;
               case "tool":
@@ -204,9 +227,9 @@ export function useJarvis() {
           }
         }
         streamDoneRef.current = true;
-        // Text mode (or voice with nothing queued) settles immediately;
-        // voice mode settles when the audio queue drains (see playNext).
-        if (!voice || !playingRef.current) {
+        // Text mode (or voice with nothing scheduled) settles now; voice settles
+        // when the last scheduled chunk ends (see scheduleChunk.onended).
+        if (!voice || pendingRef.current <= 0) {
           setAgentState("idle");
           setCaption("");
         }
