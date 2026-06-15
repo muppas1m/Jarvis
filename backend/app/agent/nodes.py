@@ -82,7 +82,9 @@ async def memory_load_node(state: AgentState) -> dict:
     LangGraph checkpointer. We don't touch it.
     """
     user_message = state["user_message"]
+    _t0 = time.monotonic()
     context = await get_memory().build_context(user_message=user_message)
+    logger.info("node_timing", node="memory_load", ms=int((time.monotonic() - _t0) * 1000))
     return {
         "user_profile_always_on": context["user_profile_always_on"],
         "user_profile_on_demand": context["user_profile_on_demand"],
@@ -167,10 +169,12 @@ async def agent_node(state: AgentState) -> dict:
         (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         state["user_message"],
     )
+    _t_sel = time.monotonic()
     selected_tools = await tool_registry.select_relevant_tools(
         query=latest_user_msg,
         top_k=15,
     )
+    logger.info("node_timing", node="tool_select", ms=int((time.monotonic() - _t_sel) * 1000))
 
     # Stable-prefix-first system prompt for KV cache friendliness.
     always_on_dict = state.get("user_profile_always_on") or {}
@@ -207,7 +211,12 @@ async def agent_node(state: AgentState) -> dict:
         primary_model = settings.PRIMARY_MODEL if has_tool_results else settings.FAST_MODEL
 
     llm = _build_chat_model(selected_tools, primary_model=primary_model)
+    _t_llm = time.monotonic()
     response = await llm.ainvoke(msgs)
+    logger.info(
+        "node_timing", node="agent_llm", model=primary_model,
+        ms=int((time.monotonic() - _t_llm) * 1000),
+    )
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
     update: dict = {"messages": [response]}

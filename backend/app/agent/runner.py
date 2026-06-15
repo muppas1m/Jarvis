@@ -483,6 +483,11 @@ async def voice_turn(
                     continue
                 text = _chunk_text(chunk)
                 if text:
+                    if not first_token:
+                        logger.info(
+                            "voice_timing", seg="first_token",
+                            ms=int((time.monotonic() - started_ms) * 1000),
+                        )
                     first_token = True
                     yield {"type": "token", "content": text}
                     for sentence in chunker.push(text):
