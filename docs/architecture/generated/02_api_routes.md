@@ -4,7 +4,7 @@
 
 # API Routes
 
-14 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`). Auth = a `get_current_user` dependency on the route (the protected sub-router).
+15 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`), enumerated via the OpenAPI schema. Auth is derived structurally — public routers are health + webhooks; every other route is under the `get_current_user`-gated protected sub-router.
 
 | Method | Path | Auth | Tags |
 |---|---|---|---|
@@ -20,5 +20,6 @@
 | `GET` | `/api/health` | public | health |
 | `GET` | `/api/memory/profile` | 🔒 auth | memory |
 | `GET` | `/api/memory/search` | 🔒 auth | memory |
+| `POST` | `/api/voice/stream` | 🔒 auth | voice |
 | `POST` | `/api/webhooks/gmail` | public | webhooks |
 | `POST` | `/api/webhooks/telegram` | public | webhooks |

@@ -153,6 +153,29 @@ class Settings(BaseSettings):
     TOOL_RESULT_MAX_CHARS: int = 2000       # results bigger than this are archived
     MAX_UPLOAD_SIZE_MB: int = 25            # /documents/upload hard cap — streamed, never buffered whole
 
+    # --- Voice (Phase 4 — "Jarvis speaks") -----------------------------------
+    # Persona honorific — how Jarvis addresses the master (gender-derived
+    # default; "Sir" for male, "Ma'am" for female). Lives in the system prompt.
+    MASTER_HONORIFIC: str = "Sir"
+    # Two-speed cascade (§B): voice turns route the agent's reasoning LLM to the
+    # FAST slot for sub-second first-token, escalating to the frontier model
+    # once tools have run. The brain (tools/memory/safety/approval) is unchanged.
+    VOICE_FAST_TIER: bool = True
+    # Instant filler masks heavy-tier latency — if first-token hasn't arrived
+    # within this budget, Jarvis speaks a short "One moment, Sir…" line.
+    VOICE_FILLER_DELAY_MS: int = 900
+    # Streaming TTS provider: "edge" (free, no key, British male — the default),
+    # "piper" (local community "JARVIS" voice; set PIPER_VOICE_PATH), or
+    # "elevenlabs" (flash; set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID).
+    TTS_PROVIDER: str = "edge"
+    EDGE_TTS_VOICE: str = "en-GB-RyanNeural"
+    PIPER_VOICE_PATH: str = ""               # path to the .onnx voice inside the container
+    ELEVENLABS_API_KEY: str = ""
+    ELEVENLABS_VOICE_ID: str = ""
+    ELEVENLABS_MODEL: str = "eleven_flash_v2_5"
+    # Metered-voice daily cap (only bites when a cloud TTS like ElevenLabs is on).
+    VOICE_DAILY_COST_CAP_USD: float = 1.00
+
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72
     AUTO_APPROVE_REPLY_MAX_WORDS: int = 80

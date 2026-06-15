@@ -24,6 +24,7 @@ from app.api.costs import router as costs_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.memory import router as memory_router
+from app.api.voice import router as voice_router
 from app.api.webhooks.gmail import router as gmail_webhook_router
 from app.api.webhooks.telegram import router as telegram_webhook_router
 from app.security.auth import UserContext, get_current_user
@@ -50,6 +51,7 @@ async def whoami(user: UserContext = Depends(get_current_user)) -> dict:
 
 
 protected_router.include_router(chat_router)
+protected_router.include_router(voice_router)
 protected_router.include_router(approvals_router)
 protected_router.include_router(memory_router)
 protected_router.include_router(costs_router)

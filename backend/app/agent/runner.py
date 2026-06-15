@@ -24,6 +24,9 @@ and dashboard POSTs. Old fields (status, response, interrupt) are kept
 backward-compatible; new fields (thread_id, messages, trace_id, usage) are
 added on top.
 """
+import asyncio
+import base64
+import contextlib
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
@@ -32,10 +35,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langgraph.types import Command
 
 from app.agent.graph import build_graph
+from app.config import settings
 from app.llm.observability import langfuse_callback_handler
-from app.llm.stream_mode import stream_tokens
+from app.llm.stream_mode import stream_tokens, voice_mode
 from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
+from app.voice.chunker import SentenceChunker
+from app.voice.tts import audio_mime, synthesize
 
 logger = get_logger(__name__)
 
@@ -337,6 +343,209 @@ def _terminal_payload(envelope: dict[str, Any]) -> dict[str, Any]:
         "usage": envelope.get("usage"),
         "thread_id": envelope["thread_id"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Voice surface (Phase 4 sub-phase 4.1 — "Jarvis speaks")                      #
+# --------------------------------------------------------------------------- #
+
+_FILLERS = (
+    "One moment, {h}.",
+    "Right away, {h}.",
+    "Let me see to that, {h}.",
+    "Looking into it, {h}.",
+)
+
+
+def _filler_line(index: int) -> str:
+    return _FILLERS[index % len(_FILLERS)].format(h=settings.MASTER_HONORIFIC)
+
+
+def _audio_event(text: str, audio: bytes, *, filler: bool = False) -> dict[str, Any]:
+    """An SSE 'audio' event: a spoken sentence + its caption, base64 audio."""
+    return {
+        "type": "audio",
+        "content": {
+            "text": text,
+            "audio": base64.b64encode(audio).decode("ascii"),
+            "mime": audio_mime(),
+            "filler": filler,
+        },
+    }
+
+
+def _approval_speech(interrupt: dict[str, Any]) -> str:
+    """Spoken form of an approval request. In 4.1 the master still resolves it
+    with the Approve/Reject buttons; the hands-free voice resolver is 4.3."""
+    tool = (interrupt or {}).get("tool_name", "an action")
+    h = settings.MASTER_HONORIFIC
+    return f"{h}, I've prepared {tool}. Please review and approve it when you're ready."
+
+
+async def voice_turn(
+    user_message: str,
+    thread_id: str,
+    platform: str,
+    channel_user_id: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """Voice-OUT turn over the SAME graph as run_turn — but speed-tuned and spoken.
+
+    Sets the `voice_mode` (fast-tier routing, §B) + `stream_tokens` contextvars,
+    drives `graph().astream(...)`, slices the token stream into sentences, and
+    synthesises each sentence to streaming TTS so audio starts on the first
+    sentence (§D-1). An instant filler masks first-token latency. The interrupt
+    approval path is preserved — Jarvis speaks the request; the buttons resolve
+    it in 4.1 (the hands-free voice resolver is 4.3).
+
+    Yields the stream_turn events plus, per spoken sentence:
+      {"type": "audio", "content": {"text", "audio"(b64), "mime", "filler"}}
+
+    The turn is fully cancellable — if the consumer (an aborted SSE / a future
+    barge-in) stops iterating, the producer task and the in-flight graph turn
+    are cancelled. That is the barge-in foundation architected from 4.1.
+    """
+    yield {"type": "thread_id", "content": thread_id}
+
+    config, handler = _config_with_handler(thread_id)
+
+    if await _is_awaiting_approval(thread_id):
+        env = _pending_interrupt_envelope(thread_id)
+        audio = await synthesize(env["response"])
+        if audio:
+            yield _audio_event(env["response"], audio)
+        yield {"type": "done", "content": _terminal_payload(env)}
+        return
+
+    msgs_before = await _existing_message_count(thread_id)
+    initial_state = {
+        "messages": [HumanMessage(content=user_message)],
+        "thread_id": thread_id,
+        "platform": platform,
+        "channel_user_id": channel_user_id,
+        "user_message": user_message,
+        "turn_started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    chunker = SentenceChunker()
+    filler_budget = settings.VOICE_FILLER_DELAY_MS / 1000.0
+    started_ms = time.monotonic()
+
+    # Set the contextvars BEFORE create_task so the producer task inherits them.
+    flag_v = voice_mode.set(True)
+    flag_s = stream_tokens.set(True)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _produce() -> None:
+        try:
+            async for item in graph().astream(
+                initial_state, config=config, stream_mode=["messages", "updates"]
+            ):
+                await queue.put(("stream", item))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the consumer below
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("end", None))
+
+    producer = asyncio.create_task(_produce())
+    first_token = False
+    filler_sent = False
+    error_exc: BaseException | None = None
+
+    async def _speak(sentence: str, *, filler: bool = False):
+        audio = await synthesize(sentence)
+        if audio:
+            return _audio_event(sentence, audio, filler=filler)
+        return None
+
+    try:
+        while True:
+            try:
+                timeout = filler_budget if (not first_token and not filler_sent) else None
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # No first token within the budget — mask the wait with a filler.
+                filler_sent = True
+                ev = await _speak(_filler_line(0), filler=True)
+                if ev:
+                    yield ev
+                continue
+
+            if kind == "end":
+                break
+            if kind == "error":
+                error_exc = payload
+                break
+
+            mode, data = payload
+            if mode == "messages":
+                chunk, meta = data
+                if (meta or {}).get("langgraph_node") != "agent":
+                    continue
+                text = _chunk_text(chunk)
+                if text:
+                    first_token = True
+                    yield {"type": "token", "content": text}
+                    for sentence in chunker.push(text):
+                        ev = await _speak(sentence)
+                        if ev:
+                            yield ev
+            elif mode == "updates":
+                for node, upd in (data or {}).items():
+                    if node != "agent":
+                        continue
+                    for m in (upd or {}).get("messages", []) or []:
+                        for tc in getattr(m, "tool_calls", None) or []:
+                            yield {"type": "tool", "content": tc.get("name", "")}
+
+        # Speak any trailing partial sentence.
+        tail = chunker.flush()
+        if tail:
+            ev = await _speak(tail)
+            if ev:
+                yield ev
+    except asyncio.CancelledError:
+        producer.cancel()
+        raise
+    finally:
+        if not producer.done():
+            producer.cancel()
+            with contextlib.suppress(Exception):
+                await producer
+        stream_tokens.reset(flag_s)
+        voice_mode.reset(flag_v)
+
+    if error_exc is not None:
+        logger.exception("voice_stream_failed", thread_id=thread_id, error=str(error_exc))
+        msg = "I hit an internal error. Please try again."
+        ev = await _speak(msg)
+        if ev:
+            yield ev
+        yield {"type": "error", "content": msg, "stop_reason": _stop_reason_for_error(error_exc)}
+        return
+
+    duration_ms = int((time.monotonic() - started_ms) * 1000)
+    state = await graph().aget_state(config)
+    result = dict(state.values) if state and state.values else {}
+    envelope = await _build_envelope(
+        thread_id=thread_id,
+        result=result,
+        config=config,
+        msgs_before=msgs_before,
+        duration_ms=duration_ms,
+        handler=handler,
+    )
+    logger.info(
+        "turn_complete", thread_id=thread_id, status=envelope["status"],
+        stop_reason=envelope.get("stop_reason"), voiced=True,
+    )
+    if envelope["status"] == "interrupted":
+        interrupt = envelope.get("interrupt") or {}
+        ev = await _speak(_approval_speech(interrupt))
+        if ev:
+            yield ev
+        yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
+    else:
+        yield {"type": "done", "content": _terminal_payload(envelope)}
 
 
 # --------------------------------------------------------------------------- #

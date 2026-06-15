@@ -87,6 +87,12 @@ dependencies = [
     # guards against a future major silently breaking the loader the same way.
     "sentence-transformers>=5.0,<6",
 
+    # Voice (Phase 4 — streaming TTS). edge-tts is the zero-config default
+    # (free, no key, British male "Ryan"). Piper (local community "JARVIS"
+    # voice) and ElevenLabs (flash) are lazy-imported behind TTS_PROVIDER —
+    # install + set the flag to use them; they're not forced into the image.
+    "edge-tts>=6.1.0",
+
     # Utils
     "httpx>=0.27.0",
     "structlog>=24.4.0",

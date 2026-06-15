@@ -93,10 +93,14 @@ async def memory_load_node(state: AgentState) -> dict:
 # ============================================================================
 # Node 2 — agent (LLM call with bound tools)
 # ============================================================================
-def _build_chat_model(tools: list):
+def _build_chat_model(tools: list, primary_model: str | None = None):
     """Build the agent's chat model — primary + fallback wrapped in
     FallbackChatLLM for resilience against Groq rate-limit and
     tool_use_failed errors.
+
+    `primary_model` overrides the primary slot — the §B two-speed cascade uses
+    this to route voice turns to the FAST tier (settings.FAST_MODEL). Defaults
+    to settings.PRIMARY_MODEL (the frontier model) for every non-voice caller.
 
     Both ChatLiteLLM instances are constructed per-turn (cheap; they're
     config objects, not heavy state). Tools are bound to BOTH before
@@ -120,7 +124,9 @@ def _build_chat_model(tools: list):
     from app.llm.stream_mode import stream_tokens
 
     streaming = stream_tokens.get()
-    primary = ChatLiteLLM(model=settings.PRIMARY_MODEL, temperature=0.7, streaming=streaming)
+    primary = ChatLiteLLM(
+        model=primary_model or settings.PRIMARY_MODEL, temperature=0.7, streaming=streaming
+    )
     fallback = ChatLiteLLM(model=settings.FALLBACK_MODEL, temperature=0.7, streaming=streaming)
 
     if tools:
@@ -189,7 +195,18 @@ async def agent_node(state: AgentState) -> dict:
     # through so the fallback can never choke. See app.agent.message_repair.
     msgs = repair_orphaned_tool_calls(msgs)
 
-    llm = _build_chat_model(selected_tools)
+    # Two-speed cascade (§B): in voice mode the reasoning LLM defaults to the
+    # FAST tier for sub-second first-token; escalate to the frontier model once
+    # tools have run (synthesising a tool result is where deep reasoning earns
+    # its latency). The brain is unchanged — only the model speed is tuned.
+    from app.llm.stream_mode import voice_mode
+
+    primary_model = settings.PRIMARY_MODEL
+    if voice_mode.get() and settings.VOICE_FAST_TIER:
+        has_tool_results = any(isinstance(m, ToolMessage) for m in state["messages"])
+        primary_model = settings.PRIMARY_MODEL if has_tool_results else settings.FAST_MODEL
+
+    llm = _build_chat_model(selected_tools, primary_model=primary_model)
     response = await llm.ainvoke(msgs)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))

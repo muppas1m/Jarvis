@@ -21,3 +21,11 @@ through the async call chain (the ``asyncio`` context copy) the same way
 from contextvars import ContextVar
 
 stream_tokens: ContextVar[bool] = ContextVar("jarvis_stream_tokens", default=False)
+
+# Voice mode — set by the voice orchestrator (app.voice). When True, the agent's
+# reasoning LLM routes to the FAST tier (settings.FAST_MODEL) for sub-second
+# first-token (the §B two-speed cascade), escalating to the frontier model once
+# tools have run. The brain (tools/Mem0/safety/approval) is unchanged — only the
+# model speed is tuned for the live-speech layer. Same contextvar discipline as
+# stream_tokens / eval_mode: never lands in the persisted checkpoint.
+voice_mode: ContextVar[bool] = ContextVar("jarvis_voice_mode", default=False)

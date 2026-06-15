@@ -141,36 +141,38 @@ def gen_db_erd() -> str:
 # ===========================================================================
 def gen_api_routes() -> str:
     from app.main import app  # noqa: PLC0415
-    from app.security.auth import get_current_user  # noqa: PLC0415
 
-    def requires_auth(route) -> bool:
-        def walk(dep) -> bool:
-            if getattr(dep, "call", None) is get_current_user:
-                return True
-            return any(walk(d) for d in getattr(dep, "dependencies", []))
-        dependant = getattr(route, "dependant", None)
-        if dependant is None:
-            return False
-        return any(walk(d) for d in dependant.dependencies)
+    # FastAPI 0.137 resolves `include_router` lazily, so static `app.routes` no
+    # longer exposes the resolved Route objects (with `.dependant`). The OpenAPI
+    # schema is the version-stable enumeration of paths + methods + tags. Auth is
+    # a router-level dependency (not an OpenAPI security scheme), so we derive it
+    # structurally: the only public routers are health + webhooks (each verifies
+    # its own provider signature; see `app/api/router.py`) — every other route is
+    # under the `get_current_user`-gated protected sub-router.
+    public_tags = {"health", "webhooks"}
 
+    paths = app.openapi().get("paths", {})
     rows = []
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        methods = getattr(route, "methods", None)
-        if not path or not methods or path in ("/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"):
+    for path, ops in paths.items():
+        if path in ("/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"):
             continue
-        verbs = ",".join(sorted(m for m in methods if m != "HEAD"))
-        auth = "🔒 auth" if requires_auth(route) else "public"
-        tags = ", ".join(getattr(route, "tags", []) or [])
-        rows.append((path, verbs, auth, tags))
+        for method, op in ops.items():
+            verb = method.upper()
+            if verb in ("HEAD", "OPTIONS"):
+                continue
+            tags = tuple(op.get("tags") or [])
+            auth = "public" if (public_tags & set(tags)) else "🔒 auth"
+            rows.append((path, verb, auth, ", ".join(tags)))
 
     rows.sort()
     table = ["| Method | Path | Auth | Tags |", "|---|---|---|---|"]
     table += [f"| `{v}` | `{p}` | {a} | {t} |" for (p, v, a, t) in rows]
     return (
         "# API Routes\n\n"
-        f"{len(rows)} routes from the live FastAPI app (`app/main.py` → `app/api/router.py`). "
-        "Auth = a `get_current_user` dependency on the route (the protected sub-router).\n\n"
+        f"{len(rows)} routes from the live FastAPI app (`app/main.py` → `app/api/router.py`), "
+        "enumerated via the OpenAPI schema. Auth is derived structurally — public routers are "
+        "health + webhooks; every other route is under the `get_current_user`-gated protected "
+        "sub-router.\n\n"
         + "\n".join(table) + "\n"
     )
 

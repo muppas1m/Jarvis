@@ -18,6 +18,8 @@ land below this in the message list with their own <tool_output trust=...>
 tags (added in the tool sanitizer in Turn 8/9).
 """
 
+from app.config import settings
+
 # ============================================================================
 # STABLE PREFIX — change one byte here and you invalidate the prompt cache for
 # every subsequent call. Edit deliberately.
@@ -222,5 +224,19 @@ def build_system_prompt(
     )
 
     return (
-        IDENTITY_BLOCK + "\n" + CAPABILITIES_BLOCK + "\n" + SAFETY_DOCTRINE + "\n" + volatile
+        IDENTITY_BLOCK + _persona_line() + "\n" + CAPABILITIES_BLOCK + "\n"
+        + SAFETY_DOCTRINE + "\n" + volatile
+    )
+
+
+def _persona_line() -> str:
+    """Config-driven persona, appended to the stable prefix (the honorific is a
+    setting, so it doesn't change per turn → cache stays warm). Gives Jarvis the
+    calm British-butler voice and the "Sir"/"Ma'am" form of address."""
+    h = settings.MASTER_HONORIFIC
+    return (
+        f'- You address your master as "{h}", with the calm, precise, lightly-witty '
+        f"poise of a British butler — in the spirit of Tony Stark's J.A.R.V.I.S. "
+        f"Warm and deferential, never servile; dry wit in good measure; never "
+        f"over-apologise.\n"
     )

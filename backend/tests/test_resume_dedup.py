@@ -139,7 +139,7 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
 
     # FakeMessagesListChatModel.bind_tools is a no-op pass-through; the
     # canned responses are what come back regardless of the tools list.
-    def fake_build_chat_model(tools):  # noqa: ARG001 — we ignore the bound tools
+    def fake_build_chat_model(tools, primary_model=None):  # noqa: ARG001 — ignore tools + tier
         return fake_llm
 
     # --- the fake tool executor -------------------------------------------
@@ -319,7 +319,7 @@ async def test_resume_does_not_duplicate_pending_approval_or_prompt(
     final_response = AIMessage(content="Sent. Done.")
     fake_llm = FakeMessagesListChatModel(responses=[initial_response, final_response])
 
-    def fake_build_chat_model(tools):  # noqa: ARG001
+    def fake_build_chat_model(tools, primary_model=None):  # noqa: ARG001
         return fake_llm
 
     async def fake_execute(name: str, args: dict) -> str:  # noqa: ARG001
