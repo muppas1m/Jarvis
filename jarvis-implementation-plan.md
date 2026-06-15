@@ -50,7 +50,7 @@
 - [Phase 2 — Email Management + Calendar + RAG (Weeks 4–6)](#phase-2--email-management-system-weeks-46)
 - [Phase 2.5 — Custom MCP Server Wrappers (End of Week 6)](#phase-25--custom-mcp-server-wrappers-end-of-week-6)
 - [Phase 3 — Browser Automation, Research & News Briefing (Weeks 7–9)](#phase-3--browser-automation-research--news-briefing-weeks-79)
-- [Phase 4 — Web Dashboard, WhatsApp, Unified Messaging & Security Hardening (Weeks 10–12)](#phase-4--web-dashboard-whatsapp-unified-messaging--security-hardening-weeks-1012)
+- [Phase 4 — Voice-First Jarvis Dashboard, Multi-channel & Hardening (Weeks 10–13)](#phase-4--voice-first-jarvis-dashboard-multi-channel--hardening-weeks-1013)
 - [Appendix A — Production Deployment (Your Dedicated Machine or Cloud)](#appendix-a--production-deployment-your-dedicated-machine-or-cloud)
 - [Future Enhancements (Post-MVP)](#future-enhancements-post-mvp)
 
@@ -1301,7 +1301,7 @@ export const signIn = async () => undefined;   // stub
 export const signOut = async () => undefined;  // stub
 ```
 
-`frontend/src/hooks/useChat.ts`, `useApprovals.ts`, `useAuth.ts`: each file should export a small typed hook wrapping the corresponding `lib/api.ts` function. Phase 4 Task 4.5 (chat page) authors `useChat`; Task 4.7 (approvals page) authors `useApprovals`. Cascade: create these as 5-line stubs now (`export function useChat(){throw new Error("implemented in Task 4.5")}`) so imports resolve, then replace in the relevant Phase 4 task.
+`frontend/src/hooks/useChat.ts`, `useApprovals.ts`, `useAuth.ts`: each file should export a small typed hook wrapping the corresponding `lib/api.ts` function. Phase 4 sub-phase 4.0's text-chat surface authors `useChat`; its approvals page authors `useApprovals`. Cascade: create these as 5-line stubs now (`export function useChat(){throw new Error("implemented in Phase 4 sub-phase 4.0")}`) so imports resolve, then replace when sub-phase 4.0 is built.
 
 `frontend/src/app/login/page.tsx`, `emails/page.tsx`, `memory/page.tsx`, `settings/page.tsx`: each is a Next.js page stub returning `<main className="p-8"><h1>{Page} (TBD)</h1></main>`. Phase 4 fleshes them out.
 
@@ -7847,429 +7847,176 @@ Manually verify `backend/alembic/versions/005_browser_audit.py` includes the `br
 
 ---
 
-## Phase 4 — Web Dashboard, Unified Messaging & Security Hardening (Weeks 10–12)
+## Phase 4 — Voice-First Jarvis Dashboard, Multi-channel & Hardening (Weeks 10–13)
 
-**Goal:** Full Next.js dashboard with SSE streaming, unified cross-platform messaging (Telegram as primary), PWA mobile, and production security. WhatsApp is architecturally included but treated as a nice-to-have — start Meta business verification early (it takes weeks), and WhatsApp slots in when approved without blocking the phase.
+**Goal:** Make the Next.js app Jarvis's **primary interface** — a voice-first, HUD-styled dashboard where the master talks to Jarvis and Jarvis talks back in a refined British "Jarvis" voice, with a 3D audio-reactive orb as the visual centre. Text chat stays as an always-available secondary surface. The voice layer is an **I/O shell wrapped around the existing LangGraph brain** (Phases 1–3) — it never forks the tools, memory, safety tiers, approval gate, or cost controls. Multi-channel (WhatsApp) and security hardening (the original Weeks 11–12) re-situate as sub-phase 4.5 behind the voice dashboard.
 
-> **Why WhatsApp is not a Phase 4 milestone:** WhatsApp Cloud API requires Meta business verification (can take weeks, sometimes rejected), and pre-approved Message Templates for proactive messages (morning briefs, alerts). These external dependencies can block the entire phase with nothing you can do. Telegram has no such constraints — no window limits, no pre-approval, no business verification — and is a stronger primary channel for this use case. Start the Meta verification process now so it runs in parallel.
+> **This section was re-planned (frontier pass, 2026-06-15).** The previous Phase 4 was a generic admin/cost dashboard (a code dump of a plain chat page + approvals table). It is superseded by the voice-first product below. The genuinely reusable seams from the old plan are referenced by their surviving task numbers (Auth.js 4.18/4.18b, the Channel ABC, `run_turn`, the SSE endpoint's `graph().astream()` note); the old generic UI code is dropped, not duplicated.
 
 ---
 
-### Week 10: Next.js Dashboard
-
-#### Task 4.1 — Initialize Next.js Frontend
-
-```bash
-npx create-next-app@latest frontend \
-  --typescript --tailwind --eslint --app --src-dir \
-  --import-alias "@/*"
-
-cd frontend
-npx shadcn@latest init
-npx shadcn@latest add button card input dialog badge scroll-area
-npm install @vercel/ai eventsource-parser
-```
-
-#### Task 4.2 — Frontend Environment
-
-Create `frontend/.env.local`:
-
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000/api
-
-# Auth.js v5 — must match backend's AUTH_SECRET in `.env` (backend's
-# app/security/auth.py:require_auth validates JWTs signed with this secret).
-AUTH_SECRET=your-auth-secret
-
-# Master passkey for the single-user Credentials provider (Task 4.18b).
-# Generate once: python -c "import os; print(os.urandom(32).hex())"
-MASTER_PASSKEY=your-master-passkey-here
-```
-
-> **Cascade:** `AUTH_SECRET` MUST be byte-identical to `AUTH_SECRET` in the backend `.env` — JWTs issued by the frontend Auth.js handler are decoded by the backend dependency, so any mismatch breaks every authenticated API call. `MASTER_PASSKEY` is only consumed by the frontend Credentials provider (Task 4.18b) and never sent to the backend.
-
-#### Task 4.3 — API Client
-
-Create `frontend/src/lib/api.ts`:
-
-```typescript
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-```
-
-#### Task 4.4 — SSE Streaming Helper
-
-Create `frontend/src/lib/sse.ts`:
-
-```typescript
-export async function streamChat(
-  message: string,
-  threadId: string | null,
-  onChunk: (text: string) => void,
-  onDone: (fullResponse: string, newThreadId: string) => void
-) {
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL;
-
-  const res = await fetch(`${API_BASE}/chat/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify({ message, thread_id: threadId }),
-  });
-
-  if (!res.ok || !res.body) throw new Error("Stream failed");
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let fullText = "";
-  let newThreadId = threadId || "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    const chunk = decoder.decode(value, { stream: true });
-    const lines = chunk.split("\n");
-
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        const data = JSON.parse(line.slice(6));
-        if (data.type === "text") {
-          fullText += data.content;
-          onChunk(data.content);
-        } else if (data.type === "thread_id") {
-          newThreadId = data.content;
-        } else if (data.type === "approval_required") {
-          onChunk("\n\n_⚠ Approval required — open the Approvals tab._");
-        }
-      }
-    }
-  }
-
-  onDone(fullText, newThreadId);
-}
-```
-
-#### Task 4.5 — Shared Types
-
-Create `frontend/src/lib/types.ts`:
-
-```typescript
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  timestamp: string;
-}
-
-export interface Approval {
-  id: string;
-  thread_id: string;
-  action_type: string;
-  description: string;
-  status: "pending" | "approved" | "rejected" | "expired";
-  created_at: string;
-  expires_at: string;
-}
-
-export interface HealthStatus {
-  status: string;
-  llm_spend_today: number;
-  llm_soft_cap: number;
-  llm_hard_cap: number;
-  soft_cap_hit: boolean;
-  hard_cap_hit: boolean;
-}
-```
-
-#### Task 4.6 — Chat Page
-
-Create `frontend/src/app/chat/page.tsx`:
-
-```tsx
-"use client";
-
-import { useState, useRef, useEffect } from "react";
-import { streamChat } from "@/lib/sse";
-import { ChatMessage } from "@/lib/types";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-
-export default function ChatPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [conversationId, setConversationId] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const sendMessage = async () => {
-    if (!input.trim() || isStreaming) return;
-
-    const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: input,
-      timestamp: new Date().toISOString(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    setIsStreaming(true);
-
-    const assistantId = crypto.randomUUID();
-    setMessages((prev) => [
-      ...prev,
-      { id: assistantId, role: "assistant", content: "", timestamp: new Date().toISOString() },
-    ]);
-
-    try {
-      await streamChat(
-        userMsg.content,
-        conversationId,
-        (chunk) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + chunk } : m
-            )
-          );
-        },
-        (fullResponse, newConvId) => {
-          setConversationId(newConvId);
-          setIsStreaming(false);
-        }
-      );
-    } catch (error) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: "Error: Could not reach Jarvis. Please try again." }
-            : m
-        )
-      );
-      setIsStreaming(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-screen max-w-3xl mx-auto">
-      <header className="p-4 border-b">
-        <h1 className="text-xl font-semibold">Jarvis</h1>
-      </header>
-
-      <ScrollArea className="flex-1 p-4">
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`mb-4 ${msg.role === "user" ? "text-right" : "text-left"}`}
-          >
-            <div
-              className={`inline-block px-4 py-2 rounded-lg max-w-[80%] ${
-                msg.role === "user"
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 text-gray-900"
-              }`}
-            >
-              {msg.content || "..."}
-            </div>
-          </div>
-        ))}
-        <div ref={scrollRef} />
-      </ScrollArea>
-
-      <div className="p-4 border-t flex gap-2">
-        <Input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-          placeholder="Message Jarvis..."
-          disabled={isStreaming}
-        />
-        <Button onClick={sendMessage} disabled={isStreaming}>
-          Send
-        </Button>
-      </div>
-    </div>
-  );
-}
-```
-
-#### Task 4.7 — Approvals Page
-
-Create `frontend/src/app/approvals/page.tsx`:
-
-```tsx
-"use client";
-
-import { useState, useEffect } from "react";
-import { apiGet, apiPost } from "@/lib/api";
-import { Approval } from "@/lib/types";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-
-export default function ApprovalsPage() {
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-
-  const fetchApprovals = async () => {
-    const data = await apiGet<Approval[]>("/approvals/pending");
-    setApprovals(data);
-  };
-
-  useEffect(() => {
-    fetchApprovals();
-    const interval = setInterval(fetchApprovals, 10000); // Poll every 10s
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleAction = async (id: string, action: "approve" | "reject") => {
-    await apiPost(`/approvals/${id}/decide`, { action });
-    fetchApprovals();
-  };
-
-  return (
-    <div className="max-w-3xl mx-auto p-6">
-      <h1 className="text-2xl font-semibold mb-6">Pending Approvals</h1>
-
-      {approvals.length === 0 ? (
-        <p className="text-gray-500">No pending approvals.</p>
-      ) : (
-        approvals.map((a) => (
-          <Card key={a.id} className="p-4 mb-4">
-            <div className="flex justify-between items-start mb-2">
-              <Badge variant="outline">{a.action_type}</Badge>
-              <span className="text-sm text-gray-400">
-                {new Date(a.created_at).toLocaleString()}
-              </span>
-            </div>
-            <p className="text-sm mb-4 whitespace-pre-wrap">{a.description}</p>
-            <div className="flex gap-2">
-              <Button size="sm" onClick={() => handleAction(a.id, "approve")}>
-                Approve
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => handleAction(a.id, "reject")}
-              >
-                Reject
-              </Button>
-            </div>
-          </Card>
-        ))
-      )}
-    </div>
-  );
-}
-```
-
-#### Task 4.8 — SSE Streaming Endpoint (Backend)
-
-Add to `backend/app/api/chat.py`:
-
-```python
-from fastapi.responses import StreamingResponse
-import json
-
-
-@router.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
-    """SSE streaming chat endpoint for web dashboard.
-
-    Note: true token-by-token streaming through LangGraph requires graph().astream().
-    This implementation runs the full turn then chunks the final response — good
-    enough for the dashboard's perceived latency.
-    """
-    from app.agent.runner import run_turn
-    thread_id = req.thread_id or Channel.thread_id_for("web", req.user_id)
-
-    async def event_stream():
-        yield f"data: {json.dumps({'type': 'thread_id', 'content': thread_id})}\n\n"
-
-        result = await run_turn(
-            user_message=req.message,
-            thread_id=thread_id,
-            platform="web",
-            channel_user_id=req.user_id,
-        )
-
-        if result["status"] == "interrupted":
-            yield f"data: {json.dumps({'type': 'approval_required', 'content': result['interrupt']})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            return
-
-        response_text = result.get("response") or ""
-        chunk_size = 20
-        for i in range(0, len(response_text), chunk_size):
-            chunk = response_text[i:i + chunk_size]
-            yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
-
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-```
-
-> Add `from app.messaging.channel import Channel` at the top of `chat.py` if not already imported.
-
-#### Task 4.9 — PWA Manifest + Service Worker
-
-Create `frontend/public/manifest.json`:
-
-```json
-{
-  "name": "Jarvis AI Agent",
-  "short_name": "Jarvis",
-  "start_url": "/chat",
-  "display": "standalone",
-  "background_color": "#000000",
-  "theme_color": "#2563eb",
-  "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
-  ]
-}
-```
-
-Create `frontend/public/sw.js`:
-
-```javascript
-const CACHE_NAME = "jarvis-v1";
-const PRECACHE_URLS = ["/chat", "/approvals"];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
-  );
-});
-
-self.addEventListener("fetch", (event) => {
-  event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
-  );
-});
-```
+### 4.§A — The product (what we're building and why)
+
+A self-hosted "Jarvis" the master can **speak to hands-free** and that **speaks back** with personality, rendered as a sci-fi HUD with a living orb at its heart.
+
+- **Voice is the primary mode.** Speech-to-speech round-trips are the default interaction from 4.1 onward. Text chat is present from 4.0 but optional/secondary.
+- **The orb.** A 3D, audio-reactive talking orb (Three.js via React-Three-Fiber) that pulses to Jarvis's voice and has four visible states — IDLE / LISTENING / THINKING / RESPONDING — each with its own colour, plus a particle halo and orbital rings. Arc-reactor aesthetic.
+- **The voice.** A refined British-male voice evoking the Iron Man "Jarvis." SOTA low-latency *streaming* TTS. We evaluate a local community-trained Piper "JARVIS" voice (free, private) against ElevenLabs British-male (paid, higher quality) and pick by sound in 4.1.
+- **The persona.** Calm, lightly-witty British-butler tone. Addresses the master as **"Sir"** by default ("Yes, Sir", "Right away, Sir", "That's better, Sir"). Honorific is config-driven (default derives from gender: male → "Sir", female → "Ma'am") and lives in the persona/system-prompt layer, not hard-coded. A clean hook is left for detailed voice-activated commands (to be specified later).
+- **The theme.** A HUD/FUI aesthetic — glassmorphism panels on deep-space `#070B18` with cyan `#00D4FF` accents, audio spectrum/waveform widgets, live system-metric read-outs, and a Stark-style boot sequence on load. FUI design reference: **Jayse Hansen** (the designer behind Marvel's Iron Man HUDs).
+- **Live captions.** Jarvis's spoken words appear as captions synced to the audio.
+- **Standing features that ride the voice layer:** wake-word ("Wake up Jarvis"), spontaneous auto-save of personal info the master mentions in passing, and the Mem0 recall-quality fix (Turn 26.5) — all land in 4.4.
+
+> **IP reality (must stay true).** "JARVIS," the Iron Man HUD look, and Paul Bettany's performance are Marvel/Disney IP. Personal, **non-commercial** use of a community-trained "JARVIS"-style voice and a Stark-inspired HUD for the master's own assistant is fine. A literal Paul-Bettany voice clone is **not licensable** and will not be shipped. This is a personal project; do not commercialise it.
+
+---
+
+### 4.§B — Central architecture decision: **cascaded pipeline, not native realtime speech-to-speech**
+
+This is the load-bearing decision of the phase; everything else follows from it.
+
+**Decision: build a cascaded streaming pipeline** — streaming **STT → the existing LangGraph agent (token-streamed) → streaming TTS**, with captions synced and the orb driven by the same streams. Transport is **WebSocket** (audio frames in; audio frames + token events + orb-state events out) plus **SSE** (one-way system-metrics firehose).
+
+**Rejected alternative: a native realtime speech-to-speech model** (e.g. GPT-4o-realtime / Gemini Live). A native S2S model *is its own brain* — its own tool-calling, its own (incompatible) memory, no concept of our SAFE/NOTIFY/APPROVE tiers, and no `interrupt()` approval gate. Adopting it would **bypass the entire Phase 1–3 investment**: the `agent/graph.py` StateGraph, the 8 registered tools, Mem0, `agent/safety.py` (`TOOL_SAFETY_MAP`), the HITL approval flow, and the LLM gateway's cost caps + cross-provider fallback. Cascaded keeps **`run_turn`/`resume_turn` (agent/runner.py) as the single brain**; voice is strictly I/O around it.
+
+**Trade-off we accept:** cascaded adds STT and TTS latency *in series* with LLM latency. Native S2S would be lower latency (one model, ~300–500 ms) but loses tools/memory/safety/approval. We pay the latency tax to keep the brain, and we attack the tax with *streaming at every stage* (partial STT, token-streamed LLM, sentence-chunked TTS) so time-to-first-audio is bounded by the **first sentence**, not the full turn.
+
+> **Documented fork + revisit trigger.** Revisit native (or hybrid) S2S only when **both**: (a) a realtime model ships first-class tool-calling + interrupt semantics we can map our safety tiers onto, **and** (b) measured cascaded latency stays unacceptable *after* streaming optimisation. Until both hold, cascaded is locked. (Hybrid middle-ground if it ever matters: native S2S for chit-chat turns that touch no tools, cascaded for any turn that hits a tool — deferred; do not build speculatively.)
+
+---
+
+### 4.§C — Component decisions (each: 2–3 options · recommendation · trade-off)
+
+Surfaced, not silently picked. Recommendations are the default; the master confirms at the relevant sub-phase.
+
+**1. Transport**
+- (a) **WS for everything** (audio + tokens + state + metrics) — one bidirectional connection, lowest moving parts.
+- (b) **WS (audio + tokens + state) + SSE (metrics)** — SSE is simpler for server-push-only metrics and auto-reconnects via `EventSource`. *(The convergent stack in the research doc.)*
+- (c) **WebRTC for audio + WS for control** — lowest audio latency, built-in echo-cancellation + jitter buffer.
+- **→ Recommend (b).** Cleanly separates the metrics firehose from the latency-sensitive audio/token path; WS is the simplest full-duplex carrier for the cascade. **Trade-off:** WS audio lacks WebRTC's native AEC/jitter handling — we lean on browser-side AEC (4.3). **Trigger to (c):** if measured WS audio latency or barge-in echo control proves insufficient, promote audio to WebRTC.
+
+**2. Speech-to-text (STT)**
+- (a) **faster-whisper** (local, CTranslate2; `distil-large-v3` for speed) — free, private, GPU-friendly; streaming via chunked decode.
+- (b) **Web Speech API** — browser-native, zero infra, but Chrome-only, cloud, unreliable, no control.
+- (c) **Deepgram / cloud streaming STT** — best streaming latency + accuracy, metered.
+- **→ Recommend (a).** $0, private, strong accuracy. **Trade-off:** local streaming partials need a chunking wrapper (4.3); whole-utterance push-to-talk (4.2) is trivial. **Trigger to (c):** if local partial-transcript latency/accuracy blocks conversational feel.
+
+**3. Text-to-speech + the Jarvis voice**
+- (a) **Piper + community "JARVIS" voice** (`en_GB`, local) — free, fast real-time-factor, the literal "JARVIS" timbre; community-trained (personal-use only).
+- (b) **ElevenLabs British-male** (streaming `flash` model, ~75 ms first-audio) — SOTA quality + emotion, metered (~$0.30/1k chars), cloud.
+- (c) **Kokoro** (recent high-quality open TTS, local) / **Edge TTS** (free cloud, British "Ryan", but ToS/stability risk).
+- **→ Recommend: 4.1 A/B-tests (a) vs (b) on the actual butler lines, master picks by ear.** Default to (a) Piper local for $0 + privacy + the on-the-nose timbre; make voice a **config flag** so (b) ElevenLabs drops in as a premium voice with a cost cap (see 4.§D-6). Both run **sentence-chunked streaming**. **Trade-off:** local is free/private but lower ceiling on naturalness/emotion than ElevenLabs.
+
+**4. Wake-word ("Wake up Jarvis")**
+- (a) **Porcupine / pvporcupine** (Picovoice) — on-device, WASM-in-browser, custom phrase via trained `.ppn`, free tier with access key.
+- (b) **openWakeWord** — fully open-source, pretrained "hey jarvis", no account/quota.
+- (c) **Web Speech API continuous** — unreliable, cloud, Chrome-only. Not recommended.
+- **→ Recommend (a)** for accuracy + the exact custom phrase; **(b)** as the no-vendor-account fallback. On-device means audio never leaves the machine until the wake-word fires (privacy). **Constraint (see 4.§D-5):** in-browser wake-word only works while the tab is open/focused; true ambient always-on needs a native wrapper — deferred.
+
+**5. Orb renderer**
+- (a) **React-Three-Fiber (R3F) + drei** — declarative Three.js for React; audio-reactive via Web Audio `AnalyserNode` → shader/particle uniforms.
+- (b) **Raw imperative Three.js** — more control, more boilerplate, weaker React integration.
+- (c) **R3F with a shader-displaced blob** vs **a particle-system arc-reactor** as the orb's visual form.
+- **→ Recommend (a)** + an arc-reactor-style core with a particle halo and orbital rings. Drive displacement/emissive/particle uniforms from the FFT of Jarvis's TTS so the orb literally pulses to its own voice. Four states map to palette: IDLE (calm cyan `#00D4FF`), LISTENING (brighter/cooler), THINKING (amber/violet shimmer), RESPONDING (pulsing cyan synced to audio). **Trade-off / budget:** target 60 fps on the master's machine — cap particle count and degrade gracefully on weaker GPUs.
+
+---
+
+### 4.§D — The hard parts (addressed explicitly, not glossed)
+
+**1. Latency budget.** Target **time-to-first-audio < ~1.5 s** after the master stops speaking (conversational feel). Rough budget: endpointing/VAD hangover ~200–300 ms → streaming STT final ~100–300 ms after endpoint → LLM time-to-first-token ~300–800 ms (Groq `llama-3.3-70b` via the gateway is fast) → buffer the **first sentence** → streaming TTS first-audio ~75–300 ms. The decisive lever: **never wait for the full LLM response** — chunk on sentence boundaries and pipe each sentence into TTS while the next generates. Every sub-phase that adds a stage must show it streams.
+
+**2. Barge-in / interruption (talk over Jarvis → it stops).** Mic stays open during TTS playback (full-duplex). Client-side VAD detects user speech onset while the orb is RESPONDING; on onset the client immediately ducks/stops playback, emits a `barge_in` control event, the server **cancels the in-flight TTS stream and cancels the in-flight graph turn** (asyncio task cancel; the partial assistant turn is marked interrupted in the checkpoint, not persisted as a completed answer), and a fresh capture begins. **Acoustic echo cancellation is mandatory** so Jarvis's own audio isn't heard as "the user" — browser `getUserMedia({ echoCancellation: true })` plus a server-side guard (ignore VAD onsets that correlate with known outgoing TTS). This couples to the checkpointer and to `run_turn` cancellability — call it out as real work in 4.3.
+
+**3. Turn-taking / endpointing.** Push-to-talk in 4.2 sidesteps this (button release = end-of-turn). Full hands-free endpointing in 4.3 uses **Silero VAD** (common, robust, local) with a silence-hangover (~500–800 ms) tuned against the cut-off-too-soon vs feels-laggy trade. Semantic endpointing (LLM judges "complete thought") is a future lift, not in scope.
+
+**4. The approval interrupt, hands-free.** The genuinely hard one — and a known sharp edge (memory: `project_email_action_capability_gap`, where conversational "send it" was *deliberately not shipped* in Phase 2; the Approve/Reject button was canonical). Voice re-opens it. Design: when the graph hits `interrupt()` mid-voice-turn, Jarvis **speaks** the request ("Sir, I've drafted a reply to Chetan — shall I send it?") and the orb enters an APPROVAL-WAIT state. The master answers **by voice**. A **narrow yes/no resolver — gated to fire only while an interrupt is live**, not the full agent — maps the spoken response to approve/reject and resumes via `Command(resume=…)` (reusing the existing `_resolve_gmail_approval` dispatch). Safety rules: require an **explicit affirmative** ("yes, send it") — never trigger on ambient speech; on low confidence, re-prompt ("I didn't catch that, Sir — yes or no?"); keep the **visual Approve/Reject button present as backup**; allow a config to force button-only for the highest-stakes actions. This resolver is a real piece of work in 4.3, not a freebie.
+
+**5. Wake-word always-listening — platform constraints.** A web app **cannot** do true OS-level always-on (screen off, app backgrounded). In-browser, continuous mic requires the tab open + permission granted, and background tabs get throttled. So 4.4 ships **tab-open always-listening** via an on-device WASM wake-word (Porcupine), and explicitly notes the path to **true ambient** = a native/desktop wrapper (Electron/Tauri) or a dedicated always-on device — out of scope for the web app, flagged as the future-vision bridge. On-device wake-word keeps audio local until the phrase fires.
+
+**6. Metered STT/TTS cost.** Local Piper + faster-whisper = **$0** and private (the default). If ElevenLabs (or any cloud STT/TTS) is enabled, it's metered and must be tracked: per-turn character/second counts → cost, in the **same spirit as the LLM gateway's Redis cost counter** (memory: `project_agent_llm_cost_attribution_gap` — voice is a sibling gateway-bypass surface). Add a `VOICE_DAILY_COST_CAP_USD` knob alongside `DAILY_LLM_SPEND_CAP_USD`, with the same soft/hard-cap behaviour, before any cloud voice provider is switched on.
+
+**7. Web-app auth (can't borrow Telegram's identity).** Telegram identifies the master ambiently by `chat_id`; the web app has none. Options: (a) **single-user passkey** Credentials provider — the *already-planned* Task 4.18/4.18b approach (`MASTER_PASSKEY`, Auth.js v5, JWT signed with `AUTH_SECRET` shared with the backend's `require_auth`); (b) **Google OAuth** restricted to the master's email; (c) **WebAuthn/platform passkeys** (best UX+security, more build). **→ 4.0 pulls (a) forward** from 4.18/4.18b (simplest for single-master); (b)/(c) noted as hardening lifts. Because voice/wake-word want a persistent session (no constant re-auth), the JWT is long-lived/refreshed — and the always-listening mic is **gated behind an authenticated session** so a closed/locked dashboard isn't hot-mic.
+
+---
+
+### 4.§E — How it bolts onto the real backend (the seams)
+
+- **One brain.** Voice in → transcript → **`run_turn`/`resume_turn`**; the LangGraph graph is unchanged. Voice never calls tools or memory directly.
+- **True token streaming.** The old SSE endpoint (carried-over Task 4.8) *ran the full turn then chunked the string* — that's replaced by real **`graph().astream()`** token streaming so the orb/captions/TTS get tokens as they're generated. This upgrade is the backbone of 4.0 and the prerequisite for the latency budget.
+- **Approval flow preserved.** `interrupt()` → `Command(resume=…)` stays; 4.3 adds the *voice* resolution path **on top of** the existing button path (`_resolve_gmail_approval`, the approvals page).
+- **Memory.** Mem0 via the `get_memory()` singleton; spontaneous auto-save + the Turn-26.5 recall fix land in 4.4.
+- **New channel.** The web/voice surface registers as a `"web"` `Channel` (`Channel.thread_id_for("web", user_id)`), reusing the Channel ABC; Telegram stays wired in parallel.
+- **Cost.** Voice STT/TTS cost tracked in the gateway-cost spirit (4.§D-6).
+
+---
+
+### 4.§F — Sub-phases (work → pause → work; each ends with "what proves it works")
+
+Each sub-phase is a reviewable unit with an explicit proof. Build stops at each boundary for the master's sign-off.
+
+#### Sub-phase 4.0 — Foundation: Next.js + auth + text chat + orb shell + HUD theme
+*Build:*
+- Next.js scaffold + shadcn (carried-over Task 4.1), frontend env (4.2), API-client pattern (4.3), shared types (4.5) — as build-time plumbing.
+- **Web-app auth:** Auth.js v5 single-user passkey, **pulled forward** from Task 4.18/4.18b (`AUTH_SECRET` byte-identical to backend; `MASTER_PASSKEY`).
+- **True-streaming chat endpoint:** upgrade the backend `/api/chat/stream` from chunk-the-final to real **`graph().astream()`** token streaming (replaces carried-over Task 4.8).
+- **Secondary text chat surface** on the streaming endpoint (carried-over Task 4.6, reskinned to HUD — not the old blue bubbles).
+- **Approvals page** (carried-over Task 4.7) wired to the existing approval API.
+- **HUD theme system:** deep-space `#070B18` + cyan `#00D4FF`, glassmorphism panels, base typography, a Stark-style boot sequence on load.
+- **Orb shell:** static R3F orb in IDLE state, 60 fps, no audio reactivity yet.
+- **PWA** (carried-over Task 4.9) recoloured to the HUD palette.
+
+*What proves it works:* the master logs in with the passkey, types a message, and sees Jarvis's reply **stream token-by-token** (not chunked-after-the-fact) inside the HUD; an APPROVE-tier action surfaces on the approvals page and Approve/Reject resumes the turn; the orb renders at 60 fps in IDLE; the boot sequence plays.
+
+#### Sub-phase 4.1 — Jarvis speaks: streaming TTS + the Jarvis voice + persona + live captions
+*Build:*
+- Streaming TTS service (Piper "JARVIS" local **+** ElevenLabs behind a config flag), **sentence-chunked** off the token stream.
+- WebSocket transport for audio-out + orb-state events.
+- **Audio-reactive orb:** `AnalyserNode` FFT → RESPONDING-state pulse synced to the voice.
+- **Live captions** synced to the spoken audio.
+- **Persona layer:** config-driven "Sir"/"Ma'am" honorific + calm/lightly-witty British-butler tone in the system-prompt/persona wrapper; clean hook for future voice-commands.
+- **Voice A/B eval:** Piper vs ElevenLabs on real butler lines — master picks.
+- Voice cost tracking + `VOICE_DAILY_COST_CAP_USD` (only bites if a cloud voice is enabled).
+
+*What proves it works:* the master sends a turn (typed, from 4.0) and Jarvis **speaks** the reply in the chosen Jarvis voice; the orb pulses in sync; captions track the audio word-for-word; the reply addresses the master as "Sir." (Voice-in is still next; barge-in not yet.)
+
+#### Sub-phase 4.2 — Voice in: streaming STT, push-to-talk first
+*Build:*
+- Mic capture (`getUserMedia`, AEC on).
+- **Push-to-talk** (hold to talk, release = end-of-turn — sidesteps endpointing entirely).
+- STT service (faster-whisper local, whole-utterance to start).
+- WebSocket audio-in frames; STT transcript → the **same** `run_turn` graph.
+- **LISTENING** orb state + input waveform; optional partial-transcript caption.
+
+*What proves it works:* the master holds the button, says "what's on my calendar today," releases; the transcript enters the graph; Jarvis speaks the answer. Full **voice-in → brain → voice-out** loop closes, with manual (push-to-talk) turn-taking.
+
+#### Sub-phase 4.3 — Full duplex speech-to-speech + barge-in
+*Build:*
+- **Silero VAD endpointing** (auto end-of-turn; retires push-to-talk).
+- Streaming **partial** STT transcripts.
+- **Full-duplex** audio (mic open during TTS).
+- **Barge-in:** VAD onset during RESPONDING → cancel TTS + cancel the in-flight graph turn + start a new capture; AEC tuned so Jarvis doesn't interrupt itself.
+- **Hands-free voice-approval resolver** (4.§D-4): narrow yes/no classifier gated to a live `interrupt()` → `Command(resume=…)`; explicit-affirmative safety; button still present as backup.
+- Turn-taking state machine: IDLE → LISTENING → THINKING → RESPONDING → [barge-in].
+
+*What proves it works:* the master holds a **hands-free back-and-forth** — speaks, Jarvis answers, master **interrupts mid-sentence** and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes; first-audio latency feels conversational (~1–1.5 s).
+
+#### Sub-phase 4.4 — Wake-word + FUI/HUD polish + spontaneous auto-save
+*Build:*
+- **Wake-word** "Wake up Jarvis" (Porcupine WASM on-device, tab-open always-listening; native-wrapper path for true ambient noted as future-vision).
+- **Full FUI/HUD polish** (Jayse-Hansen-inspired): glassmorphism panels, audio spectrum/waveform widgets, **live system-metric widgets over SSE** (CPU/RAM, token-rate, latency, daily LLM+voice cost), orbital rings + particle systems, refined boot sequence.
+- **Spontaneous auto-save** of personal info the master mentions in passing (rides the Mem0 layer).
+- **Mem0 recall-quality fix (Turn 26.5)** ships with the voice layer.
+- **Clean hook** for detailed voice-activated commands (stub the command-intent layer; spec arrives later).
+
+*What proves it works:* the master says "Wake up Jarvis" (tab open, hands-free) and the orb wakes + listens; the full HUD shows live system metrics + an audio spectrum; the master mentions a fact in passing and it's auto-saved and recalled in a later turn; the boot sequence plays on load.
+
+---
+
+### Sub-phase 4.5 — Multi-channel & Hardening (the original Weeks 11–12, re-situated)
+
+These ship **after** the voice dashboard is real (or in parallel where independent): WhatsApp + unified messaging, AES-256-GCM encryption, webhook signature verification, the cross-channel rate limiter, and the frontend Dockerfile/Makefile. **Note:** the dashboard auth tasks (4.18 Auth.js, 4.18b root config) are **pulled forward into 4.0** — build them there; the entries below remain the canonical definitions. The detailed tasks (numbered 4.10–4.20, unchanged so existing cross-references stay valid) follow.
+
+> **Why WhatsApp is not a hard milestone:** WhatsApp Cloud API requires Meta business verification (weeks, sometimes rejected) and pre-approved Message Templates for proactive messages (morning briefs, alerts). These external dependencies can block with nothing you can do. Telegram has no such constraints and is the stronger primary channel. **Start the Meta verification process now** so it runs in parallel with 4.0–4.4.
 
 ---
 
@@ -9014,7 +8761,7 @@ Update `frontend/src/lib/auth.ts` (the stub from Task 1.A) — final form:
 export { auth, signIn, signOut } from "@/auth";
 ```
 
-> **Add to `frontend/.env.local`:** `MASTER_PASSKEY=<a-long-random-string-of-your-choosing>` and copy `AUTH_SECRET` from the backend `.env` (must be the same value — backend's `app/security/auth.py:require_auth` validates JWTs signed with this secret). Update Task 4.2's `.env.local` template to include both.
+> **Add to `frontend/.env.local`:** `MASTER_PASSKEY=<a-long-random-string-of-your-choosing>` and copy `AUTH_SECRET` from the backend `.env` (must be the same value — backend's `app/security/auth.py:require_auth` validates JWTs signed with this secret). Update sub-phase 4.0's `frontend/.env.local` setup to include both.
 
 #### Task 4.19 — Frontend Dockerfile
 
