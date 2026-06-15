@@ -1,16 +1,24 @@
 "use client";
 
 import { Canvas } from "@react-three/fiber";
+import { Bloom, EffectComposer } from "@react-three/postprocessing";
 
 import type { AgentState } from "@/lib/types";
 
-import { Orb } from "./Orb";
+import { Orb, type AmpFn } from "./Orb";
 
 /**
- * Client-only Canvas wrapper. Imported via next/dynamic({ ssr: false }) from the
- * chat page so Three.js never runs during SSR. dpr capped at 2 for perf.
+ * Client-only Canvas wrapper (next/dynamic ssr:false). EffectComposer + Bloom
+ * gives the neon glow. dpr capped at 2 for 60fps. `getAmplitude` is the audio
+ * source — omitted in 4.0 (idle breathing); wired to the TTS FFT in 4.1.
  */
-export default function OrbCanvas({ state = "idle" as AgentState }: { state?: AgentState }) {
+export default function OrbCanvas({
+  state = "idle" as AgentState,
+  getAmplitude,
+}: {
+  state?: AgentState;
+  getAmplitude?: AmpFn;
+}) {
   return (
     <Canvas
       camera={{ position: [0, 0, 6], fov: 45 }}
@@ -18,7 +26,16 @@ export default function OrbCanvas({ state = "idle" as AgentState }: { state?: Ag
       gl={{ antialias: true, alpha: true }}
       style={{ width: "100%", height: "100%" }}
     >
-      <Orb state={state} />
+      <Orb state={state} getAmplitude={getAmplitude} />
+      <EffectComposer>
+        <Bloom
+          intensity={1.15}
+          luminanceThreshold={0.2}
+          luminanceSmoothing={0.9}
+          radius={0.65}
+          mipmapBlur
+        />
+      </EffectComposer>
     </Canvas>
   );
 }
