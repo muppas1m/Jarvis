@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (86 modules)
+## `app/` — the system (87 modules)
 
 ```
 app/
@@ -70,7 +70,8 @@ app/
 │   ├── fallback_llm.py — FallbackChatLLM — agent_node resilience wrapper for primary → fallback dispatch.
 │   ├── gateway.py — LLM gateway — every model call in the codebase goes through here.
 │   ├── models.py — Model registry — single source of truth for which LLMs we route to.
-│   └── observability.py — Langfuse hooks.
+│   ├── observability.py — Langfuse hooks.
+│   └── stream_mode.py — Token-stream flag — turns on internal LLM streaming for the agent's chat
 ├── memory/
 │   ├── __init__.py — —
 │   ├── manager.py — MemoryManager — the single entry point the rest of the codebase uses to read

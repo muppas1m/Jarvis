@@ -4,7 +4,7 @@
 
 # API Routes
 
-13 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`). Auth = a `get_current_user` dependency on the route (the protected sub-router).
+14 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`). Auth = a `get_current_user` dependency on the route (the protected sub-router).
 
 | Method | Path | Auth | Tags |
 |---|---|---|---|
@@ -12,6 +12,7 @@
 | `GET` | `/api/approvals/pending` | 🔒 auth | approvals |
 | `POST` | `/api/approvals/{approval_id}/decide` | 🔒 auth | approvals |
 | `POST` | `/api/chat` | 🔒 auth | chat |
+| `POST` | `/api/chat/stream` | 🔒 auth | chat |
 | `GET` | `/api/costs` | 🔒 auth | costs |
 | `GET` | `/api/costs/history` | 🔒 auth | costs |
 | `GET` | `/api/documents/search` | 🔒 auth | documents |
