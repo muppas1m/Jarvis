@@ -54,7 +54,7 @@ def _make_gmail_service(email_dict: dict) -> tuple[MagicMock, list]:
 
 
 @pytest.mark.asyncio
-async def test_inbound_action_email_to_sent_reply(_rebind_engine) -> None:
+async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
     from app.email.gmail_pubsub import _process_single_email
     from app.messaging.router import route_approval_decision
     from app.api.approvals import resolve_approval

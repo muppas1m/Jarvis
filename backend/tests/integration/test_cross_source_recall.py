@@ -57,7 +57,7 @@ def _tools_called(envelope: dict) -> set[str]:
 
 @pytest.mark.asyncio
 async def test_cross_source_recall_references_both_mem0_and_email(
-    real_checkpointer, reset_runner_graph, _rebind_engine
+    real_checkpointer, reset_runner_graph, _rebind_async_state
 ) -> None:
     marker = f"test-xsource-{uuid.uuid4().hex[:10]}"
     mgr = MemoryManager()
