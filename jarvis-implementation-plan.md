@@ -9525,3 +9525,39 @@ Original-plan tasks use `<phase>.<n>` (e.g., `2.7`, `3.5`).
 Close-out tasks use `<phase>.<n>-closeout-<letter>` to distinguish them and keep grep-ability.  
 Future close-out turns should follow the same convention.
 
+---
+
+## Future Scope & Backlog (consolidated)
+
+A single forward-looking index of deferred work, lifts, and north-star features. **Source of truth is the reviewer memory directory** (`~/.claude/projects/-Users-maheshmuppasani-Developer-Personal-Jarvis-bot/memory/`, indexed by `MEMORY.md`) — each item **cross-links** the backing note(s) by slug rather than duplicating their detail. When a note's disposition changes, update the note; this index stays a pointer. Two new north-star items lead, then the categories.
+
+### ★ New north-star items
+
+**(1) Voice-activated authentication — two-factor biometric login.** Log in (and authorise medium-stakes actions) by voice: **speaker verification** (the live voice must match the master's enrolled voiceprint) **AND** a spoken **code word** — *both* required (right codeword + wrong voice → reject; right voice + wrong codeword → reject). Text-dependent speaker verification plus **anti-spoofing / liveness** (resist replay and voice-clone attacks). **Layered trust:** biometric for convenience / medium-stakes; the passkey (§D-7) + the `interrupt()` approval gate remain the backstop for high-stakes actions. Tech sketch: SpeechBrain / pyannote **ECAPA-TDNN** speaker embeddings + STT for the code word + an anti-spoof model. Synergises with the research-doc **"Sentry Mode"** face-auth (`jarvis_hud_research_future_scope`) and the voice/persona stack (`project_future_vision_dashboard_voice`). Security-critical — never let biometric alone authorise a high-stakes side effect.
+
+**(2) Multi-agent Jarvis ecosystem.** Evolve the single LangGraph agent into an orchestration of **multiple specialised agents** (e.g. research, document-intelligence, scheduling, comms) under a coordinator. Ties directly to the subgraph-topology trigger (`project_subgraph_topology_for_phase3_or_4` — router-first topology with per-type subgraphs) and to document-intelligence **agentic map-reduce** (`project_document_intelligence_roadmap`). Don't build proactively; the trigger is code-shape smells (intent-branching in `agent_node`, type-specific `AgentState` fields) or a workload one context can't hold.
+
+### Categories
+
+**Voice / Persona / Biometric-auth** — voice-activated biometric 2FA (★1 above); the full voice/orb/HUD/persona north-star (`project_future_vision_dashboard_voice`); HUD research backlog incl. Sentry-mode face-auth (`jarvis_hud_research_future_scope`). Phase 4 builds voice + orb + persona; biometric-auth and Sentry-mode integrate after.
+
+**Memory — Mem0 (Turn 26.5)** — **lead with search/embedding quality** (`project_mem0_search_quality_root`: degraded search is the shared root of +bloat *and* recall misses; dedup-on-write shipped disabled). Companions: silent drops under Gemini RPM (`project_mem0_silent_drop_on_rpm`), contamination hygiene + periodic audit (`project_mem0_contamination_test_residue`), cross-source recall chaining escalations (`project_cross_source_recall_pattern`), and the lifts gated on eval signal — HyDE (`project_hyde_deferral`) and LLM relevance grading (`project_llm_relevance_grading_deferral`). The 26.5 work rides with the voice layer (§4.4).
+
+**Document-Intelligence** — Claude/ChatGPT-level doc reading (`project_document_intelligence_roadmap`: biggest lever = route doc-Q&A to a big-context model with the whole doc, not top-k; plus structure-aware retrieval, agentic map-reduce, layout/multimodal, better embedder). Plumbing seam: a fetch path for archived tool results (`project_archived_tool_result_no_fetch_path`).
+
+**Agent-core hardening** — gateway cost-attribution **Option C** (hybrid helper closing the agent_node + embedding + Mem0-extraction bypass surfaces: `project_agent_llm_cost_attribution_gap`, `project_embedding_cost_attribution_gap`); FallbackChatLLM string-match fragility canary (`project_groq_error_message_string_match_dependency`); open-weights tool-schema fragility (`project_open_weights_tool_schema_and_conversation_poisoning`); per-tool execution timeout (`project_per_tool_execution_timeout_gap`); subgraph topology (`project_subgraph_topology_for_phase3_or_4`); N-provider fallback chain (`project_n_provider_fallback_deferral`); cross-loop async-state rebind watch (`project_async_state_rebind_pattern`).
+
+**Email / Calendar** — conversational "send it" half (`project_email_action_capability_gap`); responder salutation extraction (`project_email_responder_sender_name`); Gmail-handler decoupling when a 2nd channel-origin handler lands (`project_gmail_handler_decoupling_deferral`); calendar output enrichment (`project_calendar_output_enrichment_phase3`); self-send bounce caveat (`project_self_send_bounces`).
+
+**Infra / Data / Observability** — un-indexed JSONB filters, one coordinated promote-migration (`project_unindexed_jsonb_filters`); cost-cap reads Redis-only divergence (`project_cost_cap_redis_only`); seeder `--force` cascade risk (`project_seeder_force_cascade_risk`); Phase-1 monolithic-migration no-op trap (`project_phase1_monolithic_migration`); persistent Cloudflare tunnel (`project_persistent_tunnel_deferral`); Langfuse v3 stack weight (`project_langfuse_stack_weight_deferral`); concurrent-identical-upload dedup TOCTOU (`project_ingestion_idempotency_deferral`); env-reload gotcha (`project_docker_compose_restart_does_not_reload_env`).
+
+**Security** — OAuth scope minimization + revocation alerting + re-consent + refresh-token plaintext audit (`project_oauth_scope_minimization_production_hardening`); webhook-secret env-var naming convention `WEBHOOK_SECRET_{PROVIDER}` (`project_webhook_secret_naming_inconsistency`); voice biometric 2FA (★1).
+
+**Channels (MCP / Phase 2.5)** — custom MCP server wrappers (Phase 2.5 in this plan); **Miro MCP** and the broader MCP integration sequence (`forward_roadmap_post_phase2`).
+
+**HUD / Dashboard-future** — post-Phase-4 features from the research doc (`jarvis_hud_research_future_scope`): vision/LLaVA, **Sentry-mode face-auth**, OS-automation (Playwright), **MediaPipe gesture control**, HUD data widgets, and the repos-to-clone-and-inspect list. Phase 4 grabs voice + orb + HUD + persona; the rest integrates after.
+
+**Architecture-maintenance-agent** — a dedicated Claude Code instance to keep `docs/architecture/` intent-half synced (coder stays pure); auto-invoke via a loop-guarded post-commit hook → headless `claude -p`; needs an architecture-maintainer skill (`project_architecture_maintenance_agent_future`).
+
+**Multi-agent ecosystem** — ★2 above.
+
