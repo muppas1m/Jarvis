@@ -29,13 +29,15 @@ cost something. The AUTHORITATIVE source for cost data is `GET /api/costs`
 with provider-reported cost. The per-turn number here is a fast-path
 hint for client UIs; production accounting belongs on `/costs`.
 """
+import json
 import uuid
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.runner import run_turn
+from app.agent.runner import run_turn, stream_turn
 from app.security.auth import UserContext, get_current_user
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -60,4 +62,36 @@ async def chat(
         thread_id=thread_id,
         platform="web",
         channel_user_id=user.user_id,
+    )
+
+
+@router.post("/stream", response_model=None)
+async def chat_stream(
+    payload: ChatRequest,
+    user: UserContext = Depends(get_current_user),
+) -> StreamingResponse:
+    """SSE token-streaming chat for the dashboard (Phase 4 sub-phase 4.0).
+
+    The same logical turn as POST /api/chat, emitted incrementally — one
+    `data:` line per event (thread_id, token, tool, approval_required, done,
+    error). The terminal event carries the authoritative envelope subset, so
+    a client renders streamed tokens for perceived latency and reconciles to
+    the canonical final on done/approval_required. See
+    `app.agent.runner.stream_turn` for the event contract.
+    """
+    thread_id = payload.thread_id or f"web:{uuid.uuid4().hex[:12]}"
+
+    async def event_stream() -> AsyncIterator[str]:
+        async for event in stream_turn(
+            user_message=payload.message,
+            thread_id=thread_id,
+            platform="web",
+            channel_user_id=user.user_id,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -26,13 +26,14 @@ added on top.
 """
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from app.agent.graph import build_graph
 from app.llm.observability import langfuse_callback_handler
+from app.llm.stream_mode import stream_tokens
 from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
 
@@ -189,6 +190,153 @@ async def resume_turn(
         duration_ms=duration_ms,
         handler=handler,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Streaming surface (Phase 4 — true token streaming through the same graph)   #
+# --------------------------------------------------------------------------- #
+
+
+async def stream_turn(
+    user_message: str,
+    thread_id: str,
+    platform: str,
+    channel_user_id: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """Token-streaming variant of run_turn over the SAME agent graph.
+
+    Yields ready-to-serialize event dicts for the SSE/WebSocket transport:
+      {"type": "thread_id", "content": <id>}              once, first
+      {"type": "token", "content": <text delta>}          per LLM token (agent node)
+      {"type": "tool",  "content": <tool_name>}            when the agent calls a tool
+      {"type": "approval_required", "content": <payload>, "thread_id": <id>}
+      {"type": "done",  "content": <terminal envelope subset>}
+      {"type": "error", "content": <msg>, "stop_reason": <reason>}
+
+    The brain is untouched. This drives `graph().astream(..., stream_mode=
+    ["messages","updates"])` with the `stream_tokens` contextvar set, so the
+    agent's ChatLiteLLM streams its tokens (messages mode) while node-level
+    updates surface tool calls (updates mode). The interrupt()/approval path
+    is preserved exactly — a paused graph stops yielding, and the post-stream
+    checkpoint read surfaces the interrupt the same way run_turn does.
+
+    The authoritative final text + usage come from the post-stream checkpoint
+    and ship in the terminal event — so even if a mid-stream FallbackChatLLM
+    fall-over re-emits tokens (rare; the primary streamed a partial before
+    erroring), the client renders the canonical answer from "done"/"approval".
+    """
+    yield {"type": "thread_id", "content": thread_id}
+
+    config, handler = _config_with_handler(thread_id)
+
+    # Same prevent-at-source guard as run_turn: a fresh free-text turn while an
+    # approval is pending would orphan the tool_call and poison the thread.
+    if await _is_awaiting_approval(thread_id):
+        logger.info("stream_turn_blocked_pending_interrupt", thread_id=thread_id)
+        yield {"type": "done", "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
+        return
+
+    msgs_before = await _existing_message_count(thread_id)
+    initial_state = {
+        "messages": [HumanMessage(content=user_message)],
+        "thread_id": thread_id,
+        "platform": platform,
+        "channel_user_id": channel_user_id,
+        "user_message": user_message,
+        "turn_started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    started_ms = time.monotonic()
+    flag = stream_tokens.set(True)
+    try:
+        async for mode, data in graph().astream(
+            initial_state, config=config, stream_mode=["messages", "updates"]
+        ):
+            if mode == "messages":
+                chunk, meta = data
+                # Only the agent node produces user-facing LLM tokens.
+                if (meta or {}).get("langgraph_node") != "agent":
+                    continue
+                text = _chunk_text(chunk)
+                if text:
+                    yield {"type": "token", "content": text}
+            elif mode == "updates":
+                # Surface tool calls as the agent decides them (THINKING state).
+                for node, upd in (data or {}).items():
+                    if node != "agent":
+                        continue
+                    for m in (upd or {}).get("messages", []) or []:
+                        for tc in getattr(m, "tool_calls", None) or []:
+                            yield {"type": "tool", "content": tc.get("name", "")}
+    except Exception as exc:
+        logger.exception("graph_stream_failed", thread_id=thread_id, error=str(exc))
+        yield {
+            "type": "error",
+            "content": "I hit an internal error. Please try again.",
+            "stop_reason": _stop_reason_for_error(exc),
+        }
+        return
+    finally:
+        stream_tokens.reset(flag)
+
+    duration_ms = int((time.monotonic() - started_ms) * 1000)
+    # The post-stream checkpoint is authoritative for interrupt detection,
+    # the final assistant text, and usage — same source _build_envelope uses
+    # for run_turn, so streaming and non-streaming agree on the terminal shape.
+    state = await graph().aget_state(config)
+    result = dict(state.values) if state and state.values else {}
+    envelope = await _build_envelope(
+        thread_id=thread_id,
+        result=result,
+        config=config,
+        msgs_before=msgs_before,
+        duration_ms=duration_ms,
+        handler=handler,
+    )
+    logger.info(
+        "turn_complete",
+        thread_id=thread_id,
+        status=envelope["status"],
+        stop_reason=envelope.get("stop_reason"),
+        streamed=True,
+    )
+    if envelope["status"] == "interrupted":
+        yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
+    else:
+        yield {"type": "done", "content": _terminal_payload(envelope)}
+
+
+def _chunk_text(chunk: Any) -> str:
+    """Printable text from a streamed message chunk.
+
+    Text tokens carry a string `.content`; pure tool-call chunks carry empty
+    content (their payload is in tool_call_chunks) so they filter out here.
+    Some providers deliver content as a list of parts."""
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: list[str] = []
+        for p in content:
+            if isinstance(p, str):
+                out.append(p)
+            elif isinstance(p, dict) and p.get("type") == "text":
+                out.append(p.get("text", ""))
+        return "".join(out)
+    return ""
+
+
+def _terminal_payload(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Subset of the TurnEnvelope the streaming "done" event carries — the
+    client renders this as the canonical final (reconciling any mid-stream
+    token noise)."""
+    return {
+        "status": envelope["status"],
+        "stop_reason": envelope.get("stop_reason"),
+        "response": envelope.get("response", ""),
+        "usage": envelope.get("usage"),
+        "thread_id": envelope["thread_id"],
+    }
 
 
 # --------------------------------------------------------------------------- #

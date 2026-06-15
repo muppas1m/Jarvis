@@ -109,11 +109,19 @@ def _build_chat_model(tools: list):
 
     See `project_agent_node_bypasses_gateway_fallback.md` for the
     architectural rationale.
+
+    `streaming` is driven by the `stream_tokens` contextvar (set only by
+    `stream_turn`): True makes ChatLiteLLM stream internally so its
+    on_llm_new_token callbacks fire, which LangGraph's stream_mode="messages"
+    turns into a token-by-token stream. Default False leaves the non-streaming
+    run_turn path unchanged. See `app.llm.stream_mode`.
     """
     from app.llm.fallback_llm import FallbackChatLLM
+    from app.llm.stream_mode import stream_tokens
 
-    primary = ChatLiteLLM(model=settings.PRIMARY_MODEL, temperature=0.7)
-    fallback = ChatLiteLLM(model=settings.FALLBACK_MODEL, temperature=0.7)
+    streaming = stream_tokens.get()
+    primary = ChatLiteLLM(model=settings.PRIMARY_MODEL, temperature=0.7, streaming=streaming)
+    fallback = ChatLiteLLM(model=settings.FALLBACK_MODEL, temperature=0.7, streaming=streaming)
 
     if tools:
         primary = primary.bind_tools(tools)
