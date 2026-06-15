@@ -7942,7 +7942,7 @@ Surfaced, not silently picked. Recommendations are the default; the master confi
 ### 4.§E — How it bolts onto the real backend (the seams)
 
 - **One brain.** Voice in → transcript → **`run_turn`/`resume_turn`**; the LangGraph graph is unchanged. Voice never calls tools or memory directly.
-- **True token streaming.** The old SSE endpoint (carried-over Task 4.8) *ran the full turn then chunked the string* — that's replaced by real **`graph().astream()`** token streaming so the orb/captions/TTS get tokens as they're generated. This upgrade is the backbone of 4.0 and the prerequisite for the latency budget.
+- **True token streaming.** The old SSE endpoint (formerly Task 4.8) *ran the full turn then chunked the string* — that's replaced by real **`graph().astream()`** token streaming so the orb/captions/TTS get tokens as they're generated. This upgrade is the backbone of 4.0 and the prerequisite for the latency budget.
 - **Approval flow preserved.** `interrupt()` → `Command(resume=…)` stays; 4.3 adds the *voice* resolution path **on top of** the existing button path (`_resolve_gmail_approval`, the approvals page).
 - **Memory.** Mem0 via the `get_memory()` singleton; spontaneous auto-save + the Turn-26.5 recall fix land in 4.4.
 - **New channel.** The web/voice surface registers as a `"web"` `Channel` (`Channel.thread_id_for("web", user_id)`), reusing the Channel ABC; Telegram stays wired in parallel.
@@ -7956,14 +7956,14 @@ Each sub-phase is a reviewable unit with an explicit proof. Build stops at each 
 
 #### Sub-phase 4.0 — Foundation: Next.js + auth + text chat + orb shell + HUD theme
 *Build:*
-- Next.js scaffold + shadcn (carried-over Task 4.1), frontend env (4.2), API-client pattern (4.3), shared types (4.5) — as build-time plumbing.
+- Next.js scaffold + shadcn, frontend env, the API-client + shared-types plumbing (formerly Tasks 4.1–4.5, now folded here).
 - **Web-app auth:** Auth.js v5 single-user passkey, **pulled forward** from Task 4.18/4.18b (`AUTH_SECRET` byte-identical to backend; `MASTER_PASSKEY`).
-- **True-streaming chat endpoint:** upgrade the backend `/api/chat/stream` from chunk-the-final to real **`graph().astream()`** token streaming (replaces carried-over Task 4.8).
-- **Secondary text chat surface** on the streaming endpoint (carried-over Task 4.6, reskinned to HUD — not the old blue bubbles).
-- **Approvals page** (carried-over Task 4.7) wired to the existing approval API.
+- **True-streaming chat endpoint:** upgrade the backend `/api/chat/stream` from chunk-the-final to real **`graph().astream()`** token streaming (replaces the old chunk-the-final endpoint, formerly Task 4.8).
+- **Secondary text chat surface** on the streaming endpoint (formerly Task 4.6, reskinned to HUD — not the old blue bubbles).
+- **Approvals page** (formerly Task 4.7) wired to the existing approval API.
 - **HUD theme system:** deep-space `#070B18` + cyan `#00D4FF`, glassmorphism panels, base typography, a Stark-style boot sequence on load.
 - **Orb shell:** static R3F orb in IDLE state, 60 fps, no audio reactivity yet.
-- **PWA** (carried-over Task 4.9) recoloured to the HUD palette.
+- **PWA** (formerly Task 4.9) recoloured to the HUD palette.
 
 *What proves it works:* the master logs in with the passkey, types a message, and sees Jarvis's reply **stream token-by-token** (not chunked-after-the-fact) inside the HUD; an APPROVE-tier action surfaces on the approvals page and Approve/Reject resumes the turn; the orb renders at 60 fps in IDLE; the boot sequence plays.
 
