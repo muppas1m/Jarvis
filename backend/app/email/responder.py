@@ -1,7 +1,5 @@
 from app.llm.gateway import llm_gateway
-from app.memory.manager import MemoryManager
-
-memory = MemoryManager()
+from app.memory.manager import get_memory
 
 DRAFT_PROMPT = """You are drafting an email reply on behalf of your master ({master_name}).
 
@@ -53,7 +51,7 @@ async def generate_draft(subject: str, sender: str, body: str) -> dict:
     """Generate a draft reply and assess complexity."""
     import json
 
-    profile = await memory.profile_mgr.get_full()
+    profile = await get_memory().profile_mgr.get_full()
     always_on = profile.get("always_on", {})
 
     prompt = DRAFT_PROMPT.format(

@@ -13,11 +13,9 @@ updates), not directly through HTTP.
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.memory.manager import MemoryManager
+from app.memory.manager import get_memory
 
 router = APIRouter(prefix="/memory", tags=["memory"])
-
-_memory = MemoryManager()
 
 
 class MemoryHit(BaseModel):
@@ -38,7 +36,7 @@ async def search_memory(
     k: int = Query(10, ge=1, le=50, description="Max results"),
 ) -> list[MemoryHit]:
     """Semantic search over Mem0."""
-    hits = await _memory.recall(q, thread_id=None, k=k)
+    hits = await get_memory().recall(q, thread_id=None, k=k)
     # `recall` already returns the right shape — coerce to MemoryHit so
     # FastAPI emits a clean schema in the OpenAPI doc.
     return [MemoryHit(**h) for h in hits]
@@ -49,6 +47,7 @@ async def get_profile() -> ProfileResponse:
     """Return the master's profile (always-on slice + the keys present in
     on-demand). Full on-demand sections are intentionally NOT returned in
     bulk — fetch by key via a future endpoint if needed."""
+    _memory = get_memory()
     return ProfileResponse(
         always_on=await _memory.get_always_on(),
         on_demand_keys=await _memory.list_on_demand_keys(),

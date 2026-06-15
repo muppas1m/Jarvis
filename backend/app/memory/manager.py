@@ -160,3 +160,25 @@ class MemoryManager:
             return ""
         joined = " | ".join(relevant)
         return joined[:1500]   # token-bound; the prompt builder may trim more
+
+
+# ---------------------------------------------------------------------------
+# Lazy process-wide singleton
+# ---------------------------------------------------------------------------
+_memory_singleton: "MemoryManager | None" = None
+
+
+def get_memory() -> "MemoryManager":
+    """Process-wide MemoryManager, built on first use.
+
+    Constructing one instantiates the Mem0 client, which fires a blocking Ollama
+    HTTP call. Doing that at MODULE-IMPORT time (the old `memory = MemoryManager()`
+    at the top of 5 modules) ran it on every import — ~7s of import cost, and once
+    a silent celery-beat restart loop. This accessor defers it to first actual use
+    and shares one instance per process. (Celery workers are a separate process →
+    their own singleton; per-task loop rebinding is handled by
+    `reset_async_state_for_task` — see project_async_state_rebind_pattern.)"""
+    global _memory_singleton
+    if _memory_singleton is None:
+        _memory_singleton = MemoryManager()
+    return _memory_singleton

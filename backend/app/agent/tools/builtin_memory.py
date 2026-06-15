@@ -13,11 +13,7 @@ just add latency without changing the outcome.
 from pydantic import BaseModel, Field
 
 from app.agent.tools.registry import tool_registry
-from app.memory.manager import MemoryManager
-
-# Singleton — MemoryManager wraps a Mem0 client + DB-backed UserProfileManager
-# and isn't cheap to construct.
-_memory = MemoryManager()
+from app.memory.manager import get_memory
 
 
 class MemorySearchArgs(BaseModel):
@@ -31,7 +27,7 @@ class MemorySearchArgs(BaseModel):
 
 async def memory_search(query: str, top_k: int = 5) -> str:
     """Look up the master's memories that semantically match `query`."""
-    results = await _memory.mem0.search(query=query, top_k=top_k)
+    results = await get_memory().mem0.search(query=query, top_k=top_k)
     if not results:
         return "No relevant memories found."
 

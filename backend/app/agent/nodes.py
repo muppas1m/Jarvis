@@ -55,7 +55,7 @@ from app.agent.state import AgentState
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import AuditTrail, PendingApproval, ToolResult
-from app.memory.manager import MemoryManager
+from app.memory.manager import get_memory
 from app.utils.exceptions import (
     ApprovalExpiredError,
     CostCapExceededError,
@@ -66,9 +66,9 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Heavy singletons — both wrap pool/connection state and shouldn't be built
-# per-turn.
-memory = MemoryManager()
+# Heavy singleton — built once, not per-turn. (MemoryManager is lazy too, via
+# get_memory() in app.memory.manager — building it fires an Ollama call, so we
+# defer it to first use instead of at import time.)
 safety = SafetyClassifier()
 
 
@@ -82,7 +82,7 @@ async def memory_load_node(state: AgentState) -> dict:
     LangGraph checkpointer. We don't touch it.
     """
     user_message = state["user_message"]
-    context = await memory.build_context(user_message=user_message)
+    context = await get_memory().build_context(user_message=user_message)
     return {
         "user_profile_always_on": context["user_profile_always_on"],
         "user_profile_on_demand": context["user_profile_on_demand"],
@@ -480,7 +480,7 @@ async def persist_node(state: AgentState) -> dict:
     final = state.get("final_response", "")
     if user_msg and final and final != "rate_limited":
         try:
-            await memory.persist_turn(
+            await get_memory().persist_turn(
                 thread_id=state["thread_id"],
                 user_message=user_msg,
                 assistant_response=final,

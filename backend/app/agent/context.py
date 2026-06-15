@@ -13,10 +13,7 @@ here.
 """
 from typing import Any
 
-from app.memory.manager import MemoryManager
-
-
-_memory = MemoryManager()
+from app.memory.manager import get_memory
 
 
 async def build_turn_context(thread_id: str, user_message: str) -> dict[str, Any]:
@@ -31,6 +28,7 @@ async def build_turn_context(thread_id: str, user_message: str) -> dict[str, Any
             "summary_block":  <string, may be empty>,
         }
     """
+    _memory = get_memory()
     return {
         "profile_block": await _memory.get_always_on(),
         "recall_block": await _memory.recall(user_message, thread_id=thread_id, k=5),
