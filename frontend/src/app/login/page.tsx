@@ -5,6 +5,8 @@ import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 
+import { markBootPending } from "@/lib/boot";
+
 export default function LoginPage() {
   const [passkey, setPasskey] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -21,6 +23,7 @@ export default function LoginPage() {
       setError("Passkey not recognised, Sir.");
       return;
     }
+    markBootPending(); // play the boot sequence on this login
     router.push("/chat");
     router.refresh();
   }

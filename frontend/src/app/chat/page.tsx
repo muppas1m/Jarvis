@@ -7,6 +7,7 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 
 import { BootSequence } from "@/components/BootSequence";
+import { clearBootPending } from "@/lib/boot";
 import { useChatStream } from "@/lib/useChatStream";
 
 // Client-only — Three.js must not run during SSR (Next 16: ssr:false is only
@@ -54,7 +55,10 @@ export default function ChatPage() {
             )}
           </Link>
           <button
-            onClick={() => signOut({ callbackUrl: "/login" })}
+            onClick={() => {
+              clearBootPending(); // drop any stale flag so next login boots cleanly
+              signOut({ callbackUrl: "/login" });
+            }}
             className="transition hover:text-danger"
           >
             Sign out

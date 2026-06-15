@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { consumeBootPending } from "@/lib/boot";
+
 const LINES = [
   "INITIALISING  J.A.R.V.I.S.",
   "▸ core systems ............ ONLINE",
@@ -12,35 +14,32 @@ const LINES = [
   "WELCOME BACK, SIR.",
 ];
 
-/** Stark-style boot overlay. Plays once per browser session (sessionStorage
- *  gate), then fades. Purely cosmetic — never blocks interaction for long. */
+/**
+ * Stark-style boot overlay. Plays once per *login* (login sets a boot_pending
+ * flag that this consumes on mount), then fades. A plain page reload does not
+ * set the flag, so it does not replay. Purely cosmetic.
+ */
 export function BootSequence() {
   const [shown, setShown] = useState(0);
-  const [done, setDone] = useState(false);
-  const [skip, setSkip] = useState(true);
+  // "check" until the mount effect decides; renders null on server + first
+  // client render (no hydration mismatch), then flips to playing/done.
+  const [phase, setPhase] = useState<"check" | "playing" | "done">("check");
 
   useEffect(() => {
-    if (sessionStorage.getItem("jarvis_booted") === "1") {
-      setDone(true);
-      return;
-    }
-    setSkip(false);
+    setPhase(consumeBootPending() ? "playing" : "done");
   }, []);
 
   useEffect(() => {
-    if (skip || done) return;
+    if (phase !== "playing") return;
     if (shown < LINES.length) {
       const t = setTimeout(() => setShown((n) => n + 1), shown === 0 ? 220 : 260);
       return () => clearTimeout(t);
     }
-    const t = setTimeout(() => {
-      sessionStorage.setItem("jarvis_booted", "1");
-      setDone(true);
-    }, 750);
+    const t = setTimeout(() => setPhase("done"), 750);
     return () => clearTimeout(t);
-  }, [shown, skip, done]);
+  }, [phase, shown]);
 
-  if (done || skip) return null;
+  if (phase !== "playing") return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#070b18]">
