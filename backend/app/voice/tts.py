@@ -82,12 +82,20 @@ async def _piper(text: str) -> bytes:
     def _run() -> bytes:
         import time
 
+        from piper.config import SynthesisConfig
+
         voice = _get_piper_voice()
+        # length_scale<1 = faster pace; noise knobs tune timbre (None = model default).
+        syn = SynthesisConfig(
+            length_scale=settings.PIPER_LENGTH_SCALE,
+            noise_scale=settings.PIPER_NOISE_SCALE,
+            noise_w_scale=settings.PIPER_NOISE_W,
+        )
         buf = io.BytesIO()
         _t = time.monotonic()
         with wave.open(buf, "wb") as wav:
             # piper-tts 1.4.x: synthesize_wav sets channels/rate/width itself.
-            voice.synthesize_wav(text, wav)
+            voice.synthesize_wav(text, wav, syn_config=syn)
         logger.info("tts_synth", provider="piper", chars=len(text), ms=int((time.monotonic() - _t) * 1000))
         return buf.getvalue()
 

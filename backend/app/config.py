@@ -169,6 +169,12 @@ class Settings(BaseSettings):
     # British male, the fallback). ElevenLabs is intentionally not wired.
     TTS_PROVIDER: str = "piper"
     PIPER_VOICE_PATH: str = "/opt/piper/en/en_GB/jarvis/medium/jarvis-medium.onnx"
+    # Piper synthesis tuning — tune by ear. length_scale < 1.0 = faster pace;
+    # noise_scale / noise_w default to the model's own values (None) — lowering
+    # noise_scale slightly can reduce the medium model's buzz.
+    PIPER_LENGTH_SCALE: float = 0.92
+    PIPER_NOISE_SCALE: float | None = None
+    PIPER_NOISE_W: float | None = None
     EDGE_TTS_VOICE: str = "en-GB-RyanNeural"
     # Metered-voice daily cap (only bites when a cloud TTS like ElevenLabs is on).
     VOICE_DAILY_COST_CAP_USD: float = 1.00
