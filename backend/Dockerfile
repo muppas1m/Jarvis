@@ -35,13 +35,15 @@ RUN mkdir -p app && touch app/__init__.py
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -c constraints.txt -e ".[dev]"
 
-# Bake the Piper "JARVIS" voice (jgkawell/jarvis, medium) into the image at a
-# path OUTSIDE /app — the compose bind-mount (./backend:/app) would otherwise
-# hide anything under /app at runtime. Build-time download = no runtime fetch.
+# Bake the Piper "JARVIS" voices (jgkawell/jarvis — medium AND high) into the
+# image at a path OUTSIDE /app — the compose bind-mount (./backend:/app) would
+# otherwise hide anything under /app at runtime. Build-time download = no runtime
+# fetch. Default is medium (fast, ~280ms/sentence); high (~1.5s/sentence, smoother
+# but 5x slower) is baked alongside so PIPER_VOICE_PATH can A/B them.
 RUN mkdir -p /opt/piper && \
     python -c "from huggingface_hub import hf_hub_download as d; \
-b='en/en_GB/jarvis/medium/jarvis-medium.onnx'; \
-[d('jgkawell/jarvis', f, local_dir='/opt/piper') for f in (b, b + '.json')]"
+voices=['en/en_GB/jarvis/medium/jarvis-medium.onnx','en/en_GB/jarvis/high/jarvis-high.onnx']; \
+[d('jgkawell/jarvis', v + e, local_dir='/opt/piper') for v in voices for e in ('', '.json')]"
 
 # Copy the rest of the source. The COPY of `./app` (when it exists locally)
 # overwrites the stub from above. Other top-level files (alembic.ini, scripts/)
