@@ -8,7 +8,7 @@ import { signOut } from "next-auth/react";
 
 import { BootSequence } from "@/components/BootSequence";
 import { clearBootPending } from "@/lib/boot";
-import { useChatStream } from "@/lib/useChatStream";
+import { useJarvis } from "@/lib/useJarvis";
 
 // Client-only — Three.js must not run during SSR (Next 16: ssr:false is only
 // allowed inside a Client Component, which this page is).
@@ -25,7 +25,16 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 export default function ChatPage() {
-  const { messages, agentState, activeTool, needsApproval, send } = useChatStream();
+  const {
+    messages,
+    agentState,
+    caption,
+    voiceEnabled,
+    setVoiceEnabled,
+    needsApproval,
+    getAmplitude,
+    send,
+  } = useJarvis();
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -44,10 +53,20 @@ export default function ChatPage() {
     <main className="flex h-screen flex-col p-3 md:p-5">
       <BootSequence />
 
-      {/* Top HUD bar */}
       <header className="glass mb-3 flex items-center justify-between rounded-xl px-4 py-2">
         <div className="font-mono text-lg tracking-[0.35em] text-cyan glow">JARVIS</div>
         <nav className="flex items-center gap-4 text-xs uppercase tracking-widest text-ink-dim">
+          <button
+            onClick={() => setVoiceEnabled(!voiceEnabled)}
+            className={`rounded-md border px-3 py-1 transition ${
+              voiceEnabled
+                ? "border-cyan/60 bg-cyan/15 text-cyan glow"
+                : "border-ink-dim/30 hover:text-cyan"
+            }`}
+            title="Speak responses aloud"
+          >
+            {voiceEnabled ? "🔊 Voice on" : "🔈 Voice off"}
+          </button>
           <Link href="/approvals" className="relative transition hover:text-cyan">
             Approvals
             {needsApproval && (
@@ -56,7 +75,7 @@ export default function ChatPage() {
           </Link>
           <button
             onClick={() => {
-              clearBootPending(); // drop any stale flag so next login boots cleanly
+              clearBootPending();
               signOut({ callbackUrl: "/login" });
             }}
             className="transition hover:text-danger"
@@ -68,19 +87,20 @@ export default function ChatPage() {
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row">
         {/* Orb panel */}
-        <section className="glass relative flex h-56 flex-col items-center justify-center rounded-xl md:h-auto md:w-2/5">
-          <div className="h-44 w-44 md:h-72 md:w-72">
-            <OrbCanvas state={agentState} />
+        <section className="glass relative flex h-64 flex-col items-center justify-center rounded-xl md:h-auto md:w-2/5">
+          <div className="h-52 w-52 md:h-80 md:w-80">
+            <OrbCanvas state={agentState} getAmplitude={voiceEnabled ? getAmplitude : undefined} />
           </div>
-          <div className="mt-2 font-mono text-xs uppercase tracking-[0.3em] text-cyan-soft">
+          <div className="mt-1 font-mono text-xs uppercase tracking-[0.3em] text-cyan-soft">
             {STATE_LABEL[agentState] ?? agentState}
           </div>
-          {activeTool && (
-            <div className="mt-1 font-mono text-[11px] text-violet">⚙ {activeTool}</div>
+          {/* Live caption — synced to the spoken audio */}
+          {voiceEnabled && caption && (
+            <div className="mt-2 max-w-[90%] px-2 text-center text-sm text-ink glow">{caption}</div>
           )}
         </section>
 
-        {/* Chat panel */}
+        {/* Transcript panel */}
         <section className="glass flex min-h-0 flex-1 flex-col rounded-xl">
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
             {messages.length === 0 && (
@@ -100,9 +120,7 @@ export default function ChatPage() {
                       : "border border-white/5 bg-black/30 text-ink"
                   }`}
                 >
-                  {m.content || (
-                    <span className="text-ink-dim caret" />
-                  )}
+                  {m.content || <span className="text-ink-dim caret" />}
                 </div>
               </div>
             ))}
@@ -112,7 +130,7 @@ export default function ChatPage() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Message Jarvis…"
+              placeholder={voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
               className="flex-1 rounded-lg border border-cyan/20 bg-black/30 px-4 py-2.5 text-sm text-ink outline-none focus:border-cyan focus:ring-1 focus:ring-cyan/40"
             />
             <button

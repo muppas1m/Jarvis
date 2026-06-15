@@ -24,6 +24,7 @@ export type StreamEvent =
   | { type: "thread_id"; content: string }
   | { type: "token"; content: string }
   | { type: "tool"; content: string }
+  | { type: "audio"; content: { text: string; audio: string; mime: string; filler: boolean } }
   | { type: "approval_required"; thread_id: string; content: Record<string, unknown> }
   | {
       type: "done";
