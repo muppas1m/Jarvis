@@ -25,6 +25,7 @@ from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.memory import router as memory_router
 from app.api.voice import router as voice_router
+from app.api.voice import ws_router as voice_ws_router
 from app.api.webhooks.gmail import router as gmail_webhook_router
 from app.api.webhooks.telegram import router as telegram_webhook_router
 from app.security.auth import UserContext, get_current_user
@@ -35,6 +36,9 @@ api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(telegram_webhook_router)
 api_router.include_router(gmail_webhook_router)
+# Wake-word WS — self-authenticates on a short-lived JWT ticket (a browser WS
+# can't carry the X-API-Key header the protected tier expects). See voice.wake_ws.
+api_router.include_router(voice_ws_router)
 
 # --- protected ------------------------------------------------------------
 # All routes mounted here inherit Depends(get_current_user) at the

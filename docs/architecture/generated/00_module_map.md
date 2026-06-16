@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (91 modules)
+## `app/` — the system (92 modules)
 
 ```
 app/
@@ -113,7 +113,8 @@ app/
 ├── voice/
 │   ├── __init__.py — Voice layer (Phase 4) — streaming TTS + the voice-turn orchestration helpers.
 │   ├── chunker.py — Sentence chunker — slices a streamed token feed into speakable sentences.
-│   └── tts.py — Streaming TTS — provider-pluggable, sentence-at-a-time.
+│   ├── tts.py — Streaming TTS — provider-pluggable, sentence-at-a-time.
+│   └── wakeword.py — Server-side wake-word — openWakeWord "hey jarvis" (Phase 4.2).
 ├── __init__.py — —
 ├── config.py — Settings — single source of truth for runtime configuration.
 └── main.py — FastAPI app factory + lifespan.
