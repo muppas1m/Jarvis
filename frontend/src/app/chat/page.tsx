@@ -127,30 +127,35 @@ export default function ChatPage() {
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row">
-        {/* Orb panel */}
-        <section className="glass relative flex h-64 flex-col items-center justify-center rounded-xl md:h-auto md:w-2/5">
-          <div className="h-52 w-52 md:h-80 md:w-80">
-            <OrbCanvas state={orbState} getAmplitude={voiceActive ? getAmplitude : undefined} />
-          </div>
-          <div className="mt-1 font-mono text-xs uppercase tracking-[0.3em] text-cyan-soft">
-            {STATE_LABEL[orbState] ?? orbState}
-          </div>
-          {voiceActive && caption && (
-            <div className="mt-2 max-w-[90%] px-2 text-center text-sm text-ink glow">{caption}</div>
-          )}
-          {wakeOn && (
-            <div className="mt-2 font-mono text-[11px] text-ink-dim">
-              {wake.error
-                ? `⚠ ${wake.error}`
-                : !wake.supported
-                  ? "⚠ wake-word needs a mic-capable browser"
-                  : !speech.supported
-                    ? "⚠ command capture needs Chrome (Web Speech API)"
-                    : listening
-                      ? "listening for your command…"
-                      : 'say "Hey Jarvis…"'}
+        {/* Orb panel — orb is absolutely centred so the labels below never move it */}
+        <section className="glass relative flex h-64 items-center justify-center overflow-hidden rounded-xl md:h-auto md:w-2/5">
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="h-52 w-52 md:h-80 md:w-80">
+              <OrbCanvas state={orbState} getAmplitude={voiceActive ? getAmplitude : undefined} />
             </div>
-          )}
+          </div>
+          {/* labels pinned to the bottom, independent of the orb's centre */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex flex-col items-center gap-1 px-2 text-center">
+            <div className="font-mono text-xs uppercase tracking-[0.3em] text-cyan-soft">
+              {STATE_LABEL[orbState] ?? orbState}
+            </div>
+            {voiceActive && caption && (
+              <div className="max-w-[90%] text-sm text-ink glow">{caption}</div>
+            )}
+            {wakeOn && (
+              <div className="font-mono text-[11px] text-ink-dim">
+                {wake.error
+                  ? `⚠ ${wake.error}`
+                  : !wake.supported
+                    ? "⚠ wake-word needs a mic-capable browser"
+                    : !speech.supported
+                      ? "⚠ command capture needs Chrome (Web Speech API)"
+                      : listening
+                        ? "listening for your command…"
+                        : 'say "Hey Jarvis…"'}
+              </div>
+            )}
+          </div>
         </section>
 
         {/* Transcript panel */}

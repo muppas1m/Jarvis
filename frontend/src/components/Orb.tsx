@@ -7,22 +7,49 @@ import * as THREE from "three";
 
 import type { AgentState } from "@/lib/types";
 
-/** Audio amplitude source, polled per-frame (0..1). 4.0 passes none → idle
- *  breathing; 4.1 feeds the TTS FFT so the orb pulses to Jarvis's voice. */
+/** Audio amplitude source, polled per-frame (0..1) — the TTS FFT drives the
+ *  RESPONDING pulse; idle passes none. */
 export type AmpFn = () => number;
 
 const AMBER = new THREE.Color("#ffb454");
+const CYAN = new THREE.Color("#00d4ff");
 
-/** Per-state visual config: colour, ring spin, core intensity, idle breath. */
+/** Per-state visual TARGETS. `anim` lerps toward these every frame (no snaps).
+ *  brightness dims everything when not speaking; ringScale blooms the rings
+ *  outward; responding == today's full-brightness look. */
 const STATE_CFG: Record<
   AgentState,
-  { color: THREE.Color; ringSpeed: number; intensity: number; breath: number }
+  { color: THREE.Color; ringSpeed: number; intensity: number; breath: number; brightness: number; ringScale: number }
 > = {
-  idle: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.35, intensity: 1.0, breath: 0.03 },
-  listening: { color: new THREE.Color("#7fe9ff"), ringSpeed: 0.6, intensity: 1.3, breath: 0.05 },
-  thinking: { color: new THREE.Color("#9d7bff"), ringSpeed: 1.1, intensity: 1.2, breath: 0.055 },
-  responding: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.85, intensity: 1.7, breath: 0.09 },
+  idle: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.35, intensity: 1.0, breath: 0.03, brightness: 0.55, ringScale: 1.0 },
+  listening: { color: new THREE.Color("#7fe9ff"), ringSpeed: 0.6, intensity: 1.3, breath: 0.05, brightness: 0.78, ringScale: 1.0 },
+  thinking: { color: new THREE.Color("#9d7bff"), ringSpeed: 1.1, intensity: 1.2, breath: 0.055, brightness: 0.82, ringScale: 1.02 },
+  responding: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.85, intensity: 1.7, breath: 0.09, brightness: 1.0, ringScale: 1.05 },
 };
+
+/** Shared, per-frame-mutated animation state. Children hold a reference and read
+ *  it in their own useFrame, so transitions stay smooth without re-rendering. */
+interface Anim {
+  color: THREE.Color;
+  ringSpeed: number;
+  intensity: number;
+  brightness: number;
+  ringScale: number;
+  dirSign: number; // global direction multiplier (flips while responding)
+  breath: number;
+}
+
+// Apply brightness/colour to every child mesh carrying a `baseOpacity` userData.
+function paintGroup(group: THREE.Group, brightness: number, color: THREE.Color) {
+  group.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    const base = mesh.userData?.baseOpacity as number | undefined;
+    if (base === undefined) return;
+    const m = mesh.material as THREE.MeshBasicMaterial;
+    m.opacity = base * brightness;
+    m.color.copy(mesh.userData.amber ? AMBER : color);
+  });
+}
 
 // --------------------------------------------------------------------------- //
 // Plexus core — the 3D particle-network sphere inside the arc reactor          //
@@ -62,26 +89,10 @@ function buildPlexus() {
   });
   const factor = new Float32Array(N);
   for (let i = 0; i < N; i++) factor[i] = 0.5 + ((i * 2654435761) % 1000) / 1000;
-  return {
-    base,
-    edges,
-    factor,
-    pointPos: new Float32Array(N * 3),
-    linePos: new Float32Array(edges.length * 3),
-  };
+  return { base, edges, factor, pointPos: new Float32Array(N * 3), linePos: new Float32Array(edges.length * 3) };
 }
 
-function Plexus({
-  color,
-  breath,
-  intensity,
-  getAmp,
-}: {
-  color: THREE.Color;
-  breath: number;
-  intensity: number;
-  getAmp: AmpFn;
-}) {
+function Plexus({ anim, getAmp }: { anim: Anim; getAmp: AmpFn }) {
   const geom = useMemo(buildPlexus, []);
   const group = useRef<THREE.Group>(null);
   const pointAttr = useRef<THREE.BufferAttribute>(null);
@@ -95,7 +106,7 @@ function Plexus({
     const amp = Math.min(1, Math.max(0, getAmp()));
     const { base, edges, factor, pointPos, linePos } = geom;
     for (let i = 0; i < N; i++) {
-      const disp = 1 + breath * Math.sin(t * 0.9 + i * 0.6) + amp * 0.34 * factor[i];
+      const disp = 1 + anim.breath * Math.sin(t * 0.9 + i * 0.6) + amp * 0.34 * factor[i];
       pointPos[i * 3] = base[i * 3] * disp;
       pointPos[i * 3 + 1] = base[i * 3 + 1] * disp;
       pointPos[i * 3 + 2] = base[i * 3 + 2] * disp;
@@ -113,12 +124,12 @@ function Plexus({
     if (pointAttr.current) pointAttr.current.needsUpdate = true;
     if (lineAttr.current) lineAttr.current.needsUpdate = true;
     if (pointMat.current) {
-      pointMat.current.color.copy(color).multiplyScalar(intensity);
-      pointMat.current.opacity = 0.9;
+      pointMat.current.color.copy(anim.color).multiplyScalar(anim.intensity);
+      pointMat.current.opacity = 0.9 * anim.brightness;
     }
     if (lineMat.current) {
-      lineMat.current.color.copy(color);
-      lineMat.current.opacity = 0.18 + amp * 0.5;
+      lineMat.current.color.copy(anim.color);
+      lineMat.current.opacity = (0.18 + amp * 0.5) * anim.brightness;
     }
   });
 
@@ -128,45 +139,40 @@ function Plexus({
         <bufferGeometry>
           <bufferAttribute ref={pointAttr} attach="attributes-position" args={[geom.pointPos, 3]} />
         </bufferGeometry>
-        <pointsMaterial ref={pointMat} size={0.035} sizeAttenuation transparent depthWrite={false} />
+        <pointsMaterial ref={pointMat} size={0.035} sizeAttenuation transparent depthWrite={false} color={CYAN} />
       </points>
       <lineSegments>
         <bufferGeometry>
           <bufferAttribute ref={lineAttr} attach="attributes-position" args={[geom.linePos, 3]} />
         </bufferGeometry>
-        <lineBasicMaterial ref={lineMat} transparent opacity={0.18} depthWrite={false} />
+        <lineBasicMaterial ref={lineMat} transparent opacity={0.18} depthWrite={false} color={CYAN} />
       </lineSegments>
     </group>
   );
 }
 
 // --------------------------------------------------------------------------- //
-// Arc-reactor ring — HEAD-ON (faces the camera, screen plane), spins on z      //
-// = a concentric dial. Faint full ring + bold segmented arcs + amber accents.  //
+// Arc-reactor ring — HEAD-ON dial (faces camera, spins on z). Faint full ring  //
+// + bold segments + amber accents. Reads `anim` for speed/scale/brightness.    //
 // --------------------------------------------------------------------------- //
 function ArcRing({
   radius,
   segments,
   thickness,
-  color,
   accentEvery,
-  speed,
-  dir,
+  baseDir,
+  speedMul,
+  anim,
 }: {
   radius: number;
   segments: number;
   thickness: number;
-  color: THREE.Color;
   accentEvery: number;
-  speed: number;
-  dir: number;
+  baseDir: number;
+  speedMul: number;
+  anim: Anim;
 }) {
   const ref = useRef<THREE.Group>(null);
-  // No tilt — the ringGeometry lies in the XY plane (normal toward the camera),
-  // so spinning on z reads as a dial spinning in the screen plane.
-  useFrame((_, dt) => {
-    if (ref.current) ref.current.rotation.z += dt * speed * dir;
-  });
   const arcs = useMemo(() => {
     const seg = (Math.PI * 2) / segments;
     const gap = 0.22;
@@ -177,31 +183,48 @@ function ArcRing({
     }));
   }, [segments, accentEvery]);
 
+  useFrame((_, dt) => {
+    const g = ref.current;
+    if (!g) return;
+    g.rotation.z += dt * anim.ringSpeed * speedMul * baseDir * anim.dirSign;
+    g.scale.setScalar(anim.ringScale);
+    paintGroup(g, anim.brightness, anim.color);
+  });
+
   return (
     <group ref={ref}>
-      {/* faint full ring for continuity */}
-      <mesh>
+      <mesh userData={{ baseOpacity: 0.16 }}>
         <ringGeometry args={[radius - thickness * 0.35, radius + thickness * 0.35, 96]} />
-        <meshBasicMaterial color={color} transparent opacity={0.16} side={THREE.DoubleSide} />
+        <meshBasicMaterial color={CYAN} transparent opacity={0.16} side={THREE.DoubleSide} />
       </mesh>
-      {/* bold bright arc segments */}
       {arcs.map((a, i) => (
-        <mesh key={i}>
+        <mesh key={i} userData={{ baseOpacity: 0.95, amber: a.accent }}>
           <ringGeometry args={[radius - thickness, radius + thickness, 48, 1, a.start, a.len]} />
-          <meshBasicMaterial
-            color={a.accent ? AMBER : color}
-            transparent
-            opacity={0.95}
-            side={THREE.DoubleSide}
-          />
+          <meshBasicMaterial color={CYAN} transparent opacity={0.95} side={THREE.DoubleSide} />
         </mesh>
       ))}
     </group>
   );
 }
 
-/** Crisp camera-facing radial ticks (in the screen plane), an instrument bezel. */
-function Ticks({ radius, count, color }: { radius: number; count: number; color: THREE.Color }) {
+// --------------------------------------------------------------------------- //
+// Outer ring — the radial tick bezel + boundary hairline, now a revolving      //
+// member of the direction pattern (outermost ring).                           //
+// --------------------------------------------------------------------------- //
+function OuterRing({
+  radius,
+  count,
+  baseDir,
+  speedMul,
+  anim,
+}: {
+  radius: number;
+  count: number;
+  baseDir: number;
+  speedMul: number;
+  anim: Anim;
+}) {
+  const ref = useRef<THREE.Group>(null);
   const items = useMemo(
     () =>
       Array.from({ length: count }, (_, i) => {
@@ -210,16 +233,32 @@ function Ticks({ radius, count, color }: { radius: number; count: number; color:
       }),
     [count],
   );
+
+  useFrame((_, dt) => {
+    const g = ref.current;
+    if (!g) return;
+    g.rotation.z += dt * anim.ringSpeed * speedMul * baseDir * anim.dirSign;
+    g.scale.setScalar(anim.ringScale);
+    paintGroup(g, anim.brightness, anim.color);
+  });
+
   return (
-    <group>
+    <group ref={ref}>
+      {/* boundary hairline */}
+      <mesh userData={{ baseOpacity: 0.3 }}>
+        <ringGeometry args={[radius + 0.04, radius + 0.07, 128]} />
+        <meshBasicMaterial color={CYAN} transparent opacity={0.3} side={THREE.DoubleSide} />
+      </mesh>
+      {/* radial ticks */}
       {items.map((t, i) => (
         <mesh
           key={i}
           position={[Math.cos(t.a) * radius, Math.sin(t.a) * radius, 0]}
           rotation={[0, 0, t.a]}
+          userData={{ baseOpacity: t.big ? 0.95 : 0.45 }}
         >
           <boxGeometry args={[t.big ? 0.12 : 0.06, t.big ? 0.016 : 0.01, 0.01]} />
-          <meshBasicMaterial color={color} transparent opacity={t.big ? 0.95 : 0.45} />
+          <meshBasicMaterial color={CYAN} transparent opacity={t.big ? 0.95 : 0.45} />
         </mesh>
       ))}
     </group>
@@ -227,7 +266,8 @@ function Ticks({ radius, count, color }: { radius: number; count: number; color:
 }
 
 // --------------------------------------------------------------------------- //
-// Orb assembly — head-on arc reactor: flat spinning dials framing the 3D core  //
+// Orb assembly — owns the shared `anim`, lerps it toward the state target, and //
+// runs the global direction-flip clock (responding only).                     //
 // --------------------------------------------------------------------------- //
 export function Orb({
   state = "idle",
@@ -236,34 +276,67 @@ export function Orb({
   state?: AgentState;
   getAmplitude?: AmpFn;
 }) {
-  const cfg = STATE_CFG[state];
+  const target = STATE_CFG[state];
   const getAmp = getAmplitude ?? (() => 0);
+
+  const anim = useRef<Anim>({
+    color: new THREE.Color("#00d4ff"),
+    ringSpeed: 0.35,
+    intensity: 1.0,
+    brightness: 0.55,
+    ringScale: 1.0,
+    dirSign: 1,
+    breath: 0.03,
+  }).current;
+  const dirClock = useRef(0);
+  const light = useRef<THREE.PointLight>(null);
+
+  useFrame((_, dt) => {
+    const k = 1 - Math.exp(-dt * 5); // ~0.2s time constant, framerate-independent
+    anim.color.lerp(target.color, k);
+    anim.ringSpeed += (target.ringSpeed - anim.ringSpeed) * k;
+    anim.intensity += (target.intensity - anim.intensity) * k;
+    anim.brightness += (target.brightness - anim.brightness) * k;
+    anim.ringScale += (target.ringScale - anim.ringScale) * k;
+    anim.breath += (target.breath - anim.breath) * k;
+
+    // Global direction sign: flip every 5s while responding; steady +1 otherwise
+    // (all rings share this one clock → they flip in unison).
+    if (state === "responding") {
+      dirClock.current += dt;
+      if (dirClock.current >= 5) {
+        dirClock.current -= 5;
+        anim.dirSign = -anim.dirSign;
+      }
+    } else {
+      dirClock.current = 0;
+      anim.dirSign = 1;
+    }
+
+    if (light.current) {
+      light.current.color.copy(anim.color);
+      light.current.intensity = 16 * anim.brightness;
+    }
+  });
 
   return (
     <group>
       <ambientLight intensity={0.55} />
-      <pointLight position={[0, 0, 3]} intensity={16} color={cfg.color} />
+      <pointLight ref={light} position={[0, 0, 3]} intensity={16} color={CYAN} />
 
       {/* 3D plexus core + bright centre */}
-      <Plexus color={cfg.color} breath={cfg.breath} intensity={cfg.intensity} getAmp={getAmp} />
+      <Plexus anim={anim} getAmp={getAmp} />
       <mesh>
         <sphereGeometry args={[0.05, 16, 16]} />
         <meshBasicMaterial color="#eaffff" />
       </mesh>
 
-      {/* concentric head-on dials, independent speeds + directions */}
-      <ArcRing radius={1.25} segments={3} thickness={0.05} color={cfg.color} accentEvery={3} speed={cfg.ringSpeed * 1.15} dir={1} />
-      <ArcRing radius={1.6} segments={6} thickness={0.035} color={cfg.color} accentEvery={4} speed={cfg.ringSpeed * 0.85} dir={-1} />
-      <ArcRing radius={1.95} segments={10} thickness={0.04} color={cfg.color} accentEvery={5} speed={cfg.ringSpeed * 0.6} dir={1} />
-      <ArcRing radius={2.28} segments={4} thickness={0.028} color={cfg.color} accentEvery={2} speed={cfg.ringSpeed * 0.45} dir={-1} />
-
-      <Ticks radius={2.5} count={60} color={cfg.color} />
-
-      {/* outer boundary hairline */}
-      <mesh>
-        <ringGeometry args={[2.54, 2.57, 128]} />
-        <meshBasicMaterial color={cfg.color} transparent opacity={0.3} side={THREE.DoubleSide} />
-      </mesh>
+      {/* concentric head-on dials — alternating base direction (+,-,+,-,+) */}
+      <ArcRing radius={1.25} segments={3} thickness={0.05} accentEvery={3} baseDir={1} speedMul={1.15} anim={anim} />
+      <ArcRing radius={1.6} segments={6} thickness={0.035} accentEvery={4} baseDir={-1} speedMul={0.85} anim={anim} />
+      <ArcRing radius={1.95} segments={10} thickness={0.04} accentEvery={5} baseDir={1} speedMul={0.6} anim={anim} />
+      <ArcRing radius={2.28} segments={4} thickness={0.028} accentEvery={2} baseDir={-1} speedMul={0.45} anim={anim} />
+      <OuterRing radius={2.5} count={60} baseDir={1} speedMul={0.35} anim={anim} />
     </group>
   );
 }

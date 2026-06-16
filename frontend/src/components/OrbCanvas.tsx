@@ -21,7 +21,7 @@ export default function OrbCanvas({
 }) {
   return (
     <Canvas
-      camera={{ position: [0, 0, 6], fov: 45 }}
+      camera={{ position: [0, 0, 8], fov: 45 }}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: true }}
       style={{ width: "100%", height: "100%" }}
@@ -29,10 +29,10 @@ export default function OrbCanvas({
       <Orb state={state} getAmplitude={getAmplitude} />
       <EffectComposer>
         <Bloom
-          intensity={1.15}
-          luminanceThreshold={0.2}
+          intensity={1.8}
+          luminanceThreshold={0.15}
           luminanceSmoothing={0.9}
-          radius={0.65}
+          radius={0.85}
           mipmapBlur
         />
       </EffectComposer>
