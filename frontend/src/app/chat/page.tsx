@@ -128,9 +128,17 @@ export default function ChatPage() {
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row">
         {/* Orb panel — orb is absolutely centred so the labels below never move it */}
-        <section className="glass relative flex h-64 items-center justify-center overflow-hidden rounded-xl md:h-auto md:w-2/5">
+        <section className="glass relative flex h-72 items-center justify-center overflow-hidden rounded-xl md:h-auto md:w-2/5">
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="h-52 w-52 md:h-80 md:w-80">
+            <div
+              className="h-[min(72vmin,520px)] w-[min(72vmin,520px)]"
+              style={{
+                // Circular mask: fades the glow out in a circle so the square
+                // canvas edge never shows (and a bigger orb can spill glow).
+                maskImage: "radial-gradient(circle, #000 72%, transparent 94%)",
+                WebkitMaskImage: "radial-gradient(circle, #000 72%, transparent 94%)",
+              }}
+            >
               <OrbCanvas state={orbState} getAmplitude={voiceActive ? getAmplitude : undefined} />
             </div>
           </div>

@@ -21,7 +21,7 @@ export default function OrbCanvas({
 }) {
   return (
     <Canvas
-      camera={{ position: [0, 0, 8], fov: 45 }}
+      camera={{ position: [0, 0, 13], fov: 45 }}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: true }}
       style={{ width: "100%", height: "100%" }}
