@@ -175,7 +175,7 @@ class Settings(BaseSettings):
     # Piper synthesis tuning — tune by ear. length_scale < 1.0 = faster pace;
     # noise_scale / noise_w default to the model's own values (None) — lowering
     # noise_scale slightly can reduce the medium model's buzz.
-    PIPER_LENGTH_SCALE: float = 0.92
+    PIPER_LENGTH_SCALE: float = 0.97
     PIPER_NOISE_SCALE: float | None = None
     PIPER_NOISE_W: float | None = None
     # Piper's default normalize_audio=True peak-normalises Jarvis's quiet output
