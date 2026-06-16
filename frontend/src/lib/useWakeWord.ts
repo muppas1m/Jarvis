@@ -62,7 +62,15 @@ export function useWakeWord({
         }
         streamRef.current = stream;
 
-        const ctx = new AudioContext();
+        // Request a 16 kHz context so the browser resamples the mic with proper
+        // anti-aliasing (the worklet then just buffers — no crude decimation).
+        // Some browsers ignore the rate; the worklet handles either case.
+        let ctx: AudioContext;
+        try {
+          ctx = new AudioContext({ sampleRate: 16000 });
+        } catch {
+          ctx = new AudioContext();
+        }
         ctxRef.current = ctx;
         await ctx.audioWorklet.addModule("/wake-worklet.js");
         const src = ctx.createMediaStreamSource(stream);

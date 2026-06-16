@@ -86,7 +86,9 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
 
     await websocket.accept()
     # Per-connection model (prediction state is per-stream); load off the loop.
-    model = await asyncio.to_thread(new_model, settings.WAKE_THRESHOLD)
+    # The model's VAD gate uses WAKE_VAD_THRESHOLD; the fire score uses
+    # WAKE_THRESHOLD below — the two are decoupled.
+    model = await asyncio.to_thread(new_model, settings.WAKE_VAD_THRESHOLD)
     key = score_key(model)
     logger.info("wake_ws_open", user=claims.get("sub"))
     try:

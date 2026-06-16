@@ -187,10 +187,12 @@ class Settings(BaseSettings):
     VOICE_DAILY_COST_CAP_USD: float = 1.00
 
     # Wake-word (Phase 4.2 — server-side openWakeWord "hey jarvis"). Fire the
-    # "wake" event when the score exceeds this; also the Silero-VAD gate value
-    # (silence/noise → 0). Raise (0.6–0.8) if false-positives annoy; lower if
-    # it under-triggers.
-    WAKE_THRESHOLD: float = 0.5
+    # "wake" event when the score exceeds WAKE_THRESHOLD — lowered for fewer
+    # misses; raise toward 0.5 if false-positives appear. WAKE_VAD_THRESHOLD is a
+    # SEPARATE Silero-VAD gate (decoupled from the fire score): low, just enough
+    # to drop pure silence without gating out quiet speech.
+    WAKE_THRESHOLD: float = 0.35
+    WAKE_VAD_THRESHOLD: float = 0.2
 
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72
