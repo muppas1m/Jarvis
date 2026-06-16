@@ -14,6 +14,7 @@ import os
 
 import openwakeword
 from openwakeword.model import Model
+from openwakeword.vad import VAD
 
 # Wheel-bundled with the openwakeword install (site-packages, outside the
 # /app bind-mount → baked into the image). The shared melspectrogram +
@@ -33,3 +34,16 @@ def score_key(model: Model) -> str:
     """The key `predict()` returns the hey_jarvis score under (the model's
     filename stem, e.g. "hey_jarvis_v0.1")."""
     return next(iter(model.models.keys()))
+
+
+# 80 ms @ 16 kHz = 1280 samples per frame (the worklet's cadence); openWakeWord's
+# own VAD splits each frame into 640-sample chunks (160*4), so 1280 → exactly 2.
+VAD_FRAME_SIZE = 640
+
+
+def new_vad() -> VAD:
+    """A standalone Silero VAD (Phase 4.3a barge-in "listen-for-speech" mode) —
+    the SAME bundled Silero the wake gate uses, but scored directly so the same
+    mic→WS stream can detect the master's speech onset while Jarvis is speaking.
+    Per-connection like the wake Model (the recurrent h/c state is per-stream)."""
+    return VAD()

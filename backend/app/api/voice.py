@@ -24,7 +24,7 @@ from app.agent.runner import voice_turn
 from app.config import settings
 from app.security.auth import UserContext, get_current_user
 from app.utils.logging import get_logger
-from app.voice.wakeword import new_model, score_key
+from app.voice.wakeword import VAD_FRAME_SIZE, new_model, new_vad, score_key
 
 logger = get_logger(__name__)
 
@@ -67,14 +67,23 @@ async def voice_stream(
 
 @ws_router.websocket("/wake")
 async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None:
-    """Always-on wake-word stream (Phase 4.2). The browser sends 16 kHz mono
-    int16 PCM frames; we score each with openWakeWord "hey jarvis" and push back
-    {"event":"wake","score":…} when it crosses WAKE_THRESHOLD.
+    """Always-on voice-in stream (Phase 4.2 wake-word + 4.3a barge-in). The
+    browser sends 16 kHz mono int16 PCM frames over a SINGLE stream and switches
+    what we score with a text control message ``{"mode":"wake"|"vad"}``:
 
-    Auth: the browser can't set X-API-Key on a WS handshake, so it authenticates
-    with a **short-lived JWT ticket** (HS256, signed by the BFF with the shared
-    AUTH_SECRET, ~60s expiry) passed as `?ticket=`. We validate it with the same
-    `_verify_jwt` the HTTP auth uses. No long-lived secret reaches the browser.
+      * **wake** (default) — score openWakeWord "hey jarvis"; push
+        ``{"event":"wake","score":…}`` when it crosses WAKE_THRESHOLD.
+      * **vad** ("listen-for-speech", used while Jarvis is RESPONDING) — score
+        the bundled Silero VAD and push per-frame ``{"event":"speech","score":…}``
+        so the client can detect the master's speech onset and barge in. The
+        self-interrupt guard (ignore the first Nms of playback, require sustained
+        speech, raised threshold) lives client-side, where playback state is.
+
+    One stream, two scorers — no second ``getUserMedia``, no new dependency
+    (reuses the already-local Silero). Auth: the browser can't set X-API-Key on a
+    WS handshake, so it authenticates with a **short-lived JWT ticket** (HS256,
+    signed by the BFF with the shared AUTH_SECRET, ~60s expiry) passed as
+    ``?ticket=``; validated with the same ``_verify_jwt`` the HTTP auth uses.
     """
     # Local import keeps the validator next to its HTTP sibling without exporting it.
     from app.security.auth import _verify_jwt
@@ -85,23 +94,61 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
         return
 
     await websocket.accept()
-    # Per-connection model (prediction state is per-stream); load off the loop.
+    # Per-connection detectors (prediction state is per-stream); load off the loop.
     # The model's VAD gate uses WAKE_VAD_THRESHOLD; the fire score uses
-    # WAKE_THRESHOLD below — the two are decoupled.
+    # WAKE_THRESHOLD — the two are decoupled. The Silero VAD is lazy: only built
+    # if the client actually enters barge-in mode.
     model = await asyncio.to_thread(new_model, settings.WAKE_VAD_THRESHOLD)
     key = score_key(model)
+    vad = None
+    mode = "wake"
     logger.info("wake_ws_open", user=claims.get("sub"))
     try:
         while True:
-            data = await websocket.receive_bytes()
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+
+            # Text frame = a mode-switch control message.
+            text = msg.get("text")
+            if text is not None:
+                try:
+                    new_mode = json.loads(text).get("mode")
+                except (ValueError, AttributeError):
+                    continue
+                if new_mode not in ("wake", "vad") or new_mode == mode:
+                    continue
+                mode = new_mode
+                if mode == "vad":
+                    if vad is None:
+                        vad = await asyncio.to_thread(new_vad)
+                    vad.reset_states()
+                else:
+                    model.reset()  # drop stale wake state on the way back in
+                continue
+
+            data = msg.get("bytes")
+            if not data:
+                continue
             audio = np.frombuffer(data, dtype=np.int16)
             if audio.size == 0:
                 continue
-            scores = await asyncio.to_thread(model.predict, audio)
-            score = float(scores.get(key, 0.0))
-            if score > settings.WAKE_THRESHOLD:
-                await websocket.send_json({"event": "wake", "score": score})
-                model.reset()  # don't re-fire on the tail of the same utterance
+
+            try:
+                if mode == "wake":
+                    scores = await asyncio.to_thread(model.predict, audio)
+                    score = float(scores.get(key, 0.0))
+                    if score > settings.WAKE_THRESHOLD:
+                        await websocket.send_json({"event": "wake", "score": score})
+                        model.reset()  # don't re-fire on the same utterance's tail
+                elif vad is not None:
+                    score = float(
+                        await asyncio.to_thread(vad.predict, audio, VAD_FRAME_SIZE)
+                    )
+                    await websocket.send_json({"event": "speech", "score": score})
+            except Exception as exc:  # noqa: BLE001 — one bad frame never kills the stream
+                logger.warning("wake_ws_frame_error", error=str(exc), mode=mode)
+                continue
     except WebSocketDisconnect:
         logger.info("wake_ws_closed")
     except Exception as exc:  # noqa: BLE001 — never crash the worker on a bad frame
