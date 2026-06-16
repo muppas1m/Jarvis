@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     # --- Security ------------------------------------------------------------
     ENCRYPTION_KEY: str = ""
     API_SECRET_KEY: str = ""
+    # AUTH_SECRET MUST match the frontend's AUTH_SECRET: the wake-word WS ticket
+    # is signed by the frontend BFF and verified here (_verify_jwt) with this key.
+    # Rotate BOTH sides together or the wake-word breaks.
     AUTH_SECRET: str = ""
     MASTER_PASSKEY: str = ""
 
