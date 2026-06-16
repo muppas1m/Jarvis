@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -9,6 +9,8 @@ import { signOut } from "next-auth/react";
 import { BootSequence } from "@/components/BootSequence";
 import { clearBootPending } from "@/lib/boot";
 import { useJarvis } from "@/lib/useJarvis";
+import { useSpeechInput } from "@/lib/useSpeechInput";
+import { useWakeWord } from "@/lib/useWakeWord";
 
 // Client-only — Three.js must not run during SSR (Next 16: ssr:false is only
 // allowed inside a Client Component, which this page is).
@@ -36,7 +38,26 @@ export default function ChatPage() {
     send,
   } = useJarvis();
   const [input, setInput] = useState("");
+  const [wakeOn, setWakeOn] = useState(false);
+  const [listening, setListening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const speech = useSpeechInput();
+
+  // "Jarvis" fired → capture the command → run it (spoken response).
+  const onWake = useCallback(async () => {
+    setListening(true);
+    try {
+      const transcript = await speech.capture();
+      if (transcript.trim()) send(transcript);
+    } catch {
+      /* keep listening */
+    } finally {
+      setListening(false);
+    }
+  }, [speech, send]);
+
+  const wake = useWakeWord({ enabled: wakeOn, onWake });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -49,13 +70,33 @@ export default function ChatPage() {
     setInput("");
   }
 
+  function toggleWake() {
+    const next = !wakeOn;
+    setWakeOn(next);
+    if (next) setVoiceEnabled(true); // wake-word implies spoken responses
+  }
+
+  const orbState = listening ? "listening" : agentState;
+  const voiceActive = voiceEnabled || wakeOn;
+
   return (
     <main className="flex h-screen flex-col p-3 md:p-5">
       <BootSequence />
 
       <header className="glass mb-3 flex items-center justify-between rounded-xl px-4 py-2">
         <div className="font-mono text-lg tracking-[0.35em] text-cyan glow">JARVIS</div>
-        <nav className="flex items-center gap-4 text-xs uppercase tracking-widest text-ink-dim">
+        <nav className="flex items-center gap-3 text-xs uppercase tracking-widest text-ink-dim">
+          <button
+            onClick={toggleWake}
+            className={`rounded-md border px-3 py-1 transition ${
+              wakeOn
+                ? "border-cyan/60 bg-cyan/15 text-cyan glow"
+                : "border-ink-dim/30 hover:text-cyan"
+            }`}
+            title='Continuous wake-word — say "Jarvis…"'
+          >
+            {wakeOn ? "🎙 Wake-word on" : "🎙 Wake-word"}
+          </button>
           <button
             onClick={() => setVoiceEnabled(!voiceEnabled)}
             className={`rounded-md border px-3 py-1 transition ${
@@ -89,14 +130,24 @@ export default function ChatPage() {
         {/* Orb panel */}
         <section className="glass relative flex h-64 flex-col items-center justify-center rounded-xl md:h-auto md:w-2/5">
           <div className="h-52 w-52 md:h-80 md:w-80">
-            <OrbCanvas state={agentState} getAmplitude={voiceEnabled ? getAmplitude : undefined} />
+            <OrbCanvas state={orbState} getAmplitude={voiceActive ? getAmplitude : undefined} />
           </div>
           <div className="mt-1 font-mono text-xs uppercase tracking-[0.3em] text-cyan-soft">
-            {STATE_LABEL[agentState] ?? agentState}
+            {STATE_LABEL[orbState] ?? orbState}
           </div>
-          {/* Live caption — synced to the spoken audio */}
-          {voiceEnabled && caption && (
+          {voiceActive && caption && (
             <div className="mt-2 max-w-[90%] px-2 text-center text-sm text-ink glow">{caption}</div>
+          )}
+          {wakeOn && (
+            <div className="mt-2 font-mono text-[11px] text-ink-dim">
+              {!wake.configured
+                ? "⚠ set NEXT_PUBLIC_PICOVOICE_ACCESS_KEY to enable"
+                : !speech.supported
+                  ? "⚠ command STT needs Chrome (Web Speech API)"
+                  : listening
+                    ? "listening for your command…"
+                    : 'say "Jarvis…"'}
+            </div>
           )}
         </section>
 
@@ -130,7 +181,7 @@ export default function ChatPage() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
+              placeholder={wakeOn ? 'say "Jarvis…" or type…' : voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
               className="flex-1 rounded-lg border border-cyan/20 bg-black/30 px-4 py-2.5 text-sm text-ink outline-none focus:border-cyan focus:ring-1 focus:ring-cyan/40"
             />
             <button
