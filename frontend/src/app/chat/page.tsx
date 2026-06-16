@@ -135,8 +135,8 @@ export default function ChatPage() {
               style={{
                 // Circular mask: fades the glow out in a circle so the square
                 // canvas edge never shows (and a bigger orb can spill glow).
-                maskImage: "radial-gradient(circle, #000 72%, transparent 94%)",
-                WebkitMaskImage: "radial-gradient(circle, #000 72%, transparent 94%)",
+                maskImage: "radial-gradient(circle, #000 72%, transparent 84%)",
+                WebkitMaskImage: "radial-gradient(circle, #000 72%, transparent 84%)",
               }}
             >
               <OrbCanvas state={orbState} getAmplitude={voiceActive ? getAmplitude : undefined} />

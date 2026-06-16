@@ -29,10 +29,10 @@ export default function OrbCanvas({
       <Orb state={state} getAmplitude={getAmplitude} />
       <EffectComposer>
         <Bloom
-          intensity={1.8}
-          luminanceThreshold={0.15}
+          intensity={1.3}
+          luminanceThreshold={0.35}
           luminanceSmoothing={0.9}
-          radius={0.85}
+          radius={0.35}
           mipmapBlur
         />
       </EffectComposer>
