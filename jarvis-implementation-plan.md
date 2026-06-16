@@ -7922,11 +7922,11 @@ Surfaced, not silently picked. Recommendations are the default; the master confi
 - (c) **Kokoro** (recent high-quality open TTS, local) / **Edge TTS** (free cloud, British "Ryan", but ToS/stability risk).
 - **→ Recommend: 4.1 A/B-tests (a) vs (b) on the actual butler lines, master picks by ear.** Default to (a) Piper local for $0 + privacy + the on-the-nose timbre; make voice a **config flag** so (b) ElevenLabs drops in as a premium voice with a cost cap (see 4.§D-6). Both run **sentence-chunked streaming**. **Trade-off:** local is free/private but lower ceiling on naturalness/emotion than ElevenLabs.
 
-**4. Wake-word ("Wake up Jarvis")**
-- (a) **Porcupine / pvporcupine** (Picovoice) — on-device, WASM-in-browser, custom phrase via trained `.ppn`, free tier with access key.
+**4. Wake-word (the name "Jarvis", any phrasing)**
+- (a) **Porcupine** (Picovoice) — on-device, WASM-in-browser, ships a **built-in "Jarvis" keyword** that fires on the name regardless of surrounding words; free tier with an access key.
 - (b) **openWakeWord** — fully open-source, pretrained "hey jarvis", no account/quota.
-- (c) **Web Speech API continuous** — unreliable, cloud, Chrome-only. Not recommended.
-- **→ Recommend (a)** for accuracy + the exact custom phrase; **(b)** as the no-vendor-account fallback. On-device means audio never leaves the machine until the wake-word fires (privacy). **Constraint (see 4.§D-5):** in-browser wake-word only works while the tab is open/focused; true ambient always-on needs a native wrapper — deferred.
+- (c) **Web Speech API continuous** — unreliable, cloud, Chrome-only. Not recommended for the wake-word (fine for the *command* STT in the 4.2 first cut).
+- **→ Recommend (a)** — the built-in "Jarvis" keyword gives exactly the name-trigger we want ("Jarvis", "Hey Jarvis", "One thing Jarvis!"); **(b)** as the no-vendor-account fallback. On-device means audio never leaves the machine until "Jarvis" fires (privacy). **Constraint (see 4.§D-5):** in-browser wake-word only works while the tab is open/focused; true ambient always-on needs a native wrapper — deferred.
 
 **5. Orb renderer**
 - (a) **React-Three-Fiber (R3F) + drei** — declarative Three.js for React; audio-reactive via Web Audio `AnalyserNode` → shader/particle uniforms.
@@ -7942,11 +7942,11 @@ Surfaced, not silently picked. Recommendations are the default; the master confi
 
 **2. Barge-in / interruption (talk over Jarvis → it stops).** Mic stays open during TTS playback (full-duplex). Client-side VAD detects user speech onset while the orb is RESPONDING; on onset the client immediately ducks/stops playback, emits a `barge_in` control event, the server **cancels the in-flight TTS stream and cancels the in-flight graph turn** (asyncio task cancel; the partial assistant turn is marked interrupted in the checkpoint, not persisted as a completed answer), and a fresh capture begins. **Acoustic echo cancellation is mandatory** so Jarvis's own audio isn't heard as "the user" — browser `getUserMedia({ echoCancellation: true })` plus a server-side guard (ignore VAD onsets that correlate with known outgoing TTS). This couples to the checkpointer and to `run_turn` cancellability — call it out as real work in 4.3.
 
-**3. Turn-taking / endpointing.** Push-to-talk in 4.2 sidesteps this (button release = end-of-turn). Full hands-free endpointing in 4.3 uses **Silero VAD** (common, robust, local) with a silence-hangover (~500–800 ms) tuned against the cut-off-too-soon vs feels-laggy trade. Semantic endpointing (LLM judges "complete thought") is a future lift, not in scope.
+**3. Turn-taking / endpointing.** There is no push-to-talk. The 4.2 first cut wake-then-listens — "Jarvis" fires, then the command utterance is end-pointed by the capture STT (browser VAD / the Web Speech API's own silence detection). 4.3 hardens this with **Silero VAD** (common, robust, local) + a silence-hangover (~500–800 ms) tuned against the cut-off-too-soon vs feels-laggy trade. Semantic endpointing (LLM judges "complete thought") is a future lift, not in scope.
 
 **4. The approval interrupt, hands-free.** The genuinely hard one — and a known sharp edge (memory: `project_email_action_capability_gap`, where conversational "send it" was *deliberately not shipped* in Phase 2; the Approve/Reject button was canonical). Voice re-opens it. Design: when the graph hits `interrupt()` mid-voice-turn, Jarvis **speaks** the request ("Sir, I've drafted a reply to Chetan — shall I send it?") and the orb enters an APPROVAL-WAIT state. The master answers **by voice**. A **narrow yes/no resolver — gated to fire only while an interrupt is live**, not the full agent — maps the spoken response to approve/reject and resumes via `Command(resume=…)` (reusing the existing `_resolve_gmail_approval` dispatch). Safety rules: require an **explicit affirmative** ("yes, send it") — never trigger on ambient speech; on low confidence, re-prompt ("I didn't catch that, Sir — yes or no?"); keep the **visual Approve/Reject button present as backup**; allow a config to force button-only for the highest-stakes actions. This resolver is a real piece of work in 4.3, not a freebie.
 
-**5. Wake-word always-listening — platform constraints.** A web app **cannot** do true OS-level always-on (screen off, app backgrounded). In-browser, continuous mic requires the tab open + permission granted, and background tabs get throttled. So 4.4 ships **tab-open always-listening** via an on-device WASM wake-word (Porcupine), and explicitly notes the path to **true ambient** = a native/desktop wrapper (Electron/Tauri) or a dedicated always-on device — out of scope for the web app, flagged as the future-vision bridge. On-device wake-word keeps audio local until the phrase fires.
+**5. Wake-word always-listening — platform constraints.** A web app **cannot** do true OS-level always-on (screen off, app backgrounded). In-browser, continuous mic requires the tab open + permission granted, and background tabs get throttled. So **4.2** ships **tab-open always-listening** via an on-device WASM wake-word (Porcupine), and explicitly notes the path to **true ambient** = a native/desktop wrapper (Electron/Tauri) or a dedicated always-on device — out of scope for the web app, flagged as the future-vision bridge. On-device wake-word keeps audio local until the name fires.
 
 **6. Metered STT/TTS cost.** Local Piper + faster-whisper = **$0** and private (the default). If ElevenLabs (or any cloud STT/TTS) is enabled, it's metered and must be tracked: per-turn character/second counts → cost, in the **same spirit as the LLM gateway's Redis cost counter** (memory: `project_agent_llm_cost_attribution_gap` — voice is a sibling gateway-bypass surface). Add a `VOICE_DAILY_COST_CAP_USD` knob alongside `DAILY_LLM_SPEND_CAP_USD`, with the same soft/hard-cap behaviour, before any cloud voice provider is switched on.
 
@@ -7995,36 +7995,35 @@ Each sub-phase is a reviewable unit with an explicit proof. Build stops at each 
 
 *What proves it works:* the master sends a turn (typed, from 4.0) and Jarvis **speaks** the reply in the chosen Jarvis voice; the orb pulses in sync; captions track the audio word-for-word; the reply addresses the master as "Sir." (Voice-in is still next; barge-in not yet.)
 
-#### Sub-phase 4.2 — Voice in: streaming STT, push-to-talk first
+#### Sub-phase 4.2 — Wake-word voice-in (continuous, name-triggered — no push-to-talk)
+*Reworked 2026-06-16: voice-in is wake-word-driven from the start. There is no push-to-talk phase.*
 *Build:*
-- Mic capture (`getUserMedia`, AEC on).
-- **Push-to-talk** (hold to talk, release = end-of-turn — sidesteps endpointing entirely).
-- STT service (faster-whisper local, whole-utterance to start).
-- WebSocket audio-in frames; STT transcript → the **same** `run_turn` graph.
-- **LISTENING** orb state + input waveform; optional partial-transcript caption.
+- **On-device wake-word keyed on the name "Jarvis"** so it fires on *any* phrasing — "Jarvis", "Hey Jarvis", "Hi Jarvis", "Hello Jarvis", "One thing Jarvis!" (the detector keys on the word, not a fixed "Wake up Jarvis" phrase). **Porcupine** built-in "Jarvis" keyword (WASM, in-browser; **openWakeWord** as the no-account fallback). Continuous while the tab is open; the mic is **gated behind the authenticated session** (no hot-mic on a locked dashboard). **Audio stays local until "Jarvis" fires.**
+- **On fire → capture → respond:** VAD-bound the command utterance (Silero / browser VAD) → STT (faster-whisper local, or the **Web Speech API to start**) → feed the transcript into the existing **`voice_turn`** (full brain + fast tier + Piper) → speak back.
+- **Orb states:** LISTENING during capture → THINKING → RESPONDING.
+- **First cut = wake-then-listen** (say "Jarvis…", it captures the *following* command). **Follow-up:** a rolling audio buffer so commands where "Jarvis" lands mid/end-sentence ("send an email, Jarvis") are caught too.
 
-*What proves it works:* the master holds the button, says "what's on my calendar today," releases; the transcript enters the graph; Jarvis speaks the answer. Full **voice-in → brain → voice-out** loop closes, with manual (push-to-talk) turn-taking.
+*What proves it works:* tab open, the master says "Jarvis, what's on my calendar today" hands-free → the orb wakes + listens → captures the command → the full turn runs → Jarvis speaks the answer. The voice-to-voice loop closes — **no button**.
 
-#### Sub-phase 4.3 — Full duplex speech-to-speech + barge-in
+#### Sub-phase 4.3 — Full duplex + barge-in
 *Build:*
-- **Silero VAD endpointing** (auto end-of-turn; retires push-to-talk).
+- **Silero VAD endpointing** — robust auto end-of-turn over the 4.2 capture.
 - Streaming **partial** STT transcripts.
 - **Full-duplex** audio (mic open during TTS).
-- **Barge-in:** VAD onset during RESPONDING → cancel TTS + cancel the in-flight graph turn + start a new capture; AEC tuned so Jarvis doesn't interrupt itself.
+- **Barge-in:** VAD onset during RESPONDING → cancel TTS + cancel the in-flight graph turn + start a new capture; AEC tuned so Jarvis doesn't interrupt itself. (Turns are already cancellable from 4.1.)
 - **Hands-free voice-approval resolver** (4.§D-4): narrow yes/no classifier gated to a live `interrupt()` → `Command(resume=…)`; explicit-affirmative safety; button still present as backup.
-- Turn-taking state machine: IDLE → LISTENING → THINKING → RESPONDING → [barge-in].
+- Turn-taking state machine: LISTENING → THINKING → RESPONDING → [barge-in].
 
-*What proves it works:* the master holds a **hands-free back-and-forth** — speaks, Jarvis answers, master **interrupts mid-sentence** and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes; first-audio latency feels conversational (~1–1.5 s).
+*What proves it works:* hands-free back-and-forth — the master speaks, Jarvis answers, the master interrupts mid-sentence and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes.
 
-#### Sub-phase 4.4 — Wake-word + FUI/HUD polish + spontaneous auto-save
+#### Sub-phase 4.4 — FUI/HUD polish + spontaneous auto-save + Mem0 recall
 *Build:*
-- **Wake-word** "Wake up Jarvis" (Porcupine WASM on-device, tab-open always-listening; native-wrapper path for true ambient noted as future-vision).
 - **Full FUI/HUD polish** (Jayse-Hansen-inspired): glassmorphism panels, audio spectrum/waveform widgets, **live system-metric widgets over SSE** (CPU/RAM, token-rate, latency, daily LLM+voice cost), orbital rings + particle systems, refined boot sequence.
 - **Spontaneous auto-save** of personal info the master mentions in passing (rides the Mem0 layer).
 - **Mem0 recall-quality fix (Turn 26.5)** ships with the voice layer.
 - **Clean hook** for detailed voice-activated commands (stub the command-intent layer; spec arrives later).
 
-*What proves it works:* the master says "Wake up Jarvis" (tab open, hands-free) and the orb wakes + listens; the full HUD shows live system metrics + an audio spectrum; the master mentions a fact in passing and it's auto-saved and recalled in a later turn; the boot sequence plays on load.
+*What proves it works:* the full HUD shows live system metrics + an audio spectrum; the master mentions a fact in passing and it's auto-saved and recalled in a later turn; the boot sequence plays on load.
 
 ---
 
