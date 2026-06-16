@@ -191,6 +191,23 @@ class ToolRegistry:
             logger.debug("dynamic_tools_selected", query_len=len(query), only_always=True, count=len(always))
             return always
 
+        # Fast-path: when there are no more rankable tools than top_k, the cosine
+        # search would return ALL of them anyway — so the query embed + pgvector
+        # search are pure latency (~210ms/turn). Skip them and return everything;
+        # tool ORDER doesn't affect whether the model calls a tool.
+        if len(rankable) <= top_k:
+            seen = {t.name for t in always}
+            merged = list(always)
+            for e in rankable:
+                if e.tool.name not in seen:
+                    merged.append(e.tool)
+                    seen.add(e.tool.name)
+            logger.debug(
+                "dynamic_tools_selected", query_len=len(query),
+                fast_path=True, always=len(always), rankable=len(rankable), total=len(merged),
+            )
+            return merged
+
         q_emb = await _embed_text(query)
         async with async_session() as session:
             # pgvector cosine distance operator (smaller = more similar).
