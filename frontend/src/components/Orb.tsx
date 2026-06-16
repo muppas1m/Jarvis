@@ -11,8 +11,8 @@ import type { AgentState } from "@/lib/types";
  *  RESPONDING pulse; idle passes none. */
 export type AmpFn = () => number;
 
-const AMBER = new THREE.Color("#ffb454");
-const CYAN = new THREE.Color("#00d4ff");
+const AMBER = new THREE.Color("#ffdbad");
+const CYAN = new THREE.Color("#1edaff");
 
 // HDR glow: materials render ABOVE 1.0 so the mipmap bloom reliably catches the
 // thin rings/core. The glow scales with per-state brightness but is FLOORED so
@@ -21,7 +21,7 @@ const HDR_RING = 2.6;
 const GLOW_FLOOR_RING = 1.55;
 const HDR_CORE = 2.3;
 const GLOW_FLOOR_CORE = 1.45;
-const DIR_FLIP_SECONDS = 1; // direction reverses this often while responding
+const DIR_FLIP_SECONDS = 2; // direction reverses this often while responding
 
 /** Per-state visual TARGETS. `anim` lerps toward these every frame (no snaps).
  *  brightness scales the HDR glow (idle = soft, responding = bright); ringScale
@@ -31,9 +31,9 @@ const STATE_CFG: Record<
   { color: THREE.Color; ringSpeed: number; breath: number; brightness: number; ringScale: number }
 > = {
   idle: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.35, breath: 0.03, brightness: 0.72, ringScale: 1.0 },
-  listening: { color: new THREE.Color("#7fe9ff"), ringSpeed: 0.6, breath: 0.05, brightness: 0.85, ringScale: 1.0 },
-  thinking: { color: new THREE.Color("#9d7bff"), ringSpeed: 1.1, breath: 0.055, brightness: 0.88, ringScale: 1.02 },
-  responding: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.85, breath: 0.09, brightness: 1.0, ringScale: 1.05 },
+  listening: { color: new THREE.Color("#7fe9ff"), ringSpeed: 0.6, breath: 0.05, brightness: 0.85, ringScale: 1.03 },
+  thinking: { color: new THREE.Color("#b8a1ff"), ringSpeed: 1.1, breath: 0.055, brightness: 0.88, ringScale: 1.07 },
+  responding: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.85, breath: 0.09, brightness: 1.0, ringScale: 1.07 },
 };
 
 interface Anim {
