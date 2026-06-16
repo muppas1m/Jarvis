@@ -1,21 +1,19 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-
-import { BuiltInKeyword } from "@picovoice/porcupine-web";
-import { usePorcupine } from "@picovoice/porcupine-react";
+import { useEffect, useRef, useState } from "react";
 
 /**
- * On-device wake-word on the name **"Jarvis"** (Porcupine built-in keyword,
- * WASM in-browser — fires on the name in any phrasing). Audio never leaves the
- * machine until "Jarvis" is heard. Gated by `enabled` (the master's toggle) and
- * the access key being present; only runs on the authenticated chat page.
+ * Server-side wake-word (Phase 4.2, openWakeWord "hey jarvis"). getUserMedia
+ * (echo-cancelled) → an AudioWorklet resamples to 16 kHz mono int16 PCM → ~80 ms
+ * frames stream over a WebSocket to the backend, which scores them and pushes a
+ * {"event":"wake"} when "hey jarvis" is heard. On wake, audio streaming pauses
+ * (so the command STT can take the mic) while `onWake` runs, then resumes.
  *
- * Cycle: on detection the hook STOPS itself (frees the mic), awaits `onWake`
- * (the capture+respond flow), then resumes listening — so Porcupine and the
- * command STT never fight over the mic.
+ * Continuous while the tab is open and only mounted on the authenticated chat
+ * page (mic gated behind the session). Auth: a short-lived JWT ticket from the
+ * BFF (no long-lived secret in the browser).
  */
-const ACCESS_KEY = process.env.NEXT_PUBLIC_PICOVOICE_ACCESS_KEY ?? "";
+const WS_BASE = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:8000";
 
 export function useWakeWord({
   enabled,
@@ -24,60 +22,113 @@ export function useWakeWord({
   enabled: boolean;
   onWake: () => Promise<void>;
 }) {
-  const { keywordDetection, isLoaded, isListening, error, init, start, stop, release } =
-    usePorcupine();
+  const [error, setError] = useState<string | null>(null);
   const onWakeRef = useRef(onWake);
   onWakeRef.current = onWake;
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const nodeRef = useRef<AudioWorkletNode | null>(null);
+  const sendingRef = useRef(true); // paused while a command is being captured
   const busyRef = useRef(false);
 
-  // Load + start when enabled and configured; release on disable/unmount.
+  const supported =
+    typeof window !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof AudioWorkletNode !== "undefined";
+
   useEffect(() => {
-    if (!enabled || !ACCESS_KEY) return;
+    if (!enabled) return;
+    if (!supported) {
+      setError("this browser can't capture mic audio");
+      return;
+    }
     let cancelled = false;
+    setError(null);
+
     (async () => {
       try {
-        await init(ACCESS_KEY, BuiltInKeyword.Jarvis, { publicPath: "/porcupine_params.pv" });
-        if (!cancelled) await start();
+        const tRes = await fetch("/api/voice/wake-ticket");
+        if (!tRes.ok) throw new Error("ticket");
+        const { ticket } = (await tRes.json()) as { ticket: string };
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+
+        const ctx = new AudioContext();
+        ctxRef.current = ctx;
+        await ctx.audioWorklet.addModule("/wake-worklet.js");
+        const src = ctx.createMediaStreamSource(stream);
+        const node = new AudioWorkletNode(ctx, "pcm-worklet");
+        nodeRef.current = node;
+        src.connect(node); // not connected to destination — we don't echo the mic
+
+        const ws = new WebSocket(
+          `${WS_BASE}/api/voice/wake?ticket=${encodeURIComponent(ticket)}`,
+        );
+        ws.binaryType = "arraybuffer";
+        wsRef.current = ws;
+
+        node.port.onmessage = (e: MessageEvent) => {
+          if (sendingRef.current && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+        };
+
+        ws.onmessage = async (ev: MessageEvent) => {
+          let msg: { event?: string };
+          try {
+            msg = JSON.parse(ev.data as string);
+          } catch {
+            return;
+          }
+          if (msg.event === "wake" && !busyRef.current) {
+            busyRef.current = true;
+            sendingRef.current = false; // free the mic for the command STT
+            try {
+              await onWakeRef.current();
+            } finally {
+              sendingRef.current = true;
+              busyRef.current = false;
+            }
+          }
+        };
+        ws.onerror = () => setError("wake-word connection failed");
       } catch {
-        /* surfaced via `error` */
+        if (!cancelled) setError("could not start the microphone");
       }
     })();
+
     return () => {
       cancelled = true;
-      void release();
+      try {
+        wsRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        nodeRef.current?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      try {
+        void ctxRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      wsRef.current = null;
+      nodeRef.current = null;
+      streamRef.current = null;
+      ctxRef.current = null;
     };
-    // init/start/release are stable from the SDK hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
-  // On "Jarvis": pause (free the mic) → run the capture flow → resume.
-  useEffect(() => {
-    if (keywordDetection === null || busyRef.current || !enabled) return;
-    busyRef.current = true;
-    (async () => {
-      try {
-        await stop();
-        await onWakeRef.current();
-      } catch {
-        /* ignore — keep listening */
-      } finally {
-        busyRef.current = false;
-        if (enabled) {
-          try {
-            await start();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keywordDetection]);
-
-  return {
-    configured: !!ACCESS_KEY,
-    isLoaded,
-    isListening,
-    error,
-  };
+  return { supported, error };
 }

@@ -93,7 +93,7 @@ export default function ChatPage() {
                 ? "border-cyan/60 bg-cyan/15 text-cyan glow"
                 : "border-ink-dim/30 hover:text-cyan"
             }`}
-            title='Continuous wake-word — say "Jarvis…"'
+            title='Continuous wake-word — say "Hey Jarvis…"'
           >
             {wakeOn ? "🎙 Wake-word on" : "🎙 Wake-word"}
           </button>
@@ -140,13 +140,15 @@ export default function ChatPage() {
           )}
           {wakeOn && (
             <div className="mt-2 font-mono text-[11px] text-ink-dim">
-              {!wake.configured
-                ? "⚠ set NEXT_PUBLIC_PICOVOICE_ACCESS_KEY to enable"
-                : !speech.supported
-                  ? "⚠ command STT needs Chrome (Web Speech API)"
-                  : listening
-                    ? "listening for your command…"
-                    : 'say "Jarvis…"'}
+              {wake.error
+                ? `⚠ ${wake.error}`
+                : !wake.supported
+                  ? "⚠ wake-word needs a mic-capable browser"
+                  : !speech.supported
+                    ? "⚠ command capture needs Chrome (Web Speech API)"
+                    : listening
+                      ? "listening for your command…"
+                      : 'say "Hey Jarvis…"'}
             </div>
           )}
         </section>
@@ -181,7 +183,7 @@ export default function ChatPage() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={wakeOn ? 'say "Jarvis…" or type…' : voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
+              placeholder={wakeOn ? 'say "Hey Jarvis…" or type…' : voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
               className="flex-1 rounded-lg border border-cyan/20 bg-black/30 px-4 py-2.5 text-sm text-ink outline-none focus:border-cyan focus:ring-1 focus:ring-cyan/40"
             />
             <button
