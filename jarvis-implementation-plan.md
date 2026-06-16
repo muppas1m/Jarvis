@@ -8006,15 +8006,26 @@ Each sub-phase is a reviewable unit with an explicit proof. Build stops at each 
 *What proves it works:* tab open, the master says "Jarvis, what's on my calendar today" hands-free → the orb wakes + listens → captures the command → the full turn runs → Jarvis speaks the answer. The voice-to-voice loop closes — **no button**.
 
 #### Sub-phase 4.3 — Full duplex + barge-in
-*Build:*
-- **Silero VAD endpointing** — robust auto end-of-turn over the 4.2 capture.
-- Streaming **partial** STT transcripts.
-- **Full-duplex** audio (mic open during TTS).
-- **Barge-in:** VAD onset during RESPONDING → cancel TTS + cancel the in-flight graph turn + start a new capture; AEC tuned so Jarvis doesn't interrupt itself. (Turns are already cancellable from 4.1.)
-- **Hands-free voice-approval resolver** (4.§D-4): narrow yes/no classifier gated to a live `interrupt()` → `Command(resume=…)`; explicit-affirmative safety; button still present as backup.
-- Turn-taking state machine: LISTENING → THINKING → RESPONDING → [barge-in].
+*Split 2026-06-15 into three reviewable sub-steps (4.3a → 4.3b → 4.3c), built and handed back one at a time. Rationale: the barge-in/continuity orchestration (4.3a), the local-STT swap (4.3b, a pinned-dep rebuild), and the voice-approval resolver (4.3c, safety-gated) are independent units with distinct risk profiles — bundling them would make one review carry three concerns.*
 
-*What proves it works:* hands-free back-and-forth — the master speaks, Jarvis answers, the master interrupts mid-sentence and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes.
+##### 4.3a — Barge-in + full-duplex + conversation continuity *(built first)*
+*Build:*
+- **VAD layer — backend Silero (openWakeWord's bundled VAD) over the existing mic→WS, "listen-for-speech" mode.** During RESPONDING the mic keeps streaming PCM to the *same* WS; a control message switches the backend from wake-scoring to VAD-scoring (`openwakeword.vad.VAD().predict(frame, 640)` — the same Silero the wake gate already uses), and it emits per-frame `speech` scores. Decision (stated, option b over the client-side `@ricky0123/vad-web` option a): this codebase already owns the mic→WS→openWakeWord pipeline, so (b) adds **zero new deps**, reuses the **already-local** Silero (option a fetches its ONNX/WASM from a CDN at runtime — a privacy + external-dependency cost for a self-hosted assistant, unless ~10 MB is vendored into `/public`), and is genuinely the **one** shared `getUserMedia` stream. The only (a) edge (built-in guard knobs) is marginal — the self-interrupt guard needs client-side playback state regardless. Localhost WS round-trip is sub-ms, so "instant" is preserved.
+- **Barge-in:** VAD onset during RESPONDING → instantly (1) stop TTS playback, (2) abort the in-flight turn (`stop()` cancels the fetch; `voice_turn` is already cancellable server-side from 4.1), (3) start capturing the new command → new turn.
+- **Self-interrupt guard (mandatory):** `echoCancellation:true` is on, but loud TTS can still leak into the mic. Don't let Jarvis barge-in on himself — require a short *sustained* speech window before triggering, ignore onsets in the first ~300 ms of playback, and raise the VAD threshold during playback. All three are **settings** (`BARGE_IN_*`).
+- **Conversation continuity:** when a turn finishes, enter an active LISTENING window (configurable ~6–8 s) where the master can speak the next command **without re-saying "hey jarvis"**; on silence-timeout, fall back to wake-word idle. Natural back-and-forth, not wake-word-per-turn.
+- **Turn-taking state machine** (pure, unit-tested headless): IDLE → LISTENING → THINKING → RESPONDING → [barge-in → LISTENING] → (continuity window) → IDLE. "Hey Jarvis" remains the cold-start trigger; drives the existing orb states.
+- *Known limit (honest):* command capture is still the Web Speech API in 4.3a — no true streaming partials, Chrome-only, and it can't run concurrently with TTS. That's exactly what 4.3b fixes.
+
+*What proves it works:* unit tests cover the cancel/state transitions headless; the master's Chrome test is the live duplex — talk over Jarvis and he stops + listens; finish a turn and speak the next command **without** "hey jarvis".
+
+##### 4.3b — Local STT (faster-whisper) *(next)*
+*Build:* replace Web Speech command capture with backend **faster-whisper** (model baked into the image, streaming partial transcripts, reusing the mic→WS pattern) — closes the cloud/Chrome dependency and the privacy gap, and unlocks the shared-stream capture 4.3a deferred. **Deps discipline:** new backend dep → pin + re-freeze `constraints.txt` + ONE controlled rebuild (verify the web pins hold).
+
+##### 4.3c — Hands-free voice-approval resolver *(next, §D-4)*
+*Build:* on `interrupt()`, Jarvis speaks the request ("Sir, shall I send it?") + the orb enters an APPROVAL-WAIT state; a narrow yes/no resolver **gated to the live interrupt** (not the full agent) maps a spoken *explicit affirmative* → `Command(resume=…)` (reuse `_resolve_gmail_approval`). Never trigger on ambient speech; re-prompt on low confidence; keep the Approve/Reject button as backup; config to force button-only for the highest-stakes actions.
+
+*What proves it works (4.3 overall):* hands-free back-and-forth — the master speaks, Jarvis answers, the master interrupts mid-sentence and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes.
 
 #### Sub-phase 4.4 — FUI/HUD polish + spontaneous auto-save + Mem0 recall
 *Build:*
