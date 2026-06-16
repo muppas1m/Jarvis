@@ -138,6 +138,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await tool_registry.index_all_tools()
     logger.info("tools_indexed", count=len(tool_registry))
 
+    # Warm the embedding model (Ollama bge-m3) so the first real turn doesn't pay
+    # the ~2.8s cold-load on memory_load (Mem0 recall + tool ranking share it).
+    # Best-effort — a warmup miss must never block boot.
+    try:
+        from app.agent.tools.registry import _embed_text
+
+        await _embed_text("warmup")
+        logger.info("embed_model_warmed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("embed_warmup_failed", error=str(exc))
+
     await _startup_model_ping(logger)
 
     # --- channels -----------------------------------------------------------
