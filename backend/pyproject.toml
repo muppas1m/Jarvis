@@ -99,6 +99,12 @@ dependencies = [
     # voice research doc rules it out as a low-cost path).
     "piper-tts>=1.4.0",
     "edge-tts>=6.1.0",
+    # Wake-word (Phase 4.2) — server-side openWakeWord on the built-in "hey
+    # jarvis" model (wheel-bundled, runs via onnxruntime). 0.4.0 fits the locked
+    # stack (0.6.0 would re-float numpy/onnxruntime). Pretrained weights are
+    # CC-BY-NC-SA (NonCommercial) — fine for personal use; a commercial build
+    # needs a self-trained model.
+    "openwakeword>=0.4.0",
 
     # Utils
     "httpx>=0.27.0",
