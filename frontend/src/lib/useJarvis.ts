@@ -4,6 +4,11 @@ import { useCallback, useRef, useState } from "react";
 
 import type { AgentState, ChatMessage, StreamEvent } from "./types";
 
+// Playback gain. Piper runs with normalize_audio=False (no buzz), which leaves
+// the JARVIS voice quiet (~-14 dBFS); this lifts it back to a clean level
+// (~1.8x → peak ≈ 11k/32767, no clipping). Tune by ear.
+const PLAYBACK_GAIN = 1.8;
+
 /**
  * Unified Jarvis turn hook — text or voice.
  *
@@ -76,8 +81,8 @@ export function useJarvis() {
     const gain = ctx.createGain();
     gain.connect(analyser);
     gain.gain.setValueAtTime(0, startAt);
-    gain.gain.linearRampToValueAtTime(1, startAt + fade);
-    gain.gain.setValueAtTime(1, Math.max(startAt + fade, startAt + dur - fade));
+    gain.gain.linearRampToValueAtTime(PLAYBACK_GAIN, startAt + fade);
+    gain.gain.setValueAtTime(PLAYBACK_GAIN, Math.max(startAt + fade, startAt + dur - fade));
     gain.gain.linearRampToValueAtTime(0, startAt + dur);
 
     const src = ctx.createBufferSource();

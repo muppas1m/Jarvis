@@ -175,6 +175,10 @@ class Settings(BaseSettings):
     PIPER_LENGTH_SCALE: float = 0.92
     PIPER_NOISE_SCALE: float | None = None
     PIPER_NOISE_W: float | None = None
+    # Piper's default normalize_audio=True peak-normalises Jarvis's quiet output
+    # up to full scale (~5x) and clips → the "buzz". False keeps it clean (~-14
+    # dBFS); the browser playback gain (useJarvis) compensates the level.
+    PIPER_NORMALIZE_AUDIO: bool = False
     EDGE_TTS_VOICE: str = "en-GB-RyanNeural"
     # Metered-voice daily cap (only bites when a cloud TTS like ElevenLabs is on).
     VOICE_DAILY_COST_CAP_USD: float = 1.00

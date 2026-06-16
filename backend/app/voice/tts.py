@@ -90,6 +90,7 @@ async def _piper(text: str) -> bytes:
             length_scale=settings.PIPER_LENGTH_SCALE,
             noise_scale=settings.PIPER_NOISE_SCALE,
             noise_w_scale=settings.PIPER_NOISE_W,
+            normalize_audio=settings.PIPER_NORMALIZE_AUDIO,
         )
         buf = io.BytesIO()
         _t = time.monotonic()
