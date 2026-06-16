@@ -15,14 +15,18 @@ function num(env: string | undefined, fallback: number): number {
 export const VAD_FRAME_MS = 80;
 
 // --- Barge-in / self-interrupt guard (active ONLY while RESPONDING) -----------
-// A VAD frame counts as "speech" at or above this score. Set HIGH on purpose:
-// echoCancellation is on, but Jarvis's own TTS can still leak into the mic and
-// we must not let him barge-in on himself. (Empirically: silence ≈ 0.02, random
-// noise ≈ 0.03, real speech ≈ 0.7+.)
-export const BARGE_IN_THRESHOLD = num(process.env.NEXT_PUBLIC_BARGE_IN_THRESHOLD, 0.6);
+// A VAD frame counts as "speech" at or above this score. The PRIMARY guard
+// against Jarvis barging in on himself is echoCancellation (AEC) — the live test
+// showed no self-cutoff even at 0.6/220 ms, so AEC, not this threshold, carries
+// it. These values are therefore tuned for *responsiveness*, with a wide margin
+// still intact (silence ≈ 0.02, noise ≈ 0.03, real speech ≈ 0.7+). 0.5 catches
+// the onset ramp a frame sooner. If AEC ever lets a self-trigger through, nudge
+// back toward ~0.55 / ~140 ms.
+export const BARGE_IN_THRESHOLD = num(process.env.NEXT_PUBLIC_BARGE_IN_THRESHOLD, 0.5);
 // Require this much *sustained* speech before triggering — rejects a single
-// leaked spike. ~3 frames at 80 ms.
-export const BARGE_IN_SUSTAIN_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_SUSTAIN_MS, 220);
+// leaked spike. ceil(100/80) = 2 frames @ 80 ms, so it fires ~1 frame into clear
+// speech (down from ~3) → stops after ~1 word + clips fewer leading words.
+export const BARGE_IN_SUSTAIN_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_SUSTAIN_MS, 100);
 // Ignore onsets in the first N ms of playback (the gain ramp + the loud TTS
 // onset are the most likely self-trigger).
 export const BARGE_IN_IGNORE_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_IGNORE_MS, 300);
