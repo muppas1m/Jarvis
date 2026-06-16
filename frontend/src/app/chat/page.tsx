@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -8,9 +8,7 @@ import { signOut } from "next-auth/react";
 
 import { BootSequence } from "@/components/BootSequence";
 import { clearBootPending } from "@/lib/boot";
-import { useJarvis } from "@/lib/useJarvis";
-import { useSpeechInput } from "@/lib/useSpeechInput";
-import { useWakeWord } from "@/lib/useWakeWord";
+import { useVoiceLoop } from "@/lib/useVoiceLoop";
 
 // Client-only — Three.js must not run during SSR (Next 16: ssr:false is only
 // allowed inside a Client Component, which this page is).
@@ -27,37 +25,23 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 export default function ChatPage() {
-  const {
-    messages,
-    agentState,
-    caption,
-    voiceEnabled,
-    setVoiceEnabled,
-    needsApproval,
-    getAmplitude,
-    send,
-  } = useJarvis();
   const [input, setInput] = useState("");
   const [wakeOn, setWakeOn] = useState(false);
-  const [listening, setListening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const speech = useSpeechInput();
-
-  // "Jarvis" fired → capture the command → run it (spoken response).
-  const onWake = useCallback(async () => {
-    setListening(true);
-    try {
-      const transcript = await speech.capture();
-      if (transcript.trim()) send(transcript);
-    } catch {
-      /* keep listening */
-    } finally {
-      setListening(false);
-    }
-  }, [speech, send]);
-
-  const wake = useWakeWord({ enabled: wakeOn, onWake });
+  // Full-duplex voice loop (4.3a): wake → capture → turn → barge-in → continuity.
+  // Owns the turn, the orb state, and the wake-word transport.
+  const {
+    messages,
+    caption,
+    needsApproval,
+    voiceEnabled,
+    setVoiceEnabled,
+    getAmplitude,
+    send,
+    orbState,
+    statusLabel,
+  } = useVoiceLoop({ enabled: wakeOn });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -71,12 +55,9 @@ export default function ChatPage() {
   }
 
   function toggleWake() {
-    const next = !wakeOn;
-    setWakeOn(next);
-    if (next) setVoiceEnabled(true); // wake-word implies spoken responses
+    setWakeOn((on) => !on); // the loop flips voiceEnabled on when enabled
   }
 
-  const orbState = listening ? "listening" : agentState;
   const voiceActive = voiceEnabled || wakeOn;
 
   return (
@@ -151,17 +132,7 @@ export default function ChatPage() {
               <div className="max-w-[90%] text-sm text-ink glow">{caption}</div>
             )}
             {wakeOn && (
-              <div className="font-mono text-[11px] text-ink-dim">
-                {wake.error
-                  ? `⚠ ${wake.error}`
-                  : !wake.supported
-                    ? "⚠ wake-word needs a mic-capable browser"
-                    : !speech.supported
-                      ? "⚠ command capture needs Chrome (Web Speech API)"
-                      : listening
-                        ? "listening for your command…"
-                        : 'say "Hey Jarvis…"'}
-              </div>
+              <div className="font-mono text-[11px] text-ink-dim">{statusLabel}</div>
             )}
           </div>
         </section>

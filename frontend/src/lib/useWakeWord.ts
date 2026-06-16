@@ -3,41 +3,65 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * Server-side wake-word (Phase 4.2, openWakeWord "hey jarvis"). getUserMedia
- * (echo-cancelled) → an AudioWorklet resamples to 16 kHz mono int16 PCM → ~80 ms
- * frames stream over a WebSocket to the backend, which scores them and pushes a
- * {"event":"wake"} when "hey jarvis" is heard. On wake, audio streaming pauses
- * (so the command STT can take the mic) while `onWake` runs, then resumes.
+ * The voice-in transport (Phase 4.2 wake-word + 4.3a barge-in). ONE
+ * `getUserMedia` → an AudioWorklet resamples to 16 kHz mono int16 PCM → ~80 ms
+ * frames stream over ONE WebSocket. What the backend scores is controlled by the
+ * `mode` prop (a control message is sent on change):
  *
- * Continuous while the tab is open and only mounted on the authenticated chat
- * page (mic gated behind the session). Auth: a short-lived JWT ticket from the
- * BFF (no long-lived secret in the browser).
+ *   - "wake"   — backend scores openWakeWord "hey jarvis"; fires `onWake`.
+ *   - "vad"    — backend scores Silero VAD (used while Jarvis is RESPONDING);
+ *                fires `onSpeech(score)` per frame so the loop can barge-in.
+ *   - "paused" — stop sending PCM (a command capture has the mic); the WS stays
+ *                open so we never re-handshake mid-conversation.
+ *
+ * One stream, one socket, two scorers — no second `getUserMedia`. Continuous
+ * while the tab is open and only mounted on the authenticated chat page (mic
+ * gated behind the session). Auth: a short-lived JWT ticket from the BFF.
  */
+export type WakeMode = "wake" | "vad" | "paused";
+
 const WS_BASE = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:8000";
 
 export function useWakeWord({
   enabled,
+  mode,
   onWake,
+  onSpeech,
 }: {
   enabled: boolean;
-  onWake: () => Promise<void>;
+  mode: WakeMode;
+  onWake: () => void;
+  onSpeech: (score: number) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const onWakeRef = useRef(onWake);
   onWakeRef.current = onWake;
+  const onSpeechRef = useRef(onSpeech);
+  onSpeechRef.current = onSpeech;
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nodeRef = useRef<AudioWorkletNode | null>(null);
-  const sendingRef = useRef(true); // paused while a command is being captured
-  const busyRef = useRef(false);
+  const modeRef = useRef<WakeMode>(mode);
+  const sendingRef = useRef(mode !== "paused");
 
   const supported =
     typeof window !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia &&
     typeof AudioWorkletNode !== "undefined";
 
+  // Declare the active scorer mode to the backend (no-op while paused or before
+  // the socket opens). Reads refs only, so it's safe from any closure.
+  const syncMode = useRef(() => {
+    const ws = wsRef.current;
+    sendingRef.current = modeRef.current !== "paused";
+    if (ws && ws.readyState === WebSocket.OPEN && modeRef.current !== "paused") {
+      ws.send(JSON.stringify({ mode: modeRef.current }));
+    }
+  });
+
+  // --- Transport: stream + socket, set up once per `enabled` ------------------
   useEffect(() => {
     if (!enabled) return;
     if (!supported) {
@@ -62,9 +86,9 @@ export function useWakeWord({
         }
         streamRef.current = stream;
 
-        // Request a 16 kHz context so the browser resamples the mic with proper
-        // anti-aliasing (the worklet then just buffers — no crude decimation).
-        // Some browsers ignore the rate; the worklet handles either case.
+        // 16 kHz context so the browser resamples with proper anti-aliasing (the
+        // worklet then just buffers + int16-converts). Some browsers ignore the
+        // rate; the worklet handles either case.
         let ctx: AudioContext;
         try {
           ctx = new AudioContext({ sampleRate: 16000 });
@@ -88,23 +112,16 @@ export function useWakeWord({
           if (sendingRef.current && ws.readyState === WebSocket.OPEN) ws.send(e.data);
         };
 
-        ws.onmessage = async (ev: MessageEvent) => {
-          let msg: { event?: string };
+        ws.onopen = () => syncMode.current(); // declare the starting mode
+        ws.onmessage = (ev: MessageEvent) => {
+          let msg: { event?: string; score?: number };
           try {
             msg = JSON.parse(ev.data as string);
           } catch {
             return;
           }
-          if (msg.event === "wake" && !busyRef.current) {
-            busyRef.current = true;
-            sendingRef.current = false; // free the mic for the command STT
-            try {
-              await onWakeRef.current();
-            } finally {
-              sendingRef.current = true;
-              busyRef.current = false;
-            }
-          }
+          if (msg.event === "wake") onWakeRef.current();
+          else if (msg.event === "speech") onSpeechRef.current(msg.score ?? 0);
         };
         ws.onerror = () => setError("wake-word connection failed");
       } catch {
@@ -137,6 +154,12 @@ export function useWakeWord({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
+
+  // --- Mode changes: switch the backend scorer (or pause the PCM) -------------
+  useEffect(() => {
+    modeRef.current = mode;
+    syncMode.current();
+  }, [mode]);
 
   return { supported, error };
 }
