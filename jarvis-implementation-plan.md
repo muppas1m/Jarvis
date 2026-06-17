@@ -8029,11 +8029,21 @@ Each sub-phase is a reviewable unit with an explicit proof. Build stops at each 
 
 *What proves it works (4.3 overall):* hands-free back-and-forth — the master speaks, Jarvis answers, the master interrupts mid-sentence and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes.
 
+#### Sub-phase 4.A — Dashboard UX foundation *(active forward track, post voice-rewind 2026-06-17)*
+
+The voice loop is parked at the `23ae86d` baseline (commit-rewind result — see memory `project_voice_rewind_landing_candidate.md`); forward work resumes on the **dashboard UX foundation** — the chat surface a frontier assistant (Claude Projects, ChatGPT) ships *before* polish. Built in three testable pieces (A1 → A2 → A3), each committed + master-tested before the next. **Does not touch the parked voice wedge**; A2's voice path *rides* the baseline with the text path as the always-solid fallback.
+
+- **A1 — Chat persistence + auto-save.** The conversation must survive a page reload and navigation to/from the Approvals view. The backend already persists every turn (LangGraph checkpointer, per `thread_id`); the gap is purely frontend. Persist `thread_id` in `localStorage` so reload resumes the same conversation; add a read-only backend history endpoint (`GET /api/chat/history`, reusing `runner._serialize_message`) and replay it on mount via the BFF (server-side `X-API-Key`, like the other proxied routes).
+- **A2 — Inline approvals (text + voice).** Move approvals into the chat instead of the separate panel. **Text path first** (always-reliable fallback): an inline approval *card* (action + human summary + Approve/Reject) wired to the existing `POST /api/approvals/{id}/decide`, resuming the turn in place + showing the result; enrich `approval_required` to carry the approval id + readable summary if needed. **Voice path** layered on the parked voice baseline: a NARROW yes/no resolver gated to the *live* approval only (never ambient speech) — explicit spoken affirmative ("approve" / "yes, send it") → approve, negative ("reject" / "no" / "cancel") → reject; re-prompt on low confidence; button always available; button-only for the highest-stakes actions. **This folds in the deferred 4.3c voice-approval resolver** (§D-4) — the resolver lands here, scoped to a short yes/no so wedge-risk stays low.
+- **A3 — In-chat document upload.** Upload affordance (button + drag-drop) in the chat input → existing `POST /api/documents/upload` (dedup + streaming read) via the BFF → inline ingestion status (uploading → ingesting → done, with dedup/replaced + chunk count, error + large-file handling) → ask-about-it works in the same thread.
+
+*What proves it works:* reload mid-conversation and the history is intact; navigate to Approvals and back and it persists; trigger an approval and resolve it inline by button AND by voice; drag a PDF into the chat and then ask Jarvis about its contents — all without leaving the chat.
+
 #### Sub-phase 4.4 — FUI/HUD polish + spontaneous auto-save + Mem0 recall
 *Build:*
-- **Full FUI/HUD polish** (Jayse-Hansen-inspired): glassmorphism panels, audio spectrum/waveform widgets, **live system-metric widgets over SSE** (CPU/RAM, token-rate, latency, daily LLM+voice cost), orbital rings + particle systems, refined boot sequence.
-- **Spontaneous auto-save** of personal info the master mentions in passing (rides the Mem0 layer).
-- **Mem0 recall-quality fix (Turn 26.5)** ships with the voice layer.
+- **(C) Full FUI/HUD polish** (Jayse-Hansen-inspired): glassmorphism panels, audio spectrum/waveform widgets, **live system-metric widgets over SSE** (CPU/RAM, token-rate, latency, daily LLM+voice cost), orbital rings + particle systems, refined boot sequence. *Placeholder: the master's detailed widget specifics are forthcoming; this bullet is the stand-in HUD spec until those land — build to it only after they arrive.*
+- **(B) Spontaneous auto-save** of the master's personal info **+ preferences** mentioned in passing — about-me facts, likes/dislikes — to memory (rides the Mem0 layer).
+- **(B) Mem0 recall/quality lift (Turn 26.5)** ships with the voice layer — pairs with the auto-save above so what's saved is reliably recalled.
 - **Clean hook** for detailed voice-activated commands (stub the command-intent layer; spec arrives later).
 
 *What proves it works:* the full HUD shows live system metrics + an audio spectrum; the master mentions a fact in passing and it's auto-saved and recalled in a later turn; the boot sequence plays on load.
