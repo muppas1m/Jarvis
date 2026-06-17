@@ -31,7 +31,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+)
 from langgraph.types import Command
 
 from app.agent.graph import build_graph
@@ -114,6 +120,10 @@ async def run_turn(
     if await _is_awaiting_approval(thread_id):
         logger.info("run_turn_blocked_pending_interrupt", thread_id=thread_id)
         return _pending_interrupt_envelope(thread_id)
+
+    # Clean any barge-in / send-over cancellation residue (dirty state.next +
+    # orphaned tool_call) so this fresh turn starts on a consistent thread.
+    await _recover_cancellation_residue(thread_id)
 
     # Snapshot existing message count so we can slice "this turn's" messages
     # out of the post-invoke state. Cheaper and more reliable than timestamp-
@@ -242,6 +252,7 @@ async def stream_turn(
         yield {"type": "done", "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
         return
 
+    await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
     initial_state = {
         "messages": [HumanMessage(content=user_message)],
@@ -416,6 +427,7 @@ async def voice_turn(
         yield {"type": "done", "content": _terminal_payload(env)}
         return
 
+    await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
     initial_state = {
         "messages": [HumanMessage(content=user_message)],
@@ -573,23 +585,84 @@ async def _existing_message_count(thread_id: str) -> int:
     return len(state.values.get("messages") or [])
 
 
-async def _is_awaiting_approval(thread_id: str) -> bool:
-    """True if the thread is paused at an interrupt (an unresolved approval).
+def _collect_interrupts(state: Any) -> list:
+    """The REAL interrupt payloads on a paused graph — ``task.interrupts``, the
+    same signal `_build_envelope` surfaces. A non-empty ``state.next`` alone is
+    NOT enough: a barge-in / send-over cancels the graph mid-step and leaves
+    ``state.next`` dirty with NO interrupt (cancellation residue). Only a genuine
+    ``interrupt()`` pause (an approval) populates ``task.interrupts``."""
+    if not (state and getattr(state, "next", None)):
+        return []
+    interrupts: list = []
+    for task in getattr(state, "tasks", []) or []:
+        interrupts.extend(getattr(task, "interrupts", None) or [])
+    return interrupts
 
-    A non-empty ``state.next`` means the graph stopped mid-step waiting on
-    ``Command(resume=...)`` — the same signal `_build_envelope` uses to surface
-    an interrupt payload. A fresh `run_turn` here would orphan the pending
-    tool_call, so the caller routes to the nudge instead. Fail-open (return
-    False) on any state-read error: never block a normal turn because the
-    checkpoint read hiccuped."""
+
+async def _is_awaiting_approval(thread_id: str) -> bool:
+    """True only if the thread is genuinely paused at an ``interrupt()`` (an
+    unresolved approval), i.e. there's a real ``task.interrupts``.
+
+    NOT merely a non-empty ``state.next`` — a barge-in cancels the graph mid-step
+    and leaves ``state.next`` dirty with no interrupt, which the old check
+    false-positived into a phantom "approval waiting" nudge (empty Approvals
+    screen). Cancellation residue is handled by `_recover_cancellation_residue`,
+    not here. Fail-open (return False) on any state-read error: never block a
+    normal turn because the checkpoint read hiccuped."""
     config = {"configurable": {"thread_id": thread_id}}
     try:
         state = await graph().aget_state(config)
     except Exception:  # noqa: BLE001
         return False
-    # getattr-defensive: a StateSnapshot always has .next, but never block a
-    # normal turn if some state shape lacks it.
-    return bool(state and getattr(state, "next", None))
+    return bool(_collect_interrupts(state))
+
+
+async def _recover_cancellation_residue(thread_id: str) -> None:
+    """Clean barge-in / send-over residue BEFORE a fresh turn starts.
+
+    Cancelling the graph mid-step (e.g. while a tool was pending) leaves a
+    non-empty ``state.next`` with NO interrupt and, if it died mid-tool, an
+    orphaned ``AIMessage`` tool_call (no matching ``ToolMessage``) — which would
+    poison the next LLM call (provider 400s the whole thread) and/or double-run
+    the cancelled tool. Drop the orphaned tool_call messages and advance the
+    pending step to END (``as_node="persist"``) so the thread starts clean.
+
+    No-op when the thread is already clean OR genuinely paused at an approval
+    interrupt (that's left intact for its Approve/Reject buttons)."""
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = await graph().aget_state(config)
+    except Exception:  # noqa: BLE001
+        return
+    if not (state and getattr(state, "next", None)):
+        return  # clean
+    if _collect_interrupts(state):
+        return  # genuine approval pause — don't touch it
+    msgs = (state.values or {}).get("messages", []) if state.values else []
+    answered = {m.tool_call_id for m in msgs if isinstance(m, ToolMessage)}
+    orphans = [
+        m.id
+        for m in msgs
+        if isinstance(m, AIMessage)
+        and m.tool_calls
+        and any(tc.get("id") not in answered for tc in m.tool_calls)
+    ]
+    try:
+        # Empty RemoveMessage list is fine — as_node="persist" still advances the
+        # dirty pending step to END, clearing a residue with no orphan too.
+        await graph().aupdate_state(
+            config,
+            {"messages": [RemoveMessage(id=i) for i in orphans]},
+            as_node="persist",
+        )
+        logger.info(
+            "recovered_cancellation_residue",
+            thread_id=thread_id,
+            dropped_orphans=len(orphans),
+            was_next=str(state.next),
+        )
+    except Exception as exc:  # noqa: BLE001 — recovery is best-effort, never fatal
+        logger.warning("cancellation_recovery_failed", thread_id=thread_id, error=str(exc))
 
 
 def _error_envelope(
@@ -639,9 +712,10 @@ async def _build_envelope(
 ) -> dict[str, Any]:
     """Assemble the standard TurnEnvelope from a graph invoke result.
 
-    Detects fresh interrupts by querying graph.aget_state — if state.next
-    is non-empty the graph paused mid-step and we surface the interrupt
-    payload. Otherwise the turn is complete (or last-resort error)."""
+    Detects fresh interrupts by querying graph.aget_state — a real
+    ``task.interrupts`` (not merely a non-empty state.next) means the graph
+    paused on an approval and we surface the interrupt payload. Otherwise the
+    turn is complete (or last-resort error)."""
     state = await graph().aget_state(config)
     all_messages: list[BaseMessage] = result.get("messages") or []
     new_messages = all_messages[msgs_before:]
@@ -649,23 +723,20 @@ async def _build_envelope(
     usage = _aggregate_usage(new_messages, duration_ms)
     trace_id = _safe_trace_id(handler)
 
-    if state and state.next:
-        interrupts = []
-        for task in state.tasks:
-            interrupts.extend(getattr(task, "interrupts", []) or [])
-        if interrupts:
-            first = interrupts[0]
-            payload = first.value if hasattr(first, "value") else dict(first)
-            return {
-                "thread_id": thread_id,
-                "status": "interrupted",
-                "stop_reason": "interrupted",
-                "response": "",
-                "messages": serialized,
-                "interrupt": payload,
-                "trace_id": trace_id,
-                "usage": usage,
-            }
+    interrupts = _collect_interrupts(state)
+    if interrupts:
+        first = interrupts[0]
+        payload = first.value if hasattr(first, "value") else dict(first)
+        return {
+            "thread_id": thread_id,
+            "status": "interrupted",
+            "stop_reason": "interrupted",
+            "response": "",
+            "messages": serialized,
+            "interrupt": payload,
+            "trace_id": trace_id,
+            "usage": usage,
+        }
 
     return {
         "thread_id": thread_id,
