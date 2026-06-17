@@ -8025,6 +8025,7 @@ Each sub-phase is a reviewable unit with an explicit proof. Build stops at each 
 
 ##### 4.3c — Hands-free voice-approval resolver *(next, §D-4)*
 *Build:* on `interrupt()`, Jarvis speaks the request ("Sir, shall I send it?") + the orb enters an APPROVAL-WAIT state; a narrow yes/no resolver **gated to the live interrupt** (not the full agent) maps a spoken *explicit affirmative* → `Command(resume=…)` (reuse `_resolve_gmail_approval`). Never trigger on ambient speech; re-prompt on low confidence; keep the Approve/Reject button as backup; config to force button-only for the highest-stakes actions.
+*Also fold in (barge-in tuning, observed 2026-06-16):* the master saw occasional **false barge-in on room noise** at the 0.5/100 VAD guard. Now that whisper (4.3b) is in place, the clean fix is to **require a non-empty transcript to confirm a barge-in** — VAD onset still *starts* the capture, but only actually interrupt (cancel TTS/turn) once whisper returns real words. Weigh the stop-fast-vs-confirm-first latency tradeoff.
 
 *What proves it works (4.3 overall):* hands-free back-and-forth — the master speaks, Jarvis answers, the master interrupts mid-sentence and Jarvis stops and listens; an APPROVE action ("send the email") is confirmed **by voice** ("yes, send it") and the turn resumes + executes.
 
