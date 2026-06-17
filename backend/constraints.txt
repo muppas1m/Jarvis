@@ -9,6 +9,7 @@ anyio==4.13.0
 ast_serialize==0.5.0
 asyncpg==0.31.0
 attrs==26.1.0
+av==17.1.0
 backoff==2.2.1
 billiard==4.2.4
 cachetools==7.1.4
@@ -22,6 +23,7 @@ click-repl==0.3.0
 click==8.4.1
 coverage==7.14.1
 cryptography==46.0.7
+ctranslate2==4.8.0
 cuda-bindings==13.3.1
 cuda-pathfinder==1.5.5
 cuda-toolkit==13.0.2
@@ -30,6 +32,7 @@ ecdsa==0.19.2
 edge-tts==7.2.8
 et_xmlfile==2.0.0
 fastapi==0.137.1
+faster-whisper==1.2.1
 fastuuid==0.14.0
 filelock==3.29.4
 flatbuffers==25.12.19

@@ -165,6 +165,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     asyncio.create_task(_warm_reranker())
 
+    # Warm the faster-whisper command-STT model in the BACKGROUND too (same lesson
+    # as the reranker: a runtime model download must never block boot or be hit
+    # inline on the first capture). Model lands in the persisted hf_cache volume.
+    async def _warm_whisper() -> None:
+        try:
+            from app.voice.transcribe import get_whisper
+
+            await asyncio.to_thread(get_whisper)
+            logger.info("whisper_warmed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("whisper_warmup_failed", error=str(exc))
+
+    asyncio.create_task(_warm_whisper())
+
     await _startup_model_ping(logger)
 
     # --- channels -----------------------------------------------------------

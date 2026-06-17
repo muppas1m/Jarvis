@@ -201,6 +201,30 @@ class Settings(BaseSettings):
     WAKE_THRESHOLD: float = 0.35
     WAKE_VAD_THRESHOLD: float = 0.2
 
+    # Local command STT (Phase 4.3b — faster-whisper, replaces browser Web Speech).
+    # The same mic→WS stream feeds a server-side whisper in "capture" mode. A small
+    # CPU model keeps latency low; int8 compute is the fast CPU path. The model
+    # downloads to the HF cache (persisted in the hf_cache volume) and is warmed at
+    # startup (background), so the first capture never pays the load.
+    WHISPER_MODEL: str = "base.en"          # base.en/small.en; base.en = lower CPU latency
+    WHISPER_DEVICE: str = "cpu"
+    WHISPER_COMPUTE_TYPE: str = "int8"      # int8 = fastest on CPU; float32 = most accurate
+    WHISPER_BEAM_SIZE: int = 1              # greedy — lowest latency; raise for accuracy
+    # Bound CTranslate2's intra-op threads so one transcription can't grab every
+    # core and starve the event loop (or contend with the reranker's torch threads).
+    WHISPER_CPU_THREADS: int = 4
+    # Bound transcription so a slow/stuck model DEGRADES the turn ("I didn't catch
+    # that, Sir") instead of hanging it — same lesson as RERANK_TIMEOUT_S.
+    WHISPER_TIMEOUT_S: int = 15
+    # Capture endpointing (Silero VAD owns the listening window — no more Web
+    # Speech premature no-speech idle-drop). Speech ends after this much trailing
+    # silence; a hard cap bounds a runaway utterance; the pre-roll buffer keeps the
+    # onset (the first word of a barge-in command) from being clipped.
+    CAPTURE_VAD_THRESHOLD: float = 0.3      # frame VAD score above this = speech
+    CAPTURE_SILENCE_HANGOVER_MS: int = 700  # trailing silence that finalizes a transcript
+    CAPTURE_MAX_MS: int = 15000             # hard cap on one utterance
+    CAPTURE_PREROLL_MS: int = 400           # rolling onset buffer prepended to the capture
+
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72
     AUTO_APPROVE_REPLY_MAX_WORDS: int = 80

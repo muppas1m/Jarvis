@@ -105,6 +105,13 @@ dependencies = [
     # CC-BY-NC-SA (NonCommercial) — fine for personal use; a commercial build
     # needs a self-trained model.
     "openwakeword>=0.4.0",
+    # Local command STT (Phase 4.3b) — faster-whisper (CTranslate2) replaces the
+    # browser Web Speech API: server-side, browser-agnostic (Web Speech is
+    # blocked in Brave), no cloud dependency. Small CPU model (base.en); the
+    # CTranslate2 model downloads to the HF cache (persisted in the hf_cache
+    # volume) and is warmed at startup. ctranslate2 + av are its new native deps;
+    # exact versions pinned in constraints.txt (the 6 web pins must hold).
+    "faster-whisper>=1.1.0",
 
     # Utils
     "httpx>=0.27.0",
