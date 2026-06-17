@@ -222,8 +222,15 @@ class Settings(BaseSettings):
     # onset (the first word of a barge-in command) from being clipped.
     CAPTURE_VAD_THRESHOLD: float = 0.3      # frame VAD score above this = speech
     CAPTURE_SILENCE_HANGOVER_MS: int = 700  # trailing silence that finalizes a transcript
-    CAPTURE_MAX_MS: int = 15000             # hard cap on one utterance
+    CAPTURE_MAX_MS: int = 15000             # hard cap on one utterance (prolonged speech)
     CAPTURE_PREROLL_MS: int = 400           # rolling onset buffer prepended to the capture
+    # No-speech timeout: if NO speech onset arrives within this of a capture
+    # starting, emit an empty transcript so the client idles back to wake-word.
+    # The backend owns this (not a frontend wall-clock that's blind to mid-speech)
+    # — once speech HAS started, the hangover + CAPTURE_MAX_MS own finalization, so
+    # a long command is captured, never dropped. The frontend window is only a
+    # generous safety backstop above CAPTURE_MAX_MS.
+    CAPTURE_NO_SPEECH_MS: int = 7000
 
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72

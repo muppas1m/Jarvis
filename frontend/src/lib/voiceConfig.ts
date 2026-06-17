@@ -31,10 +31,12 @@ export const BARGE_IN_SUSTAIN_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_SUSTAIN_
 // onset are the most likely self-trigger).
 export const BARGE_IN_IGNORE_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_IGNORE_MS, 300);
 
-// --- Conversation continuity -------------------------------------------------
-// After a turn finishes, listen this long for the next command WITHOUT a fresh
-// "hey jarvis"; silence past it falls back to wake-word idle.
-export const CONTINUITY_WINDOW_MS = num(process.env.NEXT_PUBLIC_CONTINUITY_WINDOW_MS, 7000);
-// Backstop wall-clock for a single post-wake command capture (over Web Speech's
-// own silence endpointing, so a stuck recogniser can't pin the mic open).
-export const LISTEN_WINDOW_MS = num(process.env.NEXT_PUBLIC_LISTEN_WINDOW_MS, 9000);
+// --- Capture windows (SAFETY BACKSTOPS only — the backend owns endpointing) --
+// The backend (Silero VAD) now decides when a capture ends: no speech onset
+// within CAPTURE_NO_SPEECH_MS (~7s) → it emits an empty transcript and we idle;
+// once speech starts, its hangover + CAPTURE_MAX_MS (15s) finalize even a long
+// command. These wall-clocks are a last-resort backstop only — generous (≥
+// CAPTURE_MAX_MS + transcribe margin) so they fire only if the backend goes
+// silent, never racing real speech.
+export const CONTINUITY_WINDOW_MS = num(process.env.NEXT_PUBLIC_CONTINUITY_WINDOW_MS, 18000);
+export const LISTEN_WINDOW_MS = num(process.env.NEXT_PUBLIC_LISTEN_WINDOW_MS, 18000);

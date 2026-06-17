@@ -22,8 +22,8 @@ export type VoicePhase = "idle" | "listening" | "thinking" | "responding" | "con
 
 export type VoiceEvent =
   | { type: "WAKE" } // "hey jarvis" heard
-  | { type: "CAPTURE_RESULT"; transcript: string } // Web Speech returned a command
-  | { type: "CAPTURE_EMPTY" } // silence / timeout / aborted capture
+  | { type: "CAPTURE_RESULT"; transcript: string } // backend whisper transcript (a command)
+  | { type: "CAPTURE_EMPTY" } // backend no-speech signal / window backstop / disabled
   | { type: "TURN_RESPONDING" } // audio started playing
   | { type: "TURN_DONE" } // turn finished, audio drained
   | { type: "BARGE_IN" } // sustained speech detected during playback

@@ -81,14 +81,19 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
   );
 
   // Whisper transcript from the capture-mode WS → start the turn. Honoured only
-  // in a capture phase; an empty transcript is ignored (the window timer bounds
-  // the wait → CAPTURE_EMPTY → idle if nothing intelligible ever arrives).
+  // in a capture phase. A non-empty transcript starts the turn; an EMPTY one is
+  // the backend's "no speech / unintelligible within the window" signal → idle
+  // (the backend owns endpointing now, so this is the authoritative end-of-listen,
+  // not a fixed frontend wall-clock that was blind to mid-speech — Bug 3 fix).
   const handleTranscript = useCallback(
     (text: string) => {
       const p = phaseRef.current;
-      if ((p === "listening" || p === "continuity") && text.trim()) {
+      if (p !== "listening" && p !== "continuity") return;
+      if (text.trim()) {
         dispatch({ type: "CAPTURE_RESULT", transcript: text });
         jarvis.send(text);
+      } else {
+        dispatch({ type: "CAPTURE_EMPTY" });
       }
     },
     [jarvis.send],
@@ -120,10 +125,10 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     bargingRef.current = false;
   }, [phase]);
 
-  // Capture window: in a capture phase the WS streams PCM and the backend
-  // transcribes on end-of-speech → handleTranscript. This timer only BOUNDS the
-  // wait so a silent window falls back to idle — the VAD owns endpointing, not
-  // this timer (no Web Speech premature self-termination to fight anymore).
+  // Capture window: in a capture phase the WS streams PCM and the backend owns
+  // endpointing (transcript OR an empty "no-speech" signal → handleTranscript).
+  // This timer is only a SAFETY BACKSTOP (≥ CAPTURE_MAX_MS + margin) for a backend
+  // that goes silent — it must NOT race real speech, so it's generous.
   useEffect(() => {
     if (phase !== "listening" && phase !== "continuity") return;
     const windowMs = phase === "continuity" ? CONTINUITY_WINDOW_MS : LISTEN_WINDOW_MS;

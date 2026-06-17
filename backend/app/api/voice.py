@@ -121,6 +121,8 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
         max_frames=_frames(settings.CAPTURE_MAX_MS),
     )
     cap_threshold = settings.CAPTURE_VAD_THRESHOLD
+    no_speech_frames = _frames(settings.CAPTURE_NO_SPEECH_MS)
+    no_onset_frames = 0  # frames since capture began with no speech onset yet
 
     async def _emit_transcript(pcm: np.ndarray) -> None:
         """Transcribe a finalized utterance off the loop, BOUNDED — a slow/stuck
@@ -163,6 +165,7 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
                     if mode != "vad":
                         vad.reset_states()
                         endpointer.reset()
+                    no_onset_frames = 0  # restart the no-speech timer for this capture
                 elif new_mode == "wake":
                     model.reset()  # drop stale wake state on the way back in
                     endpointer.reset()
@@ -193,6 +196,17 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
                     utterance = endpointer.push(audio, score > cap_threshold)
                     if utterance is not None:
                         await _emit_transcript(utterance)
+                        no_onset_frames = 0
+                    elif endpointer.capturing:
+                        no_onset_frames = 0  # speech started → no-speech timer off;
+                        #                       hangover + CAPTURE_MAX own finalization
+                    else:
+                        # No onset yet — idle the client if it stays silent too long.
+                        no_onset_frames += 1
+                        if no_onset_frames >= no_speech_frames:
+                            await websocket.send_json({"event": "transcript", "text": ""})
+                            no_onset_frames = 0
+                            endpointer.reset()
             except Exception as exc:  # noqa: BLE001 — one bad frame never kills the stream
                 logger.warning("wake_ws_frame_error", error=str(exc), mode=mode)
                 continue
