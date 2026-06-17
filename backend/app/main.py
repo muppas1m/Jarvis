@@ -149,6 +149,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("embed_warmup_failed", error=str(exc))
 
+    # Warm the cross-encoder reranker in the BACKGROUND — do NOT await it: the
+    # first load can pull a multi-GB model, and blocking boot on that (or worse,
+    # hitting it inline on the first document search) is exactly what wedged the
+    # backend. By the time a search runs it's loaded, so rerank is sub-second and
+    # the RERANK_TIMEOUT_S guard never bites in steady state. Best-effort.
+    async def _warm_reranker() -> None:
+        try:
+            from app.documents.reranker import _get_reranker
+
+            await asyncio.to_thread(_get_reranker)
+            logger.info("reranker_warmed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reranker_warmup_failed", error=str(exc))
+
+    asyncio.create_task(_warm_reranker())
+
     await _startup_model_ping(logger)
 
     # --- channels -----------------------------------------------------------

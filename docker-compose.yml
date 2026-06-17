@@ -26,6 +26,10 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # Persist HuggingFace model cache (the ~2.3GB bge-reranker-v2-m3) across
+      # container recreates. Without this it lived in the ephemeral layer and was
+      # re-downloaded on every recreate — a stalled re-download wedged the backend.
+      - hf_cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
     # NOTE: until app/main.py exists in a later turn the container crashes on
@@ -333,6 +337,7 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: changeme_dev_only
 
 volumes:
+  hf_cache:
   postgres_data:
   redis_data:
   celery_beat_data:

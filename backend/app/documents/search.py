@@ -123,15 +123,37 @@ async def search_documents(
     fused_pool = _rrf_fuse(vector_hits, bm25_hits, settings.RAG_RRF_K, candidate_pool)
 
     # --- precision stage: cross-encoder scores every fused candidate ---
-    # Off the event loop: rerank() is sync CPU (CrossEncoder.predict) and the
-    # first call lazy-loads the ~30s model — running it inline froze the agent
-    # loop / webhook. asyncio.to_thread keeps it off the loop.
-    reranked = await asyncio.to_thread(
-        rerank, query=query, candidates=fused_pool, content_key="content"
-    )
+    # Off the event loop (rerank() is sync CPU + lazy-loads the model) AND
+    # bounded. A slow/unavailable reranker — notably a first-load model download
+    # that stalls — must DEGRADE the search, never hang the turn: an unbounded
+    # rerank once pinned the turn forever when the 2.27GB download stalled, and
+    # the cascade exhausted the pool and wedged the whole backend (health
+    # included). On timeout/failure we fall back to the fusion ranking; the model
+    # keeps loading in its thread for the next search.
+    degraded = False
+    try:
+        reranked = await asyncio.wait_for(
+            asyncio.to_thread(
+                rerank, query=query, candidates=fused_pool, content_key="content"
+            ),
+            timeout=settings.RERANK_TIMEOUT_S,
+        )
+    except Exception as exc:  # TimeoutError or any model load/predict failure
+        degraded = True
+        logger.warning(
+            "rag_rerank_degraded",
+            error=f"{type(exc).__name__}: {exc}",
+            fused_pool=len(fused_pool),
+            note="reranker slow/unavailable — returning fusion ranking",
+        )
+        # Shape-compatible fallback: carry rrf_score as rerank_score so the audit
+        # + presentation downstream stay intact. Skip the rerank threshold — it's
+        # calibrated for the cross-encoder's 0–1 sigmoid, meaningless on rrf_score.
+        reranked = [{**c, "rerank_score": c.get("rrf_score", 0.0)} for c in fused_pool]
 
     # --- policy stage: threshold + top_k + dropped-candidate audit ---
-    kept, dropped = _apply_threshold(reranked, threshold, top_k)
+    eff_threshold = 0.0 if degraded else threshold
+    kept, dropped = _apply_threshold(reranked, eff_threshold, top_k)
 
     logger.info(
         "rag_search_complete",
@@ -141,6 +163,7 @@ async def search_documents(
         bm25_candidates=len(bm25_hits),
         fused_pool=len(fused_pool),
         reranked=len(reranked),
+        rerank_degraded=degraded,
         kept=len(kept),
         dropped_below_threshold=sum(1 for d in dropped if d["drop_reason"] == "below_threshold"),
         dropped_beyond_top_k=sum(1 for d in dropped if d["drop_reason"] == "beyond_top_k"),

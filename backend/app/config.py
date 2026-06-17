@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 5                      # final passages returned after rerank+threshold
     RAG_RERANK_THRESHOLD: float = 0.3       # permissive; drops below-score chunks (logged)
     RAG_RRF_K: int = 60                     # Reciprocal Rank Fusion smoothing constant
+    # Bound the cross-encoder rerank. A slow/unavailable reranker — notably a
+    # first-load model download that stalls — DEGRADES the search to the fusion
+    # ranking instead of hanging the turn. An unbounded rerank once wedged the
+    # WHOLE backend (health included): the stalled download pinned the search
+    # turn, and the cascade exhausted the pool. Reranker is warmed at startup, so
+    # in steady state predict is sub-second; this only bites on an anomaly.
+    RERANK_TIMEOUT_S: int = 20
 
     # --- Telegram (Phase 1) --------------------------------------------------
     TELEGRAM_BOT_TOKEN: str = ""
