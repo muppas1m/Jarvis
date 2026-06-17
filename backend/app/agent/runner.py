@@ -98,6 +98,21 @@ def _config_with_handler(thread_id: str) -> tuple[dict, Any | None]:
     return config, handler
 
 
+async def get_history(thread_id: str) -> list[dict[str, Any]]:
+    """Replay a thread's persisted messages from the checkpointer (read-only).
+
+    Queries the compiled graph's saved state for ``thread_id`` and serializes the
+    history with the same ``_serialize_message`` live turns use, so the dashboard
+    renders a reloaded conversation identically to a streamed one. Returns ``[]``
+    for a thread with no checkpoint yet (fresh or unknown id). No langfuse
+    handler/trace is created — this is a read, not a turn."""
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = await graph().aget_state(config)
+    values = getattr(snapshot, "values", None) or {}
+    messages: list[BaseMessage] = values.get("messages") or []
+    return [_serialize_message(m) for m in messages]
+
+
 async def run_turn(
     user_message: str,
     thread_id: str,

@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.runner import run_turn, stream_turn
+from app.agent.runner import get_history, run_turn, stream_turn
 from app.security.auth import UserContext, get_current_user
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -63,6 +63,19 @@ async def chat(
         platform="web",
         channel_user_id=user.user_id,
     )
+
+
+@router.get("/history", response_model=None)
+async def chat_history(
+    thread_id: str,
+    user: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Replay a thread's persisted conversation for the dashboard on reload.
+
+    Reads the LangGraph checkpointer (canonical per thread_id) via
+    runner.get_history and returns the same serialized message shape live turns
+    emit. Empty list for an unknown/fresh thread. Read-only — runs no turn."""
+    return {"thread_id": thread_id, "messages": await get_history(thread_id)}
 
 
 @router.post("/stream", response_model=None)

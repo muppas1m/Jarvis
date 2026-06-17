@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentState, ChatMessage, StreamEvent } from "./types";
 
@@ -8,6 +8,30 @@ import type { AgentState, ChatMessage, StreamEvent } from "./types";
 // the JARVIS voice quiet (~-14 dBFS); this lifts it back to a clean level
 // (~1.8x → peak ≈ 11k/32767, no clipping). Tune by ear.
 const PLAYBACK_GAIN = 1.8;
+
+// Conversation persistence (A1): the thread_id lives in localStorage; the
+// backend checkpointer holds its history. On mount we resume the same thread so
+// a reload — or a trip to the Approvals view and back — never loses the chat.
+const THREAD_KEY = "jarvis:thread_id";
+
+/** A backend history row (runner._serialize_message). Only human + ai-with-text
+ *  rows become chat bubbles; tool rows and tool-call-only ai rows are skipped. */
+interface HistoryRow {
+  role: string;
+  content: string;
+}
+
+function rowsToMessages(rows: HistoryRow[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const r of rows) {
+    if (r.role === "human") {
+      out.push({ id: crypto.randomUUID(), role: "user", content: r.content });
+    } else if (r.role === "ai" && r.content.trim()) {
+      out.push({ id: crypto.randomUUID(), role: "assistant", content: r.content });
+    }
+  }
+  return out;
+}
 
 /**
  * Unified Jarvis turn hook — text or voice.
@@ -204,6 +228,9 @@ export function useJarvis() {
             switch (ev.type) {
               case "thread_id":
                 threadRef.current = ev.content;
+                if (typeof window !== "undefined") {
+                  window.localStorage.setItem(THREAD_KEY, ev.content);
+                }
                 break;
               case "token":
                 if (firstText && !voice) {
@@ -250,6 +277,33 @@ export function useJarvis() {
     },
     [voiceEnabled, ensureAudio, enqueueAudio, stop],
   );
+
+  // Restore the persisted conversation once on mount. Sets the thread_id from
+  // localStorage so the next send() continues the SAME backend thread, then
+  // replays its history into the bubble list. A missing/unknown thread or an
+  // unreachable backend → start fresh, no crash.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem(THREAD_KEY);
+    if (!saved) return;
+    threadRef.current = saved;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/chat/history?thread_id=${encodeURIComponent(saved)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { messages?: HistoryRow[] };
+        if (cancelled) return;
+        const restored = rowsToMessages(data.messages ?? []);
+        if (restored.length) setMessages(restored);
+      } catch {
+        /* unreachable backend → start fresh */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return {
     messages,
