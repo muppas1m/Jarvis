@@ -24,7 +24,15 @@ from app.agent.runner import voice_turn
 from app.config import settings
 from app.security.auth import UserContext, get_current_user
 from app.utils.logging import get_logger
+from app.voice.transcribe import CaptureEndpointer, transcribe_pcm
 from app.voice.wakeword import VAD_FRAME_SIZE, new_model, new_vad, score_key
+
+# Worklet frame cadence — 1280 samples @ 16 kHz = 80 ms (see wake-worklet.js).
+_FRAME_MS = 80
+
+
+def _frames(ms: int) -> int:
+    return max(1, round(ms / _FRAME_MS))
 
 logger = get_logger(__name__)
 
@@ -67,23 +75,28 @@ async def voice_stream(
 
 @ws_router.websocket("/wake")
 async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None:
-    """Always-on voice-in stream (Phase 4.2 wake-word + 4.3a barge-in). The
-    browser sends 16 kHz mono int16 PCM frames over a SINGLE stream and switches
-    what we score with a text control message ``{"mode":"wake"|"vad"}``:
+    """Always-on voice-in stream (Phase 4.2 wake-word + 4.3a barge-in + 4.3b local
+    STT). The browser sends 16 kHz mono int16 PCM over a SINGLE stream and switches
+    what the backend does with a text control message ``{"mode":"wake"|"vad"|"capture"}``:
 
       * **wake** (default) — score openWakeWord "hey jarvis"; push
         ``{"event":"wake","score":…}`` when it crosses WAKE_THRESHOLD.
-      * **vad** ("listen-for-speech", used while Jarvis is RESPONDING) — score
-        the bundled Silero VAD and push per-frame ``{"event":"speech","score":…}``
-        so the client can detect the master's speech onset and barge in. The
-        self-interrupt guard (ignore the first Nms of playback, require sustained
-        speech, raised threshold) lives client-side, where playback state is.
+      * **vad** ("listen-for-speech", while Jarvis is RESPONDING) — score the
+        bundled Silero VAD and push per-frame ``{"event":"speech","score":…}`` so
+        the client detects the master's speech onset and barges in. (It also feeds
+        the capture endpointer so a barge-in command's onset is pre-buffered.)
+      * **capture** (4.3b — the command STT, replaces browser Web Speech) — Silero
+        VAD endpoints the utterance (`CaptureEndpointer`), faster-whisper
+        transcribes it, and we push ``{"event":"transcript","text":…}`` on
+        end-of-speech. The VAD owns the listening window (no Web Speech idle-drop),
+        and a vad→capture switch preserves the endpointer's buffer so the onset
+        survives. Bounded by WHISPER_TIMEOUT_S — a slow model degrades to "".
 
-    One stream, two scorers — no second ``getUserMedia``, no new dependency
-    (reuses the already-local Silero). Auth: the browser can't set X-API-Key on a
-    WS handshake, so it authenticates with a **short-lived JWT ticket** (HS256,
-    signed by the BFF with the shared AUTH_SECRET, ~60s expiry) passed as
-    ``?ticket=``; validated with the same ``_verify_jwt`` the HTTP auth uses.
+    One stream, three modes — no second ``getUserMedia``, browser-agnostic,
+    cloud-free. Auth: the browser can't set X-API-Key on a WS handshake, so it
+    authenticates with a **short-lived JWT ticket** (HS256, signed by the BFF with
+    the shared AUTH_SECRET, ~60s expiry) passed as ``?ticket=``; validated with the
+    same ``_verify_jwt`` the HTTP auth uses.
     """
     # Local import keeps the validator next to its HTTP sibling without exporting it.
     from app.security.auth import _verify_jwt
@@ -102,6 +115,26 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
     key = score_key(model)
     vad = None
     mode = "wake"
+    endpointer = CaptureEndpointer(
+        preroll_frames=_frames(settings.CAPTURE_PREROLL_MS),
+        hangover_frames=_frames(settings.CAPTURE_SILENCE_HANGOVER_MS),
+        max_frames=_frames(settings.CAPTURE_MAX_MS),
+    )
+    cap_threshold = settings.CAPTURE_VAD_THRESHOLD
+
+    async def _emit_transcript(pcm: np.ndarray) -> None:
+        """Transcribe a finalized utterance off the loop, BOUNDED — a slow/stuck
+        whisper degrades to "" (the client re-prompts) rather than hanging."""
+        try:
+            transcript = await asyncio.wait_for(
+                asyncio.to_thread(transcribe_pcm, pcm),
+                timeout=settings.WHISPER_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 — TimeoutError or a model failure
+            logger.warning("whisper_transcribe_degraded", error=f"{type(exc).__name__}: {exc}")
+            transcript = ""
+        await websocket.send_json({"event": "transcript", "text": transcript})
+
     logger.info("wake_ws_open", user=claims.get("sub"))
     try:
         while True:
@@ -116,15 +149,24 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
                     new_mode = json.loads(text).get("mode")
                 except (ValueError, AttributeError):
                     continue
-                if new_mode not in ("wake", "vad") or new_mode == mode:
+                if new_mode not in ("wake", "vad", "capture") or new_mode == mode:
                     continue
-                mode = new_mode
-                if mode == "vad":
-                    if vad is None:
-                        vad = await asyncio.to_thread(new_vad)
+                if new_mode in ("vad", "capture") and vad is None:
+                    vad = await asyncio.to_thread(new_vad)
+                if new_mode == "vad":
                     vad.reset_states()
-                else:
+                    endpointer.reset()
+                elif new_mode == "capture":
+                    # Preserve VAD + endpointer buffer on a vad→capture switch so a
+                    # barge-in command's onset (spoken during RESPONDING, before the
+                    # switch) survives; reset on a fresh wake→capture.
+                    if mode != "vad":
+                        vad.reset_states()
+                        endpointer.reset()
+                elif new_mode == "wake":
                     model.reset()  # drop stale wake state on the way back in
+                    endpointer.reset()
+                mode = new_mode
                 continue
 
             data = msg.get("bytes")
@@ -141,11 +183,16 @@ async def wake_ws(websocket: WebSocket, ticket: str = Query(default="")) -> None
                     if score > settings.WAKE_THRESHOLD:
                         await websocket.send_json({"event": "wake", "score": score})
                         model.reset()  # don't re-fire on the same utterance's tail
-                elif vad is not None:
-                    score = float(
-                        await asyncio.to_thread(vad.predict, audio, VAD_FRAME_SIZE)
-                    )
+                elif mode == "vad" and vad is not None:
+                    score = float(await asyncio.to_thread(vad.predict, audio, VAD_FRAME_SIZE))
+                    # Buffer the onset so a barge-in → capture keeps the first word.
+                    endpointer.push(audio, score > cap_threshold)
                     await websocket.send_json({"event": "speech", "score": score})
+                elif mode == "capture" and vad is not None:
+                    score = float(await asyncio.to_thread(vad.predict, audio, VAD_FRAME_SIZE))
+                    utterance = endpointer.push(audio, score > cap_threshold)
+                    if utterance is not None:
+                        await _emit_transcript(utterance)
             except Exception as exc:  # noqa: BLE001 — one bad frame never kills the stream
                 logger.warning("wake_ws_frame_error", error=str(exc), mode=mode)
                 continue
