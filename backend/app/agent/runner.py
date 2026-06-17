@@ -40,7 +40,7 @@ from langchain_core.messages import (
 )
 from langgraph.types import Command
 
-from app.agent.graph import build_graph
+from app.agent.graph import build_graph, reset_thread
 from app.config import settings
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
@@ -640,27 +640,53 @@ async def _recover_cancellation_residue(thread_id: str) -> None:
         return  # genuine approval pause — don't touch it
     msgs = (state.values or {}).get("messages", []) if state.values else []
     answered = {m.tool_call_id for m in msgs if isinstance(m, ToolMessage)}
-    orphans = [
-        m.id
+    # Orphaned AIMessages — at least one tool_call with no answering ToolMessage.
+    orphan_ai = [
+        m
         for m in msgs
         if isinstance(m, AIMessage)
         and m.tool_calls
         and any(tc.get("id") not in answered for tc in m.tool_calls)
+    ]
+    # Drop the orphaned AIMessages AND every ToolMessage that answered ANY of
+    # their tool_calls. tool_executor runs one call per invocation and commits
+    # each ToolMessage as it goes, so a barge-in mid-loop on a PARALLEL-tool_call
+    # AIMessage leaves committed ToolMessages for the calls that already ran —
+    # removing only the AIMessage would orphan THOSE (a dangling ToolMessage 400s
+    # the next LLM call just as badly). Remove the whole block, parentless-free.
+    orphan_tc_ids = {tc.get("id") for m in orphan_ai for tc in m.tool_calls}
+    to_remove = [m.id for m in orphan_ai]
+    to_remove += [
+        m.id
+        for m in msgs
+        if isinstance(m, ToolMessage) and m.tool_call_id in orphan_tc_ids
     ]
     try:
         # Empty RemoveMessage list is fine — as_node="persist" still advances the
         # dirty pending step to END, clearing a residue with no orphan too.
         await graph().aupdate_state(
             config,
-            {"messages": [RemoveMessage(id=i) for i in orphans]},
+            {"messages": [RemoveMessage(id=i) for i in to_remove]},
             as_node="persist",
         )
-        logger.info(
-            "recovered_cancellation_residue",
-            thread_id=thread_id,
-            dropped_orphans=len(orphans),
-            was_next=str(state.next),
-        )
+        # Verify state.next actually cleared — if the surgical fix half-failed,
+        # escalate to the nuclear reset rather than start a fresh turn on a still-
+        # dirty thread (better to lose recent context than to poison/double-run).
+        after = await graph().aget_state(config)
+        if after and getattr(after, "next", None):
+            logger.warning(
+                "cancellation_recovery_incomplete_escalating_reset",
+                thread_id=thread_id,
+                still_next=str(after.next),
+            )
+            await reset_thread(thread_id)
+        else:
+            logger.info(
+                "recovered_cancellation_residue",
+                thread_id=thread_id,
+                dropped=len(to_remove),
+                was_next=str(state.next),
+            )
     except Exception as exc:  # noqa: BLE001 — recovery is best-effort, never fatal
         logger.warning("cancellation_recovery_failed", thread_id=thread_id, error=str(exc))
 
