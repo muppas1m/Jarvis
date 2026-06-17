@@ -4,7 +4,6 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import type { AgentState } from "./types";
 import { useJarvis } from "./useJarvis";
-import { useSpeechInput } from "./useSpeechInput";
 import { useWakeWord, type WakeMode } from "./useWakeWord";
 import {
   BARGE_IN_IGNORE_MS,
@@ -19,34 +18,37 @@ import { BargeInTracker, orbStateFor, voiceReducer, type VoicePhase } from "./vo
 const now = (): number =>
   typeof performance !== "undefined" ? performance.now() : Date.now();
 
-/** Which backend scorer the transport runs, per voice phase. */
+/** Which backend mode the single mic→WS stream runs, per voice phase. */
 function modeForPhase(phase: VoicePhase): WakeMode {
   if (phase === "idle") return "wake"; // cold-start: listen for "hey jarvis"
   if (phase === "responding") return "vad"; // barge-in window
-  return "paused"; // listening / thinking / continuity → a capture owns the mic
+  if (phase === "listening" || phase === "continuity") return "capture"; // local STT
+  return "paused"; // thinking → nothing to score
 }
 
 /**
- * Full-duplex voice orchestrator (Phase 4.3a). Wires the pure state machine
- * (`voiceMachine`) to the turn (`useJarvis`), command capture (`useSpeechInput`),
- * and the mic→WS transport (`useWakeWord`), and adds the two things the machine
- * can't express on its own:
+ * Full-duplex voice orchestrator (Phase 4.3a barge-in + 4.3b local STT). Wires
+ * the pure state machine (`voiceMachine`) to the turn (`useJarvis`) and the
+ * single mic→WS transport (`useWakeWord`).
+ *
+ * Command capture is now **server-side faster-whisper** (the `capture` WS mode),
+ * not the browser Web Speech API — so it's browser-agnostic (works in Brave),
+ * single-stream (no second getUserMedia / mic contention), cloud-free, and the
+ * Silero VAD owns the listening window (no premature no-speech idle-drop). The
+ * orchestrator adds the two things the machine can't express alone:
  *
  *   - **Barge-in**: per-frame VAD scores during RESPONDING feed a sustained gate
- *     (`BargeInTracker`) past a playback-start grace window; on trigger we stop
- *     TTS + abort the turn and cut to a fresh capture. A self-interrupt guard
- *     (high threshold + sustain + ignore-first-Nms) keeps Jarvis from barging in
- *     on his own voice leaking through the mic.
- *   - **Continuity**: when a turn ends we open a timed LISTENING window so the
- *     master can speak the next command WITHOUT re-saying "hey jarvis"; silence
- *     falls back to wake-word idle.
+ *     past a playback grace window; on trigger we stop TTS + abort the turn and
+ *     cut to a capture. The backend pre-buffers the onset so the interrupting
+ *     command's first word survives the vad→capture switch.
+ *   - **Continuity**: when a turn ends we open a timed capture window so the
+ *     master can speak the next command WITHOUT re-saying "hey jarvis".
  *
  * A *typed* turn still drives the orb (idle phase defers to the turn state) but
  * doesn't engage the voice loop.
  */
 export function useVoiceLoop({ enabled }: { enabled: boolean }) {
   const jarvis = useJarvis();
-  const speech = useSpeechInput();
   const [phase, dispatch] = useReducer(voiceReducer, "idle");
 
   const phaseRef = useRef<VoicePhase>(phase);
@@ -59,7 +61,6 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
   const respondingStartRef = useRef(0);
   const bargingRef = useRef(false); // set on barge-in so the stop()-induced idle
   //                                   isn't mistaken for a natural TURN_DONE.
-  const captureToken = useRef(0); // invalidates stale capture resolutions
 
   // Wake → start a turn-capture (honoured only from idle by the reducer).
   const handleWake = useCallback(() => dispatch({ type: "WAKE" }), []);
@@ -79,11 +80,26 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     [jarvis.stop],
   );
 
+  // Whisper transcript from the capture-mode WS → start the turn. Honoured only
+  // in a capture phase; an empty transcript is ignored (the window timer bounds
+  // the wait → CAPTURE_EMPTY → idle if nothing intelligible ever arrives).
+  const handleTranscript = useCallback(
+    (text: string) => {
+      const p = phaseRef.current;
+      if ((p === "listening" || p === "continuity") && text.trim()) {
+        dispatch({ type: "CAPTURE_RESULT", transcript: text });
+        jarvis.send(text);
+      }
+    },
+    [jarvis.send],
+  );
+
   const wake = useWakeWord({
     enabled,
     mode: modeForPhase(phase),
     onWake: handleWake,
     onSpeech: handleSpeech,
+    onTranscript: handleTranscript,
   });
 
   // Wake-word implies spoken responses.
@@ -91,15 +107,10 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     if (enabled) jarvis.setVoiceEnabled(true);
   }, [enabled, jarvis.setVoiceEnabled]);
 
-  // Disable → hard reset to idle + drop any capture.
-  const speechAbort = speech.abort;
-  const speechCapture = speech.capture;
+  // Disable → hard reset to idle (the WS mode follows via modeForPhase).
   useEffect(() => {
-    if (!enabled) {
-      dispatch({ type: "RESET" });
-      speechAbort();
-    }
-  }, [enabled, speechAbort]);
+    if (!enabled) dispatch({ type: "RESET" });
+  }, [enabled]);
 
   // Entering RESPONDING: arm the barge-in clock + gate.
   useEffect(() => {
@@ -109,35 +120,16 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     bargingRef.current = false;
   }, [phase]);
 
-  // Entering a capture phase (post-wake LISTENING or the CONTINUITY window):
-  // run one Web Speech capture, bounded by a window timer. A monotonic token
-  // ignores the resolution of a capture that was superseded (React StrictMode
-  // double-invoke, or a phase change mid-capture).
+  // Capture window: in a capture phase the WS streams PCM and the backend
+  // transcribes on end-of-speech → handleTranscript. This timer only BOUNDS the
+  // wait so a silent window falls back to idle — the VAD owns endpointing, not
+  // this timer (no Web Speech premature self-termination to fight anymore).
   useEffect(() => {
     if (phase !== "listening" && phase !== "continuity") return;
-    const token = ++captureToken.current;
     const windowMs = phase === "continuity" ? CONTINUITY_WINDOW_MS : LISTEN_WINDOW_MS;
-    const timer = setTimeout(() => speechAbort(), windowMs);
-
-    const settle = (transcript: string) => {
-      if (token !== captureToken.current) return; // superseded
-      clearTimeout(timer);
-      if (transcript.trim()) {
-        dispatch({ type: "CAPTURE_RESULT", transcript });
-        jarvis.send(transcript);
-      } else {
-        dispatch({ type: "CAPTURE_EMPTY" });
-      }
-    };
-
-    speechCapture().then(settle, () => settle(""));
-
-    return () => {
-      captureToken.current++; // invalidate this run's pending resolution
-      clearTimeout(timer);
-      speechAbort();
-    };
-  }, [phase, speechCapture, speechAbort, jarvis.send]);
+    const timer = setTimeout(() => dispatch({ type: "CAPTURE_EMPTY" }), windowMs);
+    return () => clearTimeout(timer);
+  }, [phase]);
 
   // Turn lifecycle → drive the machine off the turn's own state. Guards keep a
   // typed turn (phase idle) from hijacking the loop, and the barge-in flag keeps
@@ -155,7 +147,7 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
   }, [jarvis.agentState]);
 
   const orbState: AgentState = orbStateFor(phase, jarvis.agentState);
-  const statusLabel = computeStatus(phase, wake.error, wake.supported, speech.supported);
+  const statusLabel = computeStatus(phase, wake.error, wake.supported);
 
   return {
     // turn / UI passthrough
@@ -171,7 +163,6 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     orbState,
     statusLabel,
     wakeSupported: wake.supported,
-    speechSupported: speech.supported,
     wakeError: wake.error,
   };
 }
@@ -180,11 +171,9 @@ function computeStatus(
   phase: VoicePhase,
   wakeError: string | null,
   wakeSupported: boolean,
-  speechSupported: boolean,
 ): string {
   if (wakeError) return `⚠ ${wakeError}`;
-  if (!wakeSupported) return "⚠ wake-word needs a mic-capable browser";
-  if (!speechSupported) return "⚠ command capture needs Chrome (Web Speech API)";
+  if (!wakeSupported) return "⚠ voice needs a mic-capable browser";
   switch (phase) {
     case "listening":
       return "listening for your command…";

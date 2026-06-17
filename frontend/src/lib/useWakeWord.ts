@@ -8,17 +8,20 @@ import { useEffect, useRef, useState } from "react";
  * frames stream over ONE WebSocket. What the backend scores is controlled by the
  * `mode` prop (a control message is sent on change):
  *
- *   - "wake"   — backend scores openWakeWord "hey jarvis"; fires `onWake`.
- *   - "vad"    — backend scores Silero VAD (used while Jarvis is RESPONDING);
- *                fires `onSpeech(score)` per frame so the loop can barge-in.
- *   - "paused" — stop sending PCM (a command capture has the mic); the WS stays
- *                open so we never re-handshake mid-conversation.
+ *   - "wake"    — backend scores openWakeWord "hey jarvis"; fires `onWake`.
+ *   - "vad"     — backend scores Silero VAD (while Jarvis is RESPONDING); fires
+ *                 `onSpeech(score)` per frame so the loop can barge-in.
+ *   - "capture" — backend endpoints + transcribes the command (faster-whisper,
+ *                 4.3b); fires `onTranscript(text)` on end-of-speech. Replaces the
+ *                 browser Web Speech API — same stream, browser-agnostic, cloud-free.
+ *   - "paused"  — stop sending PCM (e.g. while THINKING); the WS stays open so we
+ *                 never re-handshake mid-conversation.
  *
- * One stream, one socket, two scorers — no second `getUserMedia`. Continuous
- * while the tab is open and only mounted on the authenticated chat page (mic
- * gated behind the session). Auth: a short-lived JWT ticket from the BFF.
+ * One stream, one socket — no second `getUserMedia`. Continuous while the tab is
+ * open and only mounted on the authenticated chat page (mic gated behind the
+ * session). Auth: a short-lived JWT ticket from the BFF.
  */
-export type WakeMode = "wake" | "vad" | "paused";
+export type WakeMode = "wake" | "vad" | "capture" | "paused";
 
 const WS_BASE = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:8000";
 
@@ -27,17 +30,21 @@ export function useWakeWord({
   mode,
   onWake,
   onSpeech,
+  onTranscript,
 }: {
   enabled: boolean;
   mode: WakeMode;
   onWake: () => void;
   onSpeech: (score: number) => void;
+  onTranscript: (text: string) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const onWakeRef = useRef(onWake);
   onWakeRef.current = onWake;
   const onSpeechRef = useRef(onSpeech);
   onSpeechRef.current = onSpeech;
+  const onTranscriptRef = useRef(onTranscript);
+  onTranscriptRef.current = onTranscript;
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -114,7 +121,7 @@ export function useWakeWord({
 
         ws.onopen = () => syncMode.current(); // declare the starting mode
         ws.onmessage = (ev: MessageEvent) => {
-          let msg: { event?: string; score?: number };
+          let msg: { event?: string; score?: number; text?: string };
           try {
             msg = JSON.parse(ev.data as string);
           } catch {
@@ -122,6 +129,7 @@ export function useWakeWord({
           }
           if (msg.event === "wake") onWakeRef.current();
           else if (msg.event === "speech") onSpeechRef.current(msg.score ?? 0);
+          else if (msg.event === "transcript") onTranscriptRef.current(msg.text ?? "");
         };
         ws.onerror = () => setError("wake-word connection failed");
       } catch {
