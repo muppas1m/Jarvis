@@ -30,10 +30,10 @@ const STATE_CFG: Record<
   AgentState,
   { color: THREE.Color; ringSpeed: number; breath: number; brightness: number; ringScale: number }
 > = {
-  idle: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.35, breath: 0.03, brightness: 0.72, ringScale: 1.0 },
-  listening: { color: new THREE.Color("#7fe9ff"), ringSpeed: 0.6, breath: 0.05, brightness: 0.85, ringScale: 1.03 },
-  thinking: { color: new THREE.Color("#b8a1ff"), ringSpeed: 1.1, breath: 0.055, brightness: 0.88, ringScale: 1.07 },
-  responding: { color: new THREE.Color("#00d4ff"), ringSpeed: 0.85, breath: 0.09, brightness: 1.0, ringScale: 1.07 },
+  idle: { color: new THREE.Color("#90edff"), ringSpeed: 0.3, breath: 0.03, brightness: 0.1, ringScale: 1.0 },
+  listening: { color: new THREE.Color("#6de7ff"), ringSpeed: 0.8, breath: 0.05, brightness: 0.75, ringScale: 1.07 },
+  thinking: { color: new THREE.Color("#b8a0ff"), ringSpeed: 1, breath: 0.07, brightness: 0.85, ringScale: 1.15 },
+  responding: { color: new THREE.Color("#4ae1ff"), ringSpeed: 0.95, breath: 0.1, brightness: 1.0, ringScale: 1.15 },
 };
 
 interface Anim {
