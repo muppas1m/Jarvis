@@ -105,22 +105,27 @@ export function ApprovalCard({
       </dl>
 
       {!resolved && (
-        <div className="flex gap-2">
-          <button
-            disabled={resolving}
-            onClick={() => onDecide(true)}
-            className="rounded-lg border border-ok/50 bg-ok/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-ok transition hover:bg-ok/20 disabled:opacity-50"
-          >
-            {resolving ? "…" : "Approve"}
-          </button>
-          <button
-            disabled={resolving}
-            onClick={() => onDecide(false)}
-            className="rounded-lg border border-danger/50 bg-danger/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-danger transition hover:bg-danger/20 disabled:opacity-50"
-          >
-            {resolving ? "…" : "Reject"}
-          </button>
-        </div>
+        <>
+          <div className="flex gap-2">
+            <button
+              disabled={resolving}
+              onClick={() => onDecide(true)}
+              className="rounded-lg border border-ok/50 bg-ok/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-ok transition hover:bg-ok/20 disabled:opacity-50"
+            >
+              {resolving ? "…" : "Approve"}
+            </button>
+            <button
+              disabled={resolving}
+              onClick={() => onDecide(false)}
+              className="rounded-lg border border-danger/50 bg-danger/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-danger transition hover:bg-danger/20 disabled:opacity-50"
+            >
+              {resolving ? "…" : "Reject"}
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-ink-dim">
+            {resolving ? "Working on it…" : "…or just tell me what to change."}
+          </p>
+        </>
       )}
     </div>
   );

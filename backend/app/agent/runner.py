@@ -40,6 +40,7 @@ from langchain_core.messages import (
 )
 from langgraph.types import Command
 
+from app.agent.decision_resolver import resolve_decision
 from app.agent.graph import build_graph
 from app.config import settings
 from app.llm.observability import langfuse_callback_handler
@@ -137,19 +138,19 @@ async def run_turn(
     """Execute one user turn through the agent graph."""
     config, handler = _config_with_handler(thread_id)
 
-    # Prevent-at-source: if this thread is paused at an approval interrupt, a
-    # fresh free-text turn would append a HumanMessage *after* the pending
-    # AIMessage tool_call — orphaning it (no ToolMessage) and poisoning the
-    # history, so the next LLM call (the OpenAI fallback) 400s the whole thread.
-    # That was the Jun-11 terminal "internal error": the master confirmed an
-    # approval by typing instead of tapping the button. Don't start a new turn;
-    # leave the interrupt intact (its Approve/Reject buttons still resolve it)
-    # and nudge. Honoring free text AS the approval is the deferred
-    # conversational-send path (project_email_action_capability_gap) — out of
-    # scope here; this only stops the crash.
+    # A pending approval interrupt: do NOT start a fresh turn (a free-text
+    # HumanMessage appended after the pending AIMessage tool_call would orphan it
+    # → the next LLM call 400s the thread — the Jun-11 terminal error). Instead,
+    # A2 Piece 2 resolves the message AGAINST the pending decision (approve /
+    # reject / edit / unrelated) via the resume path; the master's words persist
+    # correctly (after the resolving ToolMessage). Only a genuinely unrelated /
+    # ambiguous message falls back to the nudge.
     if await _is_awaiting_approval(thread_id):
-        logger.info("run_turn_blocked_pending_interrupt", thread_id=thread_id)
-        return _pending_interrupt_envelope(thread_id)
+        logger.info("run_turn_resolving_pending_interrupt", thread_id=thread_id)
+        resolved = await _resolve_pending(thread_id, user_message)
+        if resolved["outcome"] == "unrelated":
+            return _pending_interrupt_envelope(thread_id)
+        return resolved["envelope"]
 
     # Clean any barge-in / send-over cancellation residue (dirty state.next +
     # orphaned tool_call) so this fresh turn starts on a consistent thread.
@@ -239,6 +240,91 @@ async def resume_turn(
 
 
 # --------------------------------------------------------------------------- #
+# Natural-language resolution of a pending decision (A2 Piece 2)              #
+# --------------------------------------------------------------------------- #
+
+
+async def _load_pending_decision(thread_id: str) -> dict[str, Any] | None:
+    """The thread's current pending decision (tool + args + description), or None.
+    One interrupt pauses at a time, so there's at most one pending row."""
+    from app.api.approvals import get_thread_decisions  # lazy — avoid import cycle
+
+    decisions = await get_thread_decisions(thread_id)
+    pending = [d for d in decisions if d.get("status") == "pending"]
+    return pending[-1] if pending else None
+
+
+async def _resolve_approval_row(approval_id: str, action: str) -> None:
+    from app.api.approvals import resolve_approval  # lazy — avoid import cycle
+
+    await resolve_approval(approval_id, action, resolved_via="web")
+
+
+async def _resolve_pending(thread_id: str, user_message: str) -> dict[str, Any]:
+    """Resolve the thread's pending decision against a natural-language message.
+
+    Returns ``{"outcome": "approved"|"rejected"|"discarded"|"unrelated",
+    "approval_id": <id|None>, "envelope": <resumed turn envelope|None>}``.
+    ``unrelated`` resumes nothing — the caller keeps the card pending and nudges.
+    The master's message persists in the thread via the resume's ``user_msg``
+    (added as a HumanMessage after the resolving ToolMessage — see
+    tool_executor_node), so a reload shows the negotiation in order. Modality-
+    agnostic: the voice path (Piece 3) calls this same function."""
+    pending = await _load_pending_decision(thread_id)
+    if not pending:
+        return {"outcome": "unrelated", "approval_id": None, "envelope": None}
+
+    approval_id = pending["approval_id"]
+    res = await resolve_decision(
+        pending.get("tool_name", "action"),
+        pending.get("tool_args") or {},
+        pending.get("description"),
+        user_message,
+    )
+    logger.info("pending_decision_routed", thread_id=thread_id, intent=res.intent)
+
+    if res.intent == "unrelated":
+        return {"outcome": "unrelated", "approval_id": approval_id, "envelope": None}
+    if res.intent == "approve":
+        await _resolve_approval_row(approval_id, "approve")
+        env = await resume_turn(thread_id, {"approved": True, "user_msg": user_message})
+        return {"outcome": "approved", "approval_id": approval_id, "envelope": env}
+    if res.intent == "reject":
+        await _resolve_approval_row(approval_id, "reject")
+        env = await resume_turn(thread_id, {"approved": False, "user_msg": user_message})
+        return {"outcome": "rejected", "approval_id": approval_id, "envelope": env}
+    # edit → discard this card + the agent re-drafts a new one (tool_executor_node)
+    env = await resume_turn(
+        thread_id,
+        {"approved": False, "revise": True, "feedback": res.change, "user_msg": user_message},
+    )
+    return {"outcome": "discarded", "approval_id": approval_id, "envelope": env}
+
+
+async def _resolve_pending_stream(
+    thread_id: str, user_message: str
+) -> AsyncIterator[dict[str, Any]]:
+    """SSE events for resolving a pending decision by natural language: a
+    ``decision_resolved`` signal for the affected card, then the resumed turn's
+    result (a new ``approval_required`` card for an edit, else ``done``). An
+    ``unrelated`` message leaves the card pending and emits the gentle nudge."""
+    result = await _resolve_pending(thread_id, user_message)
+    if result["outcome"] == "unrelated":
+        yield {"type": "done", "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
+        return
+    yield {
+        "type": "decision_resolved",
+        "thread_id": thread_id,
+        "content": {"approval_id": result["approval_id"], "status": result["outcome"]},
+    }
+    env = result["envelope"] or {}
+    if env.get("status") == "interrupted":
+        yield {"type": "approval_required", "thread_id": thread_id, "content": env.get("interrupt")}
+    else:
+        yield {"type": "done", "content": _terminal_payload(env)}
+
+
+# --------------------------------------------------------------------------- #
 # Streaming surface (Phase 4 — true token streaming through the same graph)   #
 # --------------------------------------------------------------------------- #
 
@@ -275,11 +361,13 @@ async def stream_turn(
 
     config, handler = _config_with_handler(thread_id)
 
-    # Same prevent-at-source guard as run_turn: a fresh free-text turn while an
-    # approval is pending would orphan the tool_call and poison the thread.
+    # A pending decision: resolve it by natural language (approve / reject / edit
+    # / unrelated) instead of blanket-nudging — A2 Piece 2. Same prevent-at-source
+    # discipline as run_turn (no raw HumanMessage at the pending tool_call).
     if await _is_awaiting_approval(thread_id):
-        logger.info("stream_turn_blocked_pending_interrupt", thread_id=thread_id)
-        yield {"type": "done", "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
+        logger.info("stream_turn_resolving_pending_interrupt", thread_id=thread_id)
+        async for ev in _resolve_pending_stream(thread_id, user_message):
+            yield ev
         return
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
@@ -747,19 +835,18 @@ def _error_envelope(
 
 
 def _pending_interrupt_envelope(thread_id: str) -> dict[str, Any]:
-    """Envelope for a free-text turn that arrived while an approval is still
-    pending. status='complete' (nothing failed — we deliberately declined to
-    start a turn) with a nudge to use the Approve/Reject buttons. No interrupt
-    payload: the original approval message already carries the live buttons, so
-    we don't re-send them (which would mint a duplicate approval row). The
-    pending interrupt is left untouched and still resolves via those buttons."""
+    """Envelope for a message that arrived while a decision is pending AND the
+    resolver judged it unrelated/ambiguous (A2 Piece 2). status='complete' with a
+    gentle nudge; the pending card stays live and still resolves by button or by a
+    clearer natural-language reply. No interrupt payload (the card already carries
+    the buttons; re-sending would mint a duplicate row)."""
     return {
         "thread_id": thread_id,
         "status": "complete",
         "stop_reason": "pending_approval",
         "response": (
-            "You've got an action waiting for your approval. Please tap "
-            "**Approve** or **Reject** on that message first, then send this again."
+            "You've a decision waiting, Sir — approve it, reject it, or tell me "
+            "what to change."
         ),
         "messages": [],
         "interrupt": None,

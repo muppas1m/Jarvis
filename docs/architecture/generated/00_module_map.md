@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (93 modules)
+## `app/` — the system (94 modules)
 
 ```
 app/
@@ -21,6 +21,7 @@ app/
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
+│   ├── decision_resolver.py — Natural-language resolution of a pending decision (A2 Piece 2).
 │   ├── graph.py — StateGraph wiring + AsyncPostgresSaver checkpointer.
 │   ├── message_repair.py — Message-history repair — orphaned tool_call → synthetic ToolMessage.
 │   ├── nodes.py — Graph nodes — the four steps of an agent turn.

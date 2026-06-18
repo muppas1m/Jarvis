@@ -55,12 +55,28 @@ class RateLimiter:
         thread_id: str,
         turn_id: str,
         tool_name: str,
+        tool_call_id: str | None = None,
     ) -> bool:
         """Increment the per-turn counter for `tool_name` and return True if
         the call is still under both the global and per-tool caps. False
         means the call was blocked; the audit row has already been written.
+
+        Idempotent per `tool_call_id`: an APPROVE interrupt makes tool_executor
+        RE-RUN the same node (same tool_call) on every resume, and an edit loop
+        re-runs it repeatedly — so a tool_call already counted this turn is NOT
+        re-counted (otherwise the resume would exhaust the cap and block the
+        approved send). Each DISTINCT tool_call (incl. every edit's re-draft)
+        still counts once.
         """
         key = f"jarvis:tool_count:{thread_id}:{turn_id}"
+
+        # Count each tool_call ONCE per turn — resume re-runs must not re-count.
+        if tool_call_id:
+            seen_key = f"jarvis:tool_seen:{thread_id}:{turn_id}"
+            is_new = await self.redis.sadd(seen_key, tool_call_id)
+            await self.redis.expire(seen_key, 3600)
+            if not is_new:
+                return True
 
         # Global per-turn ceiling first.
         total = await self.redis.hincrby(key, "_total", 1)

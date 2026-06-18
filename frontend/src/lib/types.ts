@@ -54,6 +54,11 @@ export type StreamEvent =
   | { type: "audio"; content: { text: string; audio: string; mime: string; filler: boolean } }
   | { type: "approval_required"; thread_id: string; content: Record<string, unknown> }
   | {
+      type: "decision_resolved";
+      thread_id: string;
+      content: { approval_id: string; status: string };
+    }
+  | {
       type: "done";
       content: {
         status: string;

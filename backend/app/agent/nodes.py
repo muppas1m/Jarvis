@@ -44,7 +44,7 @@ from langchain_core.messages import (
 )
 from langchain_litellm import ChatLiteLLM
 from langgraph.types import interrupt
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agent.message_repair import repair_orphaned_tool_calls
 from app.agent.prompts import build_system_prompt
@@ -298,8 +298,16 @@ async def tool_executor_node(state: AgentState) -> dict:
     thread_id = state["thread_id"]
     turn_id = state.get("turn_started_at", "no-turn")
 
+    # A natural-language resolution ("change the name to Pavan", "send it") persists
+    # as a real HumanMessage so a reload shows the full negotiation in order. It MUST
+    # go AFTER the resolving ToolMessage (a HumanMessage between an AIMessage
+    # tool_call and its ToolMessage orphans the call → 400). Empty on button clicks.
+    trailing: list = []
+
     # ---- per-turn rate limit ------------------------------------------------
-    ok = await rate_limiter.check_and_increment_tool(thread_id, turn_id, tool_name)
+    ok = await rate_limiter.check_and_increment_tool(
+        thread_id, turn_id, tool_name, tool_call_id=tool_call_id
+    )
     if not ok:
         await _log_audit(
             thread_id, tool_name, SafetyLevel.SAFE, tool_args,
@@ -376,8 +384,35 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "description": _describe_action(tool_name, tool_args),
             }
         )
-        if not isinstance(decision, dict) or not decision.get("approved"):
-            reason = (decision or {}).get("reason", "rejected by master")
+        decision = decision if isinstance(decision, dict) else {}
+        user_msg = decision.get("user_msg")
+        if isinstance(user_msg, str) and user_msg.strip():
+            trailing = [HumanMessage(content=user_msg)]
+
+        if decision.get("revise"):
+            # EDIT: the master asked for changes BEFORE it sends. Discard this
+            # proposal (card greys in history) and have the AGENT re-draft + re-call
+            # the tool — reusing its full-context drafting (no field-patching) — so a
+            # NEW card is proposed. This is NOT a cancellation.
+            feedback = decision.get("feedback") or ""
+            await _discard_pending_approval(thread_id, interrupt_id=tool_call_id)
+            await _log_audit(
+                thread_id, tool_name, level, tool_args,
+                success=False, error=f"REVISE: {feedback}",
+            )
+            revise_marker = ToolMessage(
+                content=(
+                    "[REVISE] You proposed this action; the master reviewed it and asked "
+                    "for a change BEFORE it is sent — this is NOT a cancellation. Re-draft "
+                    "the action applying their change (see their message that follows) and "
+                    "call the SAME tool again so they can approve the revised version."
+                ),
+                tool_call_id=tool_call_id,
+            )
+            return {"messages": [revise_marker, *trailing]}
+
+        if not decision.get("approved"):
+            reason = decision.get("reason", "rejected by master")
             await _log_audit(
                 thread_id, tool_name, level, tool_args,
                 success=False, error=f"REJECTED: {reason}",
@@ -387,10 +422,12 @@ async def tool_executor_node(state: AgentState) -> dict:
                     ToolMessage(
                         content=f"[REJECTED] Master rejected: {reason}",
                         tool_call_id=tool_call_id,
-                    )
+                    ),
+                    *trailing,
                 ]
             }
-        # Approved — fall through to execution below.
+        # Approved — fall through to execution below; the persisted master turn
+        # (trailing) is appended AFTER the result ToolMessage at the node's return.
 
     # ---- execute (SAFE, NOTIFY, or approved-APPROVE) -----------------------
     # Latency is measured here, wrapping the dispatch chokepoint
@@ -470,7 +507,7 @@ async def tool_executor_node(state: AgentState) -> dict:
         logger.error("tool_post_execute_failed", tool=tool_name, error=str(exc))
 
     return {
-        "messages": [ToolMessage(content=sanitized, tool_call_id=tool_call_id)]
+        "messages": [ToolMessage(content=sanitized, tool_call_id=tool_call_id), *trailing]
     }
 
 
@@ -580,6 +617,28 @@ async def _find_pending_approval(thread_id: str, interrupt_id: str) -> uuid.UUID
         )
         row = result.first()
         return row[0] if row else None
+
+
+async def _discard_pending_approval(thread_id: str, interrupt_id: str) -> None:
+    """Mark a proposal superseded by an edit (status='discarded'). The row stays
+    so the dashboard renders the card greyed in history — a record of what was
+    proposed before the master asked for the change."""
+    async with async_session() as session:
+        await session.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.thread_id == thread_id,
+                PendingApproval.interrupt_id == interrupt_id,
+                PendingApproval.status == "pending",
+            )
+            .values(
+                status="discarded",
+                resolved_at=datetime.now(timezone.utc),
+                resolved_via="web",
+            )
+        )
+        await session.commit()
+    logger.info("approval_discarded", thread_id=thread_id, interrupt_id=interrupt_id)
 
 
 async def _create_pending_approval(

@@ -315,6 +315,20 @@ export function useJarvis() {
                 }
                 break;
               }
+              case "decision_resolved": {
+                // A typed natural-language resolution flipped a card's status
+                // (approved / rejected / discarded) — update it in place so the
+                // live stream matches what a reload would show.
+                const { approval_id, status } = ev.content;
+                setItems((m) =>
+                  m.map((x) =>
+                    x.type === "decision" && x.approval.approval_id === approval_id
+                      ? { ...x, approval: { ...x.approval, status: normalizeStatus(status) } }
+                      : x,
+                  ),
+                );
+                break;
+              }
               case "done":
                 patch(ev.content.response || acc);
                 break;
