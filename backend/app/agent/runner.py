@@ -40,7 +40,7 @@ from langchain_core.messages import (
 )
 from langgraph.types import Command
 
-from app.agent.graph import build_graph, reset_thread
+from app.agent.graph import build_graph
 from app.config import settings
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
@@ -699,17 +699,27 @@ async def _recover_cancellation_residue(thread_id: str) -> None:
             {"messages": [RemoveMessage(id=i) for i in to_remove]},
             as_node="persist",
         )
-        # Verify state.next actually cleared — if the surgical fix half-failed,
-        # escalate to the nuclear reset rather than start a fresh turn on a still-
-        # dirty thread (better to lose recent context than to poison/double-run).
+        # Verify state.next cleared. If the surgical advance half-failed and next
+        # is STILL dirty, DO NOT wipe the thread — that would now delete the
+        # master's entire canonical conversation (web:master). The old throwaway
+        # web:<uuid> threads made a reset look harmless; the server-anchor funnels
+        # everything into one permanent thread, so the nuclear reset is now
+        # catastrophic AND unnecessary: the orphaned AIMessages + their committed
+        # ToolMessages are already removed, so a resumed tool_executor walks back
+        # to the most-recent AIMessage WITH tool_calls and runs only an UNanswered
+        # call — there are none left → it no-ops and routes to agent (verified:
+        # tool_executor_node / should_continue_tools in nodes.py). agent_node's
+        # repair_orphaned_tool_calls then neutralizes any residual orphan before
+        # the LLM call. So a still-dirty next with the orphans gone is safe to
+        # proceed on. (Durable-context bounding is B's rolling compaction.)
         after = await graph().aget_state(config)
         if after and getattr(after, "next", None):
             logger.warning(
-                "cancellation_recovery_incomplete_escalating_reset",
+                "cancellation_recovery_incomplete_proceeding_no_reset",
                 thread_id=thread_id,
                 still_next=str(after.next),
+                dropped=len(to_remove),
             )
-            await reset_thread(thread_id)
         else:
             logger.info(
                 "recovered_cancellation_residue",
