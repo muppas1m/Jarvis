@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
 
+import { ApprovalCard } from "@/components/ApprovalCard";
 import { BootSequence } from "@/components/BootSequence";
 import { clearBootPending } from "@/lib/boot";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
@@ -35,6 +36,8 @@ export default function ChatPage() {
     messages,
     caption,
     needsApproval,
+    approval,
+    decideApproval,
     voiceEnabled,
     setVoiceEnabled,
     getAmplitude,
@@ -45,7 +48,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [messages, approval]);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -161,6 +164,13 @@ export default function ChatPage() {
                 </div>
               </div>
             ))}
+            {approval && (
+              <div className="flex justify-start">
+                <div className="w-full max-w-[90%]">
+                  <ApprovalCard approval={approval} onDecide={decideApproval} />
+                </div>
+              </div>
+            )}
           </div>
 
           <form onSubmit={submit} className="flex gap-2 border-t border-cyan/10 p-3">

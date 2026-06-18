@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentState, ChatMessage, StreamEvent } from "./types";
+import type { AgentState, ApprovalRequest, ChatMessage, StreamEvent } from "./types";
 
 // Playback gain. Piper runs with normalize_audio=False (no buzz), which leaves
 // the JARVIS voice quiet (~-14 dBFS); this lifts it back to a clean level
@@ -35,6 +35,50 @@ function rowsToMessages(rows: HistoryRow[]): ChatMessage[] {
   return out;
 }
 
+/** The decide endpoint returns a TurnEnvelope; we only read these fields. */
+interface DecideEnvelope {
+  status?: string;
+  response?: string;
+  interrupt?: unknown;
+}
+
+/** A pending row from GET /api/approvals (backend PendingApprovalView). */
+interface PendingApprovalRow {
+  id: string;
+  thread_id: string;
+  action_type: string;
+  description: string;
+  payload?: { tool_name?: string; tool_args?: Record<string, unknown> };
+}
+
+/** Normalize an `approval_required` / chained-interrupt payload → ApprovalRequest. */
+function approvalFromInterrupt(raw: unknown): ApprovalRequest | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.approval_id !== "string") return null;
+  return {
+    approval_id: c.approval_id,
+    tool_name: typeof c.tool_name === "string" ? c.tool_name : "action",
+    tool_args:
+      c.tool_args && typeof c.tool_args === "object"
+        ? (c.tool_args as Record<string, unknown>)
+        : {},
+    description: typeof c.description === "string" ? c.description : undefined,
+    status: "pending",
+  };
+}
+
+/** Normalize a pending row from GET /api/approvals → ApprovalRequest. */
+function approvalFromRow(r: PendingApprovalRow): ApprovalRequest {
+  return {
+    approval_id: r.id,
+    tool_name: r.payload?.tool_name ?? r.action_type ?? "action",
+    tool_args: r.payload?.tool_args ?? {},
+    description: r.description,
+    status: "pending",
+  };
+}
+
 /**
  * Unified Jarvis turn hook — text or voice.
  *
@@ -52,7 +96,9 @@ export function useJarvis() {
   const [agentState, setAgentState] = useState<AgentState>("idle");
   const [caption, setCaption] = useState("");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [needsApproval, setNeedsApproval] = useState(false);
+  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const approvalRef = useRef<ApprovalRequest | null>(null);
+  approvalRef.current = approval;
 
   const threadRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -184,7 +230,7 @@ export function useJarvis() {
         nextStartRef.current = ctx.currentTime;
       }
       streamDoneRef.current = false;
-      setNeedsApproval(false);
+      setApproval(null); // clear any resolved card when a new turn starts
 
       const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: trimmed };
       const aiId = crypto.randomUUID();
@@ -244,10 +290,15 @@ export function useJarvis() {
                 break;
               case "tool":
                 break;
-              case "approval_required":
-                setNeedsApproval(true);
-                patch("⚠ Approval required — open the Approvals panel to decide.");
+              case "approval_required": {
+                const a = approvalFromInterrupt(ev.content);
+                if (a) {
+                  setApproval(a);
+                  // No empty assistant bubble — the inline card is the surface.
+                  if (!acc) setMessages((m) => m.filter((x) => x.id !== aiId));
+                }
                 break;
+              }
               case "done":
                 patch(ev.content.response || acc);
                 break;
@@ -277,6 +328,51 @@ export function useJarvis() {
     [voiceEnabled, ensureAudio, enqueueAudio, stop],
   );
 
+  // Decide the live approval inline: POST the master's decision, append the
+  // resumed turn's result to the chat, and flip the card to a resolved state. A
+  // chained interrupt (the resume hit ANOTHER approval) re-surfaces a new card.
+  const decideApproval = useCallback(
+    async (approved: boolean, reason?: string) => {
+      const current = approvalRef.current;
+      if (!current || current.status !== "pending") return;
+      setApproval({ ...current, status: "resolving" });
+      const appendAssistant = (content: string) =>
+        setMessages((m) => [
+          ...m,
+          { id: crypto.randomUUID(), role: "assistant", content },
+        ]);
+      try {
+        const res = await fetch(`/api/approvals/${current.approval_id}/decide`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            approved ? { approved } : { approved, reason: reason ?? "" },
+          ),
+        });
+        if (!res.ok) {
+          // 404 → resolved/expired elsewhere (e.g. via Telegram). Mark it done.
+          setApproval({ ...current, status: approved ? "approved" : "rejected" });
+          appendAssistant("⚠ That approval is no longer available.");
+          return;
+        }
+        const env = (await res.json()) as DecideEnvelope;
+        appendAssistant(
+          (env.response || "").trim() ||
+            (approved ? "Done, Sir." : "Cancelled, Sir."),
+        );
+        const chained =
+          env.status === "interrupted" ? approvalFromInterrupt(env.interrupt) : null;
+        setApproval(
+          chained ?? { ...current, status: approved ? "approved" : "rejected" },
+        );
+      } catch {
+        setApproval({ ...current, status: approved ? "approved" : "rejected" });
+        appendAssistant("⚠ Could not reach Jarvis to record that decision.");
+      }
+    },
+    [],
+  );
+
   // Hydrate the master's conversation once on mount. /history resolves the
   // server-authoritative canonical thread (no thread_id sent) and returns its id
   // + history; we cache the id in-memory for the session and replay the bubbles.
@@ -302,13 +398,36 @@ export function useJarvis() {
     };
   }, []);
 
+  // Re-surface a still-pending approval for the canonical thread on mount, so a
+  // reload mid-approval doesn't lose the card. Single-master: any pending row is
+  // this conversation's. The guard never clobbers an already-live approval.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/approvals");
+        if (!res.ok) return;
+        const rows = (await res.json()) as PendingApprovalRow[];
+        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
+        setApproval((prev) => prev ?? approvalFromRow(rows[0]));
+      } catch {
+        /* ignore — nothing to re-surface */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return {
     messages,
     agentState,
     caption,
     voiceEnabled,
     setVoiceEnabled,
-    needsApproval,
+    needsApproval: approval?.status === "pending",
+    approval,
+    decideApproval,
     getAmplitude,
     send,
     stop,

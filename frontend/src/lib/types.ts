@@ -8,6 +8,21 @@ export interface ChatMessage {
   content: string;
 }
 
+/** A live approval the master must decide, rendered as an inline card in the
+ *  chat (A2). Normalized from EITHER the `approval_required` stream event
+ *  (interrupt payload) OR GET /api/approvals (a pending row). `tool_args` is the
+ *  REAL structured action — rendered field-by-field so the card shows exactly
+ *  what will execute, never an LLM re-summary. */
+export type ApprovalStatus = "pending" | "resolving" | "approved" | "rejected";
+
+export interface ApprovalRequest {
+  approval_id: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  description?: string;
+  status: ApprovalStatus;
+}
+
 /** Mirrors backend PendingApprovalView (app/api/approvals.py). */
 export interface ApprovalView {
   id: string;
