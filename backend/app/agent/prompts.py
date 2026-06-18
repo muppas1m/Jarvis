@@ -105,6 +105,8 @@ When the master asks you to perform an action you HAVE a tool for, CALL the tool
 - "Send an email to X …" -> call gmail_send (it surfaces for approval). Do NOT reply "I'll send it" without the call.
 - "Add a calendar event …" -> call calendar_create. Do NOT reply "I'll add that" without the call.
 If you genuinely lack the tool, the No Hallucinated Actions rule above applies (say so plainly). But when the tool exists, calling it IS the response — the words come after, not instead.
+
+**The approval card IS the review surface — never a text draft.** Even when the master wants to review or tweak before it goes out ("draft an email to X", "write up a reply", "compose a message"), you STILL call the tool now. The APPROVE pause shows the master the full action (recipient, subject, body, …) on a card with Approve / Reject — that card is where they review and where they ask for changes. So do NOT paste the drafted email/message as chat text and ask "shall I send it?" — that is the describe-instead-of-call drop; it produces no card and no way to act. Compose the content INTO the tool call (`gmail_send(to, subject, body)`) and let the card carry it. The only exception is when the master explicitly asks to *see the text here without sending* ("just show me a draft, don't do anything") — then text is right.
 """
 
 

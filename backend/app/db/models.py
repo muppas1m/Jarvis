@@ -129,7 +129,9 @@ class PendingApproval(Base):
     action_type = Column(String(100), nullable=False)          # "send_email", "book_flight", ...
     description = Column(Text, nullable=False)                 # human-readable summary
     payload = Column(JSONB, nullable=False)                    # full action data
-    status = Column(String(20), default="pending", nullable=False, index=True)  # pending|approved|rejected|expired
+    status = Column(String(20), default="pending", nullable=False, index=True)  # pending|approved|rejected|discarded|expired
+    #   discarded = superseded by an edit/revision; the card stays in history (greyed) so the
+    #   record shows what was proposed before the master changed it.
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)

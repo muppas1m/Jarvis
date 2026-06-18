@@ -156,10 +156,9 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
 
   return {
     // turn / UI passthrough
-    messages: jarvis.messages,
+    items: jarvis.items,
     caption: jarvis.caption,
     needsApproval: jarvis.needsApproval,
-    approval: jarvis.approval,
     decideApproval: jarvis.decideApproval,
     voiceEnabled: jarvis.voiceEnabled,
     setVoiceEnabled: jarvis.setVoiceEnabled,

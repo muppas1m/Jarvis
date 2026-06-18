@@ -46,22 +46,43 @@ export function ApprovalCard({
 }) {
   const { tool_name, tool_args, status } = approval;
   const resolving = status === "resolving";
-  const resolved = status === "approved" || status === "rejected";
+  const discarded = status === "discarded";
+  const resolved = status === "approved" || status === "rejected" || discarded;
   const entries = Object.entries(tool_args ?? {});
 
   return (
-    <div className="rounded-xl border border-amber/40 bg-amber/5 p-4">
+    <div
+      className={`rounded-xl border p-4 ${
+        discarded
+          ? "border-ink-dim/20 bg-white/[0.02] opacity-60"
+          : "border-amber/40 bg-amber/5"
+      }`}
+    >
       <div className="mb-2.5 flex items-center justify-between gap-2">
-        <span className="rounded border border-amber/40 bg-amber/10 px-2 py-0.5 font-mono text-xs uppercase tracking-wider text-amber">
-          ⚠ Approve · {tool_name}
+        <span
+          className={`rounded border px-2 py-0.5 font-mono text-xs uppercase tracking-wider ${
+            discarded
+              ? "border-ink-dim/30 bg-white/5 text-ink-dim"
+              : "border-amber/40 bg-amber/10 text-amber"
+          }`}
+        >
+          {discarded ? "•" : "⚠ Approve"} · {tool_name}
         </span>
         {resolved && (
           <span
             className={`font-mono text-xs uppercase tracking-wider ${
-              status === "approved" ? "text-ok" : "text-danger"
+              status === "approved"
+                ? "text-ok"
+                : status === "rejected"
+                  ? "text-danger"
+                  : "text-ink-dim"
             }`}
           >
-            {status === "approved" ? "Approved ✓" : "Rejected ✗"}
+            {status === "approved"
+              ? "Approved ✓"
+              : status === "rejected"
+                ? "Rejected ✗"
+                : "Discarded — superseded"}
           </span>
         )}
       </div>

@@ -98,6 +98,35 @@ async def resolve_approval(
         return approval.thread_id
 
 
+async def get_thread_decisions(thread_id: str) -> list[dict[str, Any]]:
+    """All decision rows for a thread (ANY status), oldest first — the source for
+    the dashboard's in-stream decision cards.
+
+    Scoped to thread_id so another channel's approvals (e.g. a Telegram-origin
+    decision) never leak into the web conversation. Each dict is positioned in the
+    message stream by ``interrupt_id`` (== the proposing tool_call_id)."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(PendingApproval)
+            .where(PendingApproval.thread_id == thread_id)
+            .order_by(PendingApproval.created_at.asc())
+        )
+        rows = result.scalars().all()
+    return [
+        {
+            "approval_id": str(r.id),
+            "interrupt_id": r.interrupt_id,
+            "tool_name": (r.payload or {}).get("tool_name") or r.action_type,
+            "tool_args": (r.payload or {}).get("tool_args") or {},
+            "description": r.description,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+        }
+        for r in rows
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # HTTP API                                                                    #
 # --------------------------------------------------------------------------- #

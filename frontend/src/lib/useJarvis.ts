@@ -2,37 +2,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentState, ApprovalRequest, ChatMessage, StreamEvent } from "./types";
+import type {
+  AgentState,
+  ApprovalRequest,
+  ApprovalStatus,
+  StreamEvent,
+  StreamItem,
+} from "./types";
 
 // Playback gain. Piper runs with normalize_audio=False (no buzz), which leaves
 // the JARVIS voice quiet (~-14 dBFS); this lifts it back to a clean level
 // (~1.8x → peak ≈ 11k/32767, no clipping). Tune by ear.
 const PLAYBACK_GAIN = 1.8;
 
-// Conversation persistence (A1, hardened): the thread is SERVER-AUTHORITATIVE.
-// The backend resolves the master's single canonical thread from the
-// authenticated session (no client-held thread id), so the conversation is
-// identical across reloads, browsers, devices, and a cleared cache. The
-// server's thread_id is cached in-memory for the session only — never in
-// localStorage, which used to be the (client-owned) source of truth.
+// Conversation persistence (A1/A2 hardened): the thread is SERVER-AUTHORITATIVE
+// (the backend resolves the master's single canonical thread from the session),
+// and the conversation is an ordered `items` timeline — message bubbles AND
+// decision cards interleaved in position — so a reload re-renders resolved /
+// discarded cards exactly where they happened, not just plain text.
 
-/** A backend history row (runner._serialize_message). Only human + ai-with-text
- *  rows become chat bubbles; tool rows and tool-call-only ai rows are skipped. */
-interface HistoryRow {
-  role: string;
-  content: string;
-}
-
-function rowsToMessages(rows: HistoryRow[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  for (const r of rows) {
-    if (r.role === "human") {
-      out.push({ id: crypto.randomUUID(), role: "user", content: r.content });
-    } else if (r.role === "ai" && r.content.trim()) {
-      out.push({ id: crypto.randomUUID(), role: "assistant", content: r.content });
-    }
-  }
-  return out;
+/** A raw row of GET /api/chat/history `items` (message bubble or decision card). */
+interface BackendItem {
+  type: "message" | "decision";
+  role?: "user" | "assistant";
+  content?: string;
+  approval_id?: string;
+  tool_name?: string;
+  tool_args?: Record<string, unknown>;
+  description?: string;
+  status?: string;
 }
 
 /** The decide endpoint returns a TurnEnvelope; we only read these fields. */
@@ -42,13 +40,35 @@ interface DecideEnvelope {
   interrupt?: unknown;
 }
 
-/** A pending row from GET /api/approvals (backend PendingApprovalView). */
-interface PendingApprovalRow {
-  id: string;
-  thread_id: string;
-  action_type: string;
-  description: string;
-  payload?: { tool_name?: string; tool_args?: Record<string, unknown> };
+function normalizeStatus(s?: string): ApprovalStatus {
+  if (s === "approved") return "approved";
+  if (s === "rejected") return "rejected";
+  if (s === "discarded" || s === "expired") return "discarded";
+  return "pending";
+}
+
+/** GET /api/chat/history `items` → renderable StreamItem[]. */
+function itemsFromHistory(raw: BackendItem[]): StreamItem[] {
+  return raw.map((it) =>
+    it.type === "decision"
+      ? {
+          type: "decision" as const,
+          id: it.approval_id ?? crypto.randomUUID(),
+          approval: {
+            approval_id: it.approval_id ?? "",
+            tool_name: it.tool_name ?? "action",
+            tool_args: it.tool_args ?? {},
+            description: it.description,
+            status: normalizeStatus(it.status),
+          },
+        }
+      : {
+          type: "message" as const,
+          id: crypto.randomUUID(),
+          role: it.role === "user" ? ("user" as const) : ("assistant" as const),
+          content: it.content ?? "",
+        },
+  );
 }
 
 /** Normalize an `approval_required` / chained-interrupt payload → ApprovalRequest. */
@@ -68,17 +88,6 @@ function approvalFromInterrupt(raw: unknown): ApprovalRequest | null {
   };
 }
 
-/** Normalize a pending row from GET /api/approvals → ApprovalRequest. */
-function approvalFromRow(r: PendingApprovalRow): ApprovalRequest {
-  return {
-    approval_id: r.id,
-    tool_name: r.payload?.tool_name ?? r.action_type ?? "action",
-    tool_args: r.payload?.tool_args ?? {},
-    description: r.description,
-    status: "pending",
-  };
-}
-
 /**
  * Unified Jarvis turn hook — text or voice.
  *
@@ -92,13 +101,12 @@ function approvalFromRow(r: PendingApprovalRow): ApprovalRequest {
  * silences playback — the barge-in foundation.
  */
 export function useJarvis() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [items, setItems] = useState<StreamItem[]>([]);
   const [agentState, setAgentState] = useState<AgentState>("idle");
   const [caption, setCaption] = useState("");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
-  const approvalRef = useRef<ApprovalRequest | null>(null);
-  approvalRef.current = approval;
+  // approval_ids currently being decided — guards against a double-submit.
+  const decidingRef = useRef<Set<string>>(new Set());
 
   const threadRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -230,15 +238,20 @@ export function useJarvis() {
         nextStartRef.current = ctx.currentTime;
       }
       streamDoneRef.current = false;
-      setApproval(null); // clear any resolved card when a new turn starts
+      // Resolved/discarded cards PERSIST in the stream — nothing to clear here.
 
-      const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: trimmed };
       const aiId = crypto.randomUUID();
-      setMessages((m) => [...m, userMsg, { id: aiId, role: "assistant", content: "" }]);
+      setItems((m) => [
+        ...m,
+        { type: "message", id: crypto.randomUUID(), role: "user", content: trimmed },
+        { type: "message", id: aiId, role: "assistant", content: "" },
+      ]);
       setAgentState("thinking");
 
       const patch = (content: string) =>
-        setMessages((m) => m.map((x) => (x.id === aiId ? { ...x, content } : x)));
+        setItems((m) =>
+          m.map((x) => (x.type === "message" && x.id === aiId ? { ...x, content } : x)),
+        );
 
       const ac = new AbortController();
       abortRef.current = ac;
@@ -293,9 +306,12 @@ export function useJarvis() {
               case "approval_required": {
                 const a = approvalFromInterrupt(ev.content);
                 if (a) {
-                  setApproval(a);
-                  // No empty assistant bubble — the inline card is the surface.
-                  if (!acc) setMessages((m) => m.filter((x) => x.id !== aiId));
+                  setItems((m) => {
+                    // Drop the empty assistant placeholder (no preamble text) —
+                    // the decision card is the surface — then append the card.
+                    const base = acc ? m : m.filter((x) => x.id !== aiId);
+                    return [...base, { type: "decision", id: a.approval_id, approval: a }];
+                  });
                 }
                 break;
               }
@@ -328,21 +344,30 @@ export function useJarvis() {
     [voiceEnabled, ensureAudio, enqueueAudio, stop],
   );
 
-  // Decide the live approval inline: POST the master's decision, append the
-  // resumed turn's result to the chat, and flip the card to a resolved state. A
-  // chained interrupt (the resume hit ANOTHER approval) re-surfaces a new card.
+  // Decide a pending decision card inline: POST the master's approve/reject, flip
+  // THAT card to its resolved state, and append the resumed turn's result to the
+  // stream. A chained interrupt (the resume hit ANOTHER approval) appends a fresh
+  // pending card. Resolved/discarded cards stay in the stream (persisted history).
   const decideApproval = useCallback(
-    async (approved: boolean, reason?: string) => {
-      const current = approvalRef.current;
-      if (!current || current.status !== "pending") return;
-      setApproval({ ...current, status: "resolving" });
+    async (approvalId: string, approved: boolean, reason?: string) => {
+      if (decidingRef.current.has(approvalId)) return; // no double-submit
+      decidingRef.current.add(approvalId);
+      const setStatus = (status: ApprovalStatus) =>
+        setItems((m) =>
+          m.map((x) =>
+            x.type === "decision" && x.approval.approval_id === approvalId
+              ? { ...x, approval: { ...x.approval, status } }
+              : x,
+          ),
+        );
       const appendAssistant = (content: string) =>
-        setMessages((m) => [
+        setItems((m) => [
           ...m,
-          { id: crypto.randomUUID(), role: "assistant", content },
+          { type: "message", id: crypto.randomUUID(), role: "assistant", content },
         ]);
+      setStatus("resolving");
       try {
-        const res = await fetch(`/api/approvals/${current.approval_id}/decide`, {
+        const res = await fetch(`/api/approvals/${approvalId}/decide`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
@@ -351,44 +376,49 @@ export function useJarvis() {
         });
         if (!res.ok) {
           // 404 → resolved/expired elsewhere (e.g. via Telegram). Mark it done.
-          setApproval({ ...current, status: approved ? "approved" : "rejected" });
+          setStatus(approved ? "approved" : "rejected");
           appendAssistant("⚠ That approval is no longer available.");
           return;
         }
         const env = (await res.json()) as DecideEnvelope;
+        setStatus(approved ? "approved" : "rejected");
         appendAssistant(
-          (env.response || "").trim() ||
-            (approved ? "Done, Sir." : "Cancelled, Sir."),
+          (env.response || "").trim() || (approved ? "Done, Sir." : "Cancelled, Sir."),
         );
         const chained =
           env.status === "interrupted" ? approvalFromInterrupt(env.interrupt) : null;
-        setApproval(
-          chained ?? { ...current, status: approved ? "approved" : "rejected" },
-        );
+        if (chained) {
+          setItems((m) => [
+            ...m,
+            { type: "decision", id: chained.approval_id, approval: chained },
+          ]);
+        }
       } catch {
-        setApproval({ ...current, status: approved ? "approved" : "rejected" });
+        setStatus(approved ? "approved" : "rejected");
         appendAssistant("⚠ Could not reach Jarvis to record that decision.");
+      } finally {
+        decidingRef.current.delete(approvalId);
       }
     },
     [],
   );
 
   // Hydrate the master's conversation once on mount. /history resolves the
-  // server-authoritative canonical thread (no thread_id sent) and returns its id
-  // + history; we cache the id in-memory for the session and replay the bubbles.
-  // Race guard: hydrate ONLY into an empty message list — if the master already
-  // started a turn before the fetch resolved, never clobber it.
+  // server-authoritative canonical thread and returns the ordered items timeline
+  // (message bubbles + decision cards, incl. resolved/discarded/pending in
+  // position — so a reload mid-approval re-surfaces the live card too). Race
+  // guard: hydrate ONLY into an empty stream — never clobber a started turn.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const res = await fetch("/api/chat/history");
         if (!res.ok) return;
-        const data = (await res.json()) as { thread_id?: string; messages?: HistoryRow[] };
+        const data = (await res.json()) as { thread_id?: string; items?: BackendItem[] };
         if (cancelled) return;
         if (data.thread_id) threadRef.current = data.thread_id;
-        const restored = rowsToMessages(data.messages ?? []);
-        if (restored.length) setMessages((prev) => (prev.length ? prev : restored));
+        const hydrated = itemsFromHistory(data.items ?? []);
+        if (hydrated.length) setItems((prev) => (prev.length ? prev : hydrated));
       } catch {
         /* unreachable backend → start fresh */
       }
@@ -398,35 +428,15 @@ export function useJarvis() {
     };
   }, []);
 
-  // Re-surface a still-pending approval for the canonical thread on mount, so a
-  // reload mid-approval doesn't lose the card. Single-master: any pending row is
-  // this conversation's. The guard never clobbers an already-live approval.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch("/api/approvals");
-        if (!res.ok) return;
-        const rows = (await res.json()) as PendingApprovalRow[];
-        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
-        setApproval((prev) => prev ?? approvalFromRow(rows[0]));
-      } catch {
-        /* ignore — nothing to re-surface */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   return {
-    messages,
+    items,
     agentState,
     caption,
     voiceEnabled,
     setVoiceEnabled,
-    needsApproval: approval?.status === "pending",
-    approval,
+    needsApproval: items.some(
+      (it) => it.type === "decision" && it.approval.status === "pending",
+    ),
     decideApproval,
     getAmplitude,
     send,

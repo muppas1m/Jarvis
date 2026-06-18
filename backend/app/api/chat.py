@@ -38,9 +38,39 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent.runner import canonical_thread_id, get_history, run_turn, stream_turn
+from app.api.approvals import get_thread_decisions
 from app.security.auth import UserContext, get_current_user
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+def _conversation_items(
+    messages: list[dict[str, Any]], decisions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Interleave message history with decision cards into ONE ordered timeline.
+
+    A decision is positioned by its ``interrupt_id`` (== the tool_call_id of the
+    AIMessage that proposed it), so cards land in conversation position WITHOUT
+    needing message timestamps. Tool messages are dropped — their outcome shows in
+    the card's status + the agent's following reply. The result is what the
+    dashboard renders top-to-bottom: user/assistant bubbles + decision cards
+    (pending / approved / rejected / discarded) in place across reloads."""
+    by_interrupt = {d["interrupt_id"]: d for d in decisions if d.get("interrupt_id")}
+    items: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role == "human":
+            if content:
+                items.append({"type": "message", "role": "user", "content": m["content"]})
+        elif role == "ai":
+            if content:
+                items.append({"type": "message", "role": "assistant", "content": m["content"]})
+            for tc in m.get("tool_calls") or []:
+                decision = by_interrupt.get(tc.get("id"))
+                if decision:
+                    items.append({"type": "decision", **decision})
+    return items
 
 
 class ChatRequest(BaseModel):
@@ -74,11 +104,14 @@ async def chat_history(
 
     thread_id is optional: when omitted (the dashboard's normal call) the master's
     canonical thread is resolved SERVER-SIDE from the authenticated identity — the
-    thread is never client-supplied. Reads the LangGraph checkpointer via
-    runner.get_history and returns the same serialized message shape live turns
-    emit. Empty list for a fresh thread. Read-only — runs no turn."""
+    thread is never client-supplied. Returns an ordered ``items`` timeline (message
+    bubbles + decision cards interleaved in conversation position) so a reload
+    re-renders the conversation — including resolved/discarded decision cards —
+    exactly where they happened. Read-only — runs no turn."""
     tid = thread_id or canonical_thread_id(user.user_id)
-    return {"thread_id": tid, "messages": await get_history(tid)}
+    messages = await get_history(tid)
+    decisions = await get_thread_decisions(tid)
+    return {"thread_id": tid, "items": _conversation_items(messages, decisions)}
 
 
 @router.post("/stream", response_model=None)

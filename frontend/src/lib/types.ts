@@ -13,7 +13,12 @@ export interface ChatMessage {
  *  (interrupt payload) OR GET /api/approvals (a pending row). `tool_args` is the
  *  REAL structured action — rendered field-by-field so the card shows exactly
  *  what will execute, never an LLM re-summary. */
-export type ApprovalStatus = "pending" | "resolving" | "approved" | "rejected";
+export type ApprovalStatus =
+  | "pending"
+  | "resolving"
+  | "approved"
+  | "rejected"
+  | "discarded"; // superseded by an edit — kept in the stream, greyed
 
 export interface ApprovalRequest {
   approval_id: string;
@@ -22,6 +27,13 @@ export interface ApprovalRequest {
   description?: string;
   status: ApprovalStatus;
 }
+
+/** One row of the chat timeline: a message bubble OR a decision card. The whole
+ *  conversation (incl. resolved/discarded cards) is an ordered StreamItem[] so a
+ *  reload re-renders decisions in conversation position. */
+export type StreamItem =
+  | { type: "message"; id: string; role: "user" | "assistant"; content: string }
+  | { type: "decision"; id: string; approval: ApprovalRequest };
 
 /** Mirrors backend PendingApprovalView (app/api/approvals.py). */
 export interface ApprovalView {

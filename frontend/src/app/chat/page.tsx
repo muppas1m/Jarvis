@@ -33,10 +33,9 @@ export default function ChatPage() {
   // Full-duplex voice loop (4.3a): wake → capture → turn → barge-in → continuity.
   // Owns the turn, the orb state, and the wake-word transport.
   const {
-    messages,
+    items,
     caption,
     needsApproval,
-    approval,
     decideApproval,
     voiceEnabled,
     setVoiceEnabled,
@@ -48,7 +47,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, approval]);
+  }, [items]);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -143,33 +142,39 @@ export default function ChatPage() {
         {/* Transcript panel */}
         <section className="glass flex min-h-0 flex-1 flex-col rounded-xl">
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
-            {messages.length === 0 && (
+            {items.length === 0 && (
               <p className="mt-8 text-center text-sm text-ink-dim">
                 At your service, Sir. How may I help?
               </p>
             )}
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
-              >
+            {items.map((it) =>
+              it.type === "message" ? (
                 <div
-                  className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-4 py-2 text-sm ${
-                    m.role === "user"
-                      ? "border border-cyan/30 bg-cyan/10 text-ink"
-                      : "border border-white/5 bg-black/30 text-ink"
-                  }`}
+                  key={it.id}
+                  className={it.role === "user" ? "flex justify-end" : "flex justify-start"}
                 >
-                  {m.content || <span className="text-ink-dim caret" />}
+                  <div
+                    className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-4 py-2 text-sm ${
+                      it.role === "user"
+                        ? "border border-cyan/30 bg-cyan/10 text-ink"
+                        : "border border-white/5 bg-black/30 text-ink"
+                    }`}
+                  >
+                    {it.content || <span className="text-ink-dim caret" />}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {approval && (
-              <div className="flex justify-start">
-                <div className="w-full max-w-[90%]">
-                  <ApprovalCard approval={approval} onDecide={decideApproval} />
+              ) : (
+                <div key={it.id} className="flex justify-start">
+                  <div className="w-full max-w-[90%]">
+                    <ApprovalCard
+                      approval={it.approval}
+                      onDecide={(approved) =>
+                        decideApproval(it.approval.approval_id, approved)
+                      }
+                    />
+                  </div>
                 </div>
-              </div>
+              ),
             )}
           </div>
 
