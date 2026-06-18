@@ -12,8 +12,9 @@ Request:
   POST /api/chat
   Body: {"message": "...", "thread_id": "optional-..."}
 
-  thread_id is optional. When missing we mint a fresh "web:<uuid>" thread
-  so the dashboard can start a new conversation without juggling IDs.
+  thread_id is optional. When omitted, the master's canonical web thread is
+  resolved SERVER-SIDE from the authenticated identity (one continuous
+  conversation) — the dashboard never supplies or stores a thread id.
 
 Response shape: see TurnEnvelope in app.agent.runner — same shape returned
 by /api/approvals/{id}/decide so clients write one renderer for both
@@ -30,14 +31,13 @@ with provider-reported cost. The per-turn number here is a fast-path
 hint for client UIs; production accounting belongs on `/costs`.
 """
 import json
-import uuid
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.runner import get_history, run_turn, stream_turn
+from app.agent.runner import canonical_thread_id, get_history, run_turn, stream_turn
 from app.security.auth import UserContext, get_current_user
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -47,7 +47,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
     thread_id: Optional[str] = Field(
         default=None,
-        description="Existing conversation thread. If omitted a fresh web:<uuid> thread is minted.",
+        description="Override the conversation thread (debugging). If omitted, the master's canonical server-side thread is used.",
     )
 
 
@@ -56,7 +56,7 @@ async def chat(
     payload: ChatRequest,
     user: UserContext = Depends(get_current_user),
 ) -> dict[str, Any]:
-    thread_id = payload.thread_id or f"web:{uuid.uuid4().hex[:12]}"
+    thread_id = payload.thread_id or canonical_thread_id(user.user_id)
     return await run_turn(
         user_message=payload.message,
         thread_id=thread_id,
@@ -67,15 +67,18 @@ async def chat(
 
 @router.get("/history", response_model=None)
 async def chat_history(
-    thread_id: str,
+    thread_id: Optional[str] = None,
     user: UserContext = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Replay a thread's persisted conversation for the dashboard on reload.
+    """Replay the master's persisted conversation for the dashboard on reload.
 
-    Reads the LangGraph checkpointer (canonical per thread_id) via
+    thread_id is optional: when omitted (the dashboard's normal call) the master's
+    canonical thread is resolved SERVER-SIDE from the authenticated identity — the
+    thread is never client-supplied. Reads the LangGraph checkpointer via
     runner.get_history and returns the same serialized message shape live turns
-    emit. Empty list for an unknown/fresh thread. Read-only — runs no turn."""
-    return {"thread_id": thread_id, "messages": await get_history(thread_id)}
+    emit. Empty list for a fresh thread. Read-only — runs no turn."""
+    tid = thread_id or canonical_thread_id(user.user_id)
+    return {"thread_id": tid, "messages": await get_history(tid)}
 
 
 @router.post("/stream", response_model=None)
@@ -92,7 +95,7 @@ async def chat_stream(
     the canonical final on done/approval_required. See
     `app.agent.runner.stream_turn` for the event contract.
     """
-    thread_id = payload.thread_id or f"web:{uuid.uuid4().hex[:12]}"
+    thread_id = payload.thread_id or canonical_thread_id(user.user_id)
 
     async def event_stream() -> AsyncIterator[str]:
         async for event in stream_turn(

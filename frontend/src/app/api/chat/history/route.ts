@@ -10,15 +10,11 @@ export async function GET(req: Request): Promise<Response> {
   if (!session?.user) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
+  // thread_id is optional — when absent the backend resolves the master's
+  // canonical (server-authoritative) thread. Forward it only if explicitly given.
   const threadId = new URL(req.url).searchParams.get("thread_id");
-  if (!threadId) {
-    return Response.json({ error: "thread_id required" }, { status: 400 });
-  }
-  const upstream = await backendFetch(
-    `/api/chat/history?thread_id=${encodeURIComponent(threadId)}`,
-  );
-  const data = await upstream
-    .json()
-    .catch(() => ({ thread_id: threadId, messages: [] }));
+  const qs = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+  const upstream = await backendFetch(`/api/chat/history${qs}`);
+  const data = await upstream.json().catch(() => ({ messages: [] }));
   return Response.json(data, { status: upstream.status });
 }

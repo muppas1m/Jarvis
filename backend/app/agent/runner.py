@@ -98,6 +98,21 @@ def _config_with_handler(thread_id: str) -> tuple[dict, Any | None]:
     return config, handler
 
 
+# The master is a single continuous web conversation, not multi-thread: the
+# dashboard's thread is anchored SERVER-SIDE to the authenticated identity, NOT a
+# client-minted uuid, so it's identical across reloads, browsers, devices, and a
+# cleared cache. A future "start fresh" lever resets THIS thread's checkpoint
+# (reset_thread) rather than minting a new id — so no persisted pointer is needed.
+# The "web:" scope is explicit so a later cross-channel unification (one thread
+# across web + Telegram) is a clean seam, not a rename.
+def canonical_thread_id(channel_user_id: str) -> str:
+    """The master's stable web thread id, derived from the authenticated identity
+    (UserContext.user_id). Server-authoritative — replaces per-request uuid
+    minting. Endpoints still ACCEPT an explicit thread_id (debugging); this is the
+    default when the client sends none."""
+    return f"web:{channel_user_id}"
+
+
 async def get_history(thread_id: str) -> list[dict[str, Any]]:
     """Replay a thread's persisted messages from the checkpointer (read-only).
 

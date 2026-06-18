@@ -12,7 +12,6 @@ pulses to Jarvis's voice. Auth is the standard protected-router dependency
 """
 import asyncio
 import json
-import uuid
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -20,7 +19,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.runner import voice_turn
+from app.agent.runner import canonical_thread_id, voice_turn
 from app.config import settings
 from app.security.auth import UserContext, get_current_user
 from app.utils.logging import get_logger
@@ -55,7 +54,7 @@ async def voice_stream(
     payload: VoiceRequest,
     user: UserContext = Depends(get_current_user),
 ) -> StreamingResponse:
-    thread_id = payload.thread_id or f"web:{uuid.uuid4().hex[:12]}"
+    thread_id = payload.thread_id or canonical_thread_id(user.user_id)
 
     async def event_stream() -> AsyncIterator[str]:
         async for event in voice_turn(
