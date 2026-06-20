@@ -503,12 +503,76 @@ def _audio_event(text: str, audio: bytes, *, filler: bool = False) -> dict[str, 
     }
 
 
-def _approval_speech(interrupt: dict[str, Any]) -> str:
-    """Spoken form of an approval request. In 4.1 the master still resolves it
-    with the Approve/Reject buttons; the hands-free voice resolver is 4.3."""
-    tool = (interrupt or {}).get("tool_name", "an action")
+def _approval_speech(interrupt: dict[str, Any], revised: bool = False) -> str:
+    """Concise spoken form of an approval request, NAMING the key fields so the
+    master can confirm by ear (hands-free voice resolution, A2 Piece 3). When
+    ``revised`` (a re-drafted card after an edit), lead with "Updated" so the
+    master hears that their change landed."""
     h = settings.MASTER_HONORIFIC
-    return f"{h}, I've prepared {tool}. Please review and approve it when you're ready."
+    tool = (interrupt or {}).get("tool_name", "an action")
+    args = (interrupt or {}).get("tool_args") or {}
+    if tool == "gmail_send":
+        to = args.get("to") or "someone"
+        subj = args.get("subject")
+        detail = f"an email to {to}" + (f", subject '{subj}'" if subj else "")
+        verb = "send it"
+    elif tool == "calendar_create":
+        title = args.get("summary") or args.get("title") or "an event"
+        detail = f"the event '{title}'"
+        verb = "add it"
+    else:
+        keys = ", ".join(f"{k} {v}" for k, v in list(args.items())[:2])
+        detail = tool + (f" — {keys}" if keys else "")
+        verb = "go ahead"
+    if revised:
+        return f"Updated, {h} — {detail}. Shall I {verb}?"
+    return f"{h}, I've prepared {detail}. Shall I {verb}?"
+
+
+async def _speak_text(text: str) -> dict[str, Any] | None:
+    """Synthesize one spoken line → an audio event (None if TTS yields nothing).
+    Module-level twin of voice_turn's inner _speak, for the voice resolver path."""
+    audio = await synthesize(text)
+    return _audio_event(text, audio) if audio else None
+
+
+async def _resolve_pending_voice(
+    thread_id: str, transcript: str
+) -> AsyncIterator[dict[str, Any]]:
+    """Voice variant of _resolve_pending_stream: the SAME decision_resolved /
+    approval_required / done events (so the card updates identically to text),
+    PLUS a concise spoken response so the master resolves the card hands-free.
+    Reuses _resolve_pending unchanged — no forked resolution logic."""
+    result = await _resolve_pending(thread_id, transcript)
+    outcome = result["outcome"]
+    if outcome == "unrelated":
+        env = _pending_interrupt_envelope(thread_id)
+        ev = await _speak_text(env["response"])
+        if ev:
+            yield ev
+        yield {"type": "done", "content": _terminal_payload(env)}
+        return
+    yield {
+        "type": "decision_resolved",
+        "thread_id": thread_id,
+        "content": {"approval_id": result["approval_id"], "status": outcome},
+    }
+    env = result["envelope"] or {}
+    if env.get("status") == "interrupted":
+        interrupt = env.get("interrupt") or {}
+        ev = await _speak_text(_approval_speech(interrupt, revised=True))
+        if ev:
+            yield ev
+        yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
+    else:
+        h = settings.MASTER_HONORIFIC
+        spoken = (env.get("response") or "").strip() or (
+            f"Done, {h}." if outcome == "approved" else f"Cancelled, {h}."
+        )
+        ev = await _speak_text(spoken)
+        if ev:
+            yield ev
+        yield {"type": "done", "content": _terminal_payload(env)}
 
 
 async def voice_turn(
@@ -538,11 +602,14 @@ async def voice_turn(
     config, handler = _config_with_handler(thread_id)
 
     if await _is_awaiting_approval(thread_id):
-        env = _pending_interrupt_envelope(thread_id)
-        audio = await synthesize(env["response"])
-        if audio:
-            yield _audio_event(env["response"], audio)
-        yield {"type": "done", "content": _terminal_payload(env)}
+        # A live decision card + a spoken reply → resolve it by voice through the
+        # SAME resolver as text (approve / reject / edit / unrelated), with a
+        # concise spoken response. The conservative resolver (ambient/ambiguous →
+        # unrelated, never approve) is the safety; capture only fires on real
+        # speech. A2 Piece 3. (The wake transport / barge-in is untouched.)
+        logger.info("voice_turn_resolving_pending_interrupt", thread_id=thread_id)
+        async for ev in _resolve_pending_voice(thread_id, user_message):
+            yield ev
         return
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
