@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.config import settings
 from app.documents.ingestion import ingest_document
@@ -45,11 +45,16 @@ _READ_BLOCK = 1 << 20  # 1 MiB
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
+    thread_id: str | None = Form(default=None),
     user: UserContext = Depends(get_current_user),
 ) -> dict:
     """Upload and ingest a document. Returns the ingestion result, including
     ``deduplicated`` / ``replaced`` so the caller knows whether a re-upload was a
-    no-op. Auth required; owner is the authenticated user."""
+    no-op. Auth required; owner is the authenticated user.
+
+    Optional ``thread_id`` (the dashboard's canonical web thread): when given, a
+    persistent '📎 Indexed …' marker is appended to that conversation so a reload
+    shows the upload in place (in-chat upload, sub-phase 4.A / A3)."""
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
     if not filename or ext not in ALLOWED_EXTENSIONS:
@@ -92,6 +97,10 @@ async def upload_document(
             deduplicated=result.get("deduplicated"),
             replaced=result.get("replaced"),
         )
+        if thread_id:
+            from app.agent.runner import note_document_upload  # lazy — avoid cycle
+
+            await note_document_upload(thread_id, filename, result)
         return result
     finally:
         if tmp_path and os.path.exists(tmp_path):

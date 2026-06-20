@@ -129,6 +129,35 @@ async def get_history(thread_id: str) -> list[dict[str, Any]]:
     return [_serialize_message(m) for m in messages]
 
 
+async def note_document_upload(
+    thread_id: str, filename: str, result: dict[str, Any]
+) -> None:
+    """Append a persistent '📎' marker to the thread so a reload shows an in-chat
+    document upload in conversation position (frontier-consistency with the
+    decision cards + message history).
+
+    Skipped when the thread is paused at an approval interrupt — appending a
+    message after a pending tool_call would disturb its resolution; there the
+    dashboard's transient upload status is the record. Best-effort: a failure
+    (including a rare race with a concurrently-streaming turn) is logged and never
+    fails the upload itself."""
+    try:
+        if await _is_awaiting_approval(thread_id):
+            return
+        chunks = result.get("chunks_stored", 0)
+        if result.get("deduplicated"):
+            note = f"📎 {filename} is already indexed — nothing to re-ingest."
+        elif result.get("replaced"):
+            note = f"📎 Re-indexed {filename} — {chunks} chunks (updated to the latest pipeline)."
+        else:
+            note = f"📎 Indexed {filename} — {chunks} chunks. Ask me anything about it."
+        config = {"configurable": {"thread_id": thread_id}}
+        await graph().aupdate_state(config, {"messages": [AIMessage(content=note)]})
+        logger.info("document_upload_noted", thread_id=thread_id, filename=filename)
+    except Exception as exc:  # noqa: BLE001 — the marker is best-effort
+        logger.warning("document_upload_note_failed", thread_id=thread_id, error=str(exc))
+
+
 async def run_turn(
     user_message: str,
     thread_id: str,

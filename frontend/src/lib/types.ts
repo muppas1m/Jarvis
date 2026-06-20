@@ -28,12 +28,27 @@ export interface ApprovalRequest {
   status: ApprovalStatus;
 }
 
-/** One row of the chat timeline: a message bubble OR a decision card. The whole
- *  conversation (incl. resolved/discarded cards) is an ordered StreamItem[] so a
- *  reload re-renders decisions in conversation position. */
+/** An in-chat document upload (A3), shown live in the timeline. Transient
+ *  (client-side) — the backend appends a persistent "📎 Indexed …" marker that
+ *  re-renders as a message on reload. Sync endpoint, so status = request
+ *  lifecycle (no polling). */
+export interface UploadItem {
+  name: string;
+  status: "uploading" | "done" | "error";
+  chunks?: number;
+  dedup?: boolean;
+  replaced?: boolean;
+  error?: string;
+}
+
+/** One row of the chat timeline: a message bubble, a decision card, or a
+ *  document upload. The whole conversation (incl. resolved/discarded cards) is an
+ *  ordered StreamItem[] so a reload re-renders everything in conversation
+ *  position. */
 export type StreamItem =
   | { type: "message"; id: string; role: "user" | "assistant"; content: string }
-  | { type: "decision"; id: string; approval: ApprovalRequest };
+  | { type: "decision"; id: string; approval: ApprovalRequest }
+  | { type: "upload"; id: string; upload: UploadItem };
 
 /** Mirrors backend PendingApprovalView (app/api/approvals.py). */
 export interface ApprovalView {

@@ -8,6 +8,7 @@ import { signOut } from "next-auth/react";
 
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { BootSequence } from "@/components/BootSequence";
+import { UploadChip } from "@/components/UploadChip";
 import { clearBootPending } from "@/lib/boot";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
 
@@ -28,7 +29,9 @@ const STATE_LABEL: Record<string, string> = {
 export default function ChatPage() {
   const [input, setInput] = useState("");
   const [wakeOn, setWakeOn] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Full-duplex voice loop (4.3a): wake → capture → turn → barge-in → continuity.
   // Owns the turn, the orb state, and the wake-word transport.
@@ -37,6 +40,7 @@ export default function ChatPage() {
     caption,
     needsApproval,
     decideApproval,
+    uploadDocument,
     voiceEnabled,
     setVoiceEnabled,
     getAmplitude,
@@ -58,6 +62,19 @@ export default function ChatPage() {
 
   function toggleWake() {
     setWakeOn((on) => !on); // the loop flips voiceEnabled on when enabled
+  }
+
+  function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (f) uploadDocument(f);
+    e.target.value = ""; // let the same file be re-picked
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) uploadDocument(f);
   }
 
   const voiceActive = voiceEnabled || wakeOn;
@@ -140,7 +157,25 @@ export default function ChatPage() {
         </section>
 
         {/* Transcript panel */}
-        <section className="glass flex min-h-0 flex-1 flex-col rounded-xl">
+        <section
+          className="glass relative flex min-h-0 flex-1 flex-col rounded-xl"
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            setDragging(false);
+          }}
+          onDrop={onDrop}
+        >
+          {dragging && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-cyan/60 bg-black/70 backdrop-blur-sm">
+              <p className="font-mono text-sm uppercase tracking-widest text-cyan glow">
+                Drop to upload &amp; index
+              </p>
+            </div>
+          )}
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
             {items.length === 0 && (
               <p className="mt-8 text-center text-sm text-ink-dim">
@@ -163,7 +198,7 @@ export default function ChatPage() {
                     {it.content || <span className="text-ink-dim caret" />}
                   </div>
                 </div>
-              ) : (
+              ) : it.type === "decision" ? (
                 <div key={it.id} className="flex justify-start">
                   <div className="w-full max-w-[90%]">
                     <ApprovalCard
@@ -174,11 +209,32 @@ export default function ChatPage() {
                     />
                   </div>
                 </div>
+              ) : (
+                <div key={it.id} className="flex justify-start">
+                  <div className="w-full max-w-[90%]">
+                    <UploadChip upload={it.upload} />
+                  </div>
+                </div>
               ),
             )}
           </div>
 
           <form onSubmit={submit} className="flex gap-2 border-t border-cyan/10 p-3">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".pdf,.docx,.xlsx,.txt,.md,.csv"
+              className="hidden"
+              onChange={onPickFile}
+            />
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              title="Attach a document (PDF, Word, Excel, text, CSV)"
+              className="rounded-lg border border-cyan/30 px-3 py-2.5 text-base text-cyan transition hover:bg-cyan/10"
+            >
+              📎
+            </button>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}

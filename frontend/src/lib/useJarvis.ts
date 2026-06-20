@@ -8,7 +8,14 @@ import type {
   ApprovalStatus,
   StreamEvent,
   StreamItem,
+  UploadItem,
 } from "./types";
+
+// In-chat document upload (A3) — mirror the backend's allow-list + 25 MB cap so
+// an unsupported / oversized file fails INSTANTLY client-side, before a doomed
+// round-trip. The backend re-validates (it's the authority).
+const ALLOWED_UPLOAD_EXTS = new Set([".pdf", ".docx", ".xlsx", ".txt", ".md", ".csv"]);
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 // Playback gain. Piper runs with normalize_audio=False (no buzz), which leaves
 // the JARVIS voice quiet (~-14 dBFS); this lifts it back to a clean level
@@ -417,6 +424,62 @@ export function useJarvis() {
     [],
   );
 
+  // Upload a document straight into the chat (A3): validate client-side, append a
+  // live status chip to the timeline, stream the multipart to the BFF, then flip
+  // the chip to its terminal state (indexed / already-indexed / re-indexed /
+  // error). Passes thread_id so the backend persists a "📎 Indexed" marker.
+  // Independent of the turn stream + decision cards — never interferes with either.
+  const uploadDocument = useCallback(async (file: File) => {
+    const id = crypto.randomUUID();
+    const ext = "." + (file.name.split(".").pop() ?? "").toLowerCase();
+    const append = (upload: UploadItem) =>
+      setItems((m) => [...m, { type: "upload", id, upload }]);
+    const patch = (u: Partial<UploadItem>) =>
+      setItems((m) =>
+        m.map((x) =>
+          x.type === "upload" && x.id === id ? { ...x, upload: { ...x.upload, ...u } } : x,
+        ),
+      );
+
+    if (!ALLOWED_UPLOAD_EXTS.has(ext)) {
+      append({
+        name: file.name,
+        status: "error",
+        error: `Unsupported type ${ext || "(none)"} — allowed: pdf, docx, xlsx, txt, md, csv.`,
+      });
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      append({ name: file.name, status: "error", error: "File exceeds the 25 MB limit." });
+      return;
+    }
+    append({ name: file.name, status: "uploading" });
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      if (threadRef.current) fd.append("thread_id", threadRef.current);
+      const res = await fetch("/api/documents/upload", { method: "POST", body: fd });
+      if (!res.ok) {
+        const e = (await res.json().catch(() => ({}))) as { detail?: string };
+        patch({ status: "error", error: e.detail || `Upload failed (${res.status}).` });
+        return;
+      }
+      const r = (await res.json()) as {
+        chunks_stored?: number;
+        deduplicated?: boolean;
+        replaced?: boolean;
+      };
+      patch({
+        status: "done",
+        chunks: r.chunks_stored ?? 0,
+        dedup: !!r.deduplicated,
+        replaced: !!r.replaced,
+      });
+    } catch {
+      patch({ status: "error", error: "Could not reach the server." });
+    }
+  }, []);
+
   // Hydrate the master's conversation once on mount. /history resolves the
   // server-authoritative canonical thread and returns the ordered items timeline
   // (message bubbles + decision cards, incl. resolved/discarded/pending in
@@ -452,6 +515,7 @@ export function useJarvis() {
       (it) => it.type === "decision" && it.approval.status === "pending",
     ),
     decideApproval,
+    uploadDocument,
     getAmplitude,
     send,
     stop,

@@ -160,6 +160,7 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     caption: jarvis.caption,
     needsApproval: jarvis.needsApproval,
     decideApproval: jarvis.decideApproval,
+    uploadDocument: jarvis.uploadDocument,
     voiceEnabled: jarvis.voiceEnabled,
     setVoiceEnabled: jarvis.setVoiceEnabled,
     getAmplitude: jarvis.getAmplitude,
