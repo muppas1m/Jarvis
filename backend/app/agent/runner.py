@@ -298,7 +298,12 @@ async def _resolve_pending(thread_id: str, user_message: str) -> dict[str, Any]:
         thread_id,
         {"approved": False, "revise": True, "feedback": res.change, "user_msg": user_message},
     )
-    return {"outcome": "discarded", "approval_id": approval_id, "envelope": env}
+    return {
+        "outcome": "discarded",
+        "approval_id": approval_id,
+        "envelope": env,
+        "change": res.change,  # surfaced so the voice path can echo the edit
+    }
 
 
 async def _resolve_pending_stream(
@@ -503,11 +508,14 @@ def _audio_event(text: str, audio: bytes, *, filler: bool = False) -> dict[str, 
     }
 
 
-def _approval_speech(interrupt: dict[str, Any], revised: bool = False) -> str:
+def _approval_speech(
+    interrupt: dict[str, Any], revised: bool = False, change: str = ""
+) -> str:
     """Concise spoken form of an approval request, NAMING the key fields so the
     master can confirm by ear (hands-free voice resolution, A2 Piece 3). When
     ``revised`` (a re-drafted card after an edit), lead with "Updated" so the
-    master hears that their change landed."""
+    master hears that their change landed — echoing ``change`` (their requested
+    edit) when given; the card still carries the full detail."""
     h = settings.MASTER_HONORIFIC
     tool = (interrupt or {}).get("tool_name", "an action")
     args = (interrupt or {}).get("tool_args") or {}
@@ -525,6 +533,8 @@ def _approval_speech(interrupt: dict[str, Any], revised: bool = False) -> str:
         detail = tool + (f" — {keys}" if keys else "")
         verb = "go ahead"
     if revised:
+        if change:
+            return f"Updated — {change}. Shall I {verb}?"
         return f"Updated, {h} — {detail}. Shall I {verb}?"
     return f"{h}, I've prepared {detail}. Shall I {verb}?"
 
@@ -560,7 +570,8 @@ async def _resolve_pending_voice(
     env = result["envelope"] or {}
     if env.get("status") == "interrupted":
         interrupt = env.get("interrupt") or {}
-        ev = await _speak_text(_approval_speech(interrupt, revised=True))
+        speech = _approval_speech(interrupt, revised=True, change=result.get("change", ""))
+        ev = await _speak_text(speech)
         if ev:
             yield ev
         yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
