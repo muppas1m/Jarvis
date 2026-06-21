@@ -175,12 +175,17 @@ def _date_context(current_datetime: str, tz_name: str) -> str:
     )
 
 
+VOICE_MODE_BLOCK = """## Voice mode — you are SPEAKING this reply aloud
+The master is LISTENING, not reading, so be brief and conversational: a few spoken sentences. Lead with the key answer or a digestible overview; do NOT read out long lists, multi-paragraph detail, or whole-document dumps aloud — spoken, that becomes a minutes-long monologue. When there's substantially more, give the gist and OFFER to go deeper ("I can go into the detail if you'd like, Sir"). Brevity is the courtesy here. (Full detail still streams as on-screen text.)"""
+
+
 def build_system_prompt(
     always_on_profile: dict,
     on_demand_profile: list[dict],
     memories: list[dict],
     platform: str,
     current_datetime: str,
+    voice: bool = False,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -234,9 +239,13 @@ def build_system_prompt(
         date_context=_date_context(current_datetime, timezone),
     )
 
+    # Voice turns get a brevity directive appended to the stable behavioral prefix
+    # (its own KV-cache lineage, separate from text turns) so a "detailed summary"
+    # spoken aloud is a digestible overview, not a dozens-of-Piper-calls monologue.
+    voice_block = ("\n" + VOICE_MODE_BLOCK) if voice else ""
     return (
         IDENTITY_BLOCK + _persona_line() + "\n" + CAPABILITIES_BLOCK + "\n"
-        + SAFETY_DOCTRINE + "\n" + volatile
+        + SAFETY_DOCTRINE + voice_block + "\n" + volatile
     )
 
 

@@ -16,6 +16,8 @@ the bytes + the advertised mime.
 """
 from __future__ import annotations
 
+import asyncio
+
 from app.config import settings
 from app.utils.logging import get_logger
 
@@ -29,21 +31,28 @@ def audio_mime() -> str:
 
 
 async def synthesize(text: str) -> bytes:
-    """Synthesize one text chunk to audio bytes. Returns b"" on empty input or
-    any provider error (voice is best-effort)."""
+    """Synthesize one text chunk to audio bytes. Returns b"" on empty input, any
+    provider error, OR a timeout — voice is best-effort, and one stuck/slow
+    sentence must degrade (skip) rather than stall the whole spoken read-out.
+
+    Bounded by ``settings.TTS_TIMEOUT_S`` (parity with transcribe's WHISPER_TIMEOUT_S):
+    Piper runs CPU-bound in a thread, so a wedged synth would otherwise hold a
+    pool thread + leave the read-out hanging mid-sentence."""
     text = (text or "").strip()
     if not text:
         return b""
     provider = settings.TTS_PROVIDER.lower()
     try:
         if provider == "piper":
-            return await _piper(text)
-        if provider == "edge":
-            return await _edge(text)
-        logger.warning("tts_unknown_provider", provider=provider)
-        return b""
-    except Exception as exc:  # noqa: BLE001 — best-effort; never break the turn
-        logger.error("tts_failed", provider=provider, error=str(exc))
+            coro = _piper(text)
+        elif provider == "edge":
+            coro = _edge(text)
+        else:
+            logger.warning("tts_unknown_provider", provider=provider)
+            return b""
+        return await asyncio.wait_for(coro, timeout=settings.TTS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — TimeoutError or any provider error; never break the turn
+        logger.error("tts_failed", provider=provider, error=f"{type(exc).__name__}: {exc}")
         return b""
 
 

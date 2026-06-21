@@ -164,7 +164,11 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: str = ""
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_HOST: str = "http://localhost:3002"   # 3000/3001 occupied on this dev box
-    LANGFUSE_ENABLED: bool = True
+    # Default OFF: the self-hosted langfuse stack is heavy (~2.6GB) + now profile-gated
+    # in docker-compose. Containers force this via compose's JARVIS_TRACING var; flip on
+    # only with the `observability` profile up. Both callback paths (LiteLLM + LangGraph)
+    # are gated on this, so OFF = traces dropped, never a request error (fail-open).
+    LANGFUSE_ENABLED: bool = False
 
     # --- Security ------------------------------------------------------------
     ENCRYPTION_KEY: str = ""
@@ -217,6 +221,11 @@ class Settings(BaseSettings):
     EDGE_TTS_VOICE: str = "en-GB-RyanNeural"
     # Metered-voice daily cap (only bites when a cloud TTS like ElevenLabs is on).
     VOICE_DAILY_COST_CAP_USD: float = 1.00
+    # Bound ONE sentence's synthesis (parity with WHISPER_TIMEOUT_S on transcribe):
+    # tts.synthesize wraps the provider call in asyncio.wait_for so a stuck/slow synth
+    # degrades to b"" (that sentence is skipped) instead of stalling the read-out.
+    # Piper is normally sub-300ms/sentence, so this only bites on an anomaly.
+    TTS_TIMEOUT_S: int = 15
 
     # Wake-word (Phase 4.2 — server-side openWakeWord "hey jarvis"). Fire the
     # "wake" event when the score exceeds WAKE_THRESHOLD — lowered for fewer

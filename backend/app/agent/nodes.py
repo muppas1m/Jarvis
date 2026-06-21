@@ -176,6 +176,12 @@ async def agent_node(state: AgentState) -> dict:
     )
     logger.info("node_timing", node="tool_select", ms=int((time.monotonic() - _t_sel) * 1000))
 
+    # Voice mode (set by voice_turn) → a brevity directive in the prompt + fast-tier
+    # routing below. Read once here; both consumers reuse it.
+    from app.llm.stream_mode import voice_mode
+
+    is_voice = voice_mode.get()
+
     # Stable-prefix-first system prompt for KV cache friendliness.
     always_on_dict = state.get("user_profile_always_on") or {}
     system_prompt = build_system_prompt(
@@ -187,6 +193,7 @@ async def agent_node(state: AgentState) -> dict:
         memories=state.get("relevant_memories", []),
         platform=state["platform"],
         current_datetime=datetime.now(timezone.utc).isoformat(),
+        voice=is_voice,
     )
 
     msgs: list[BaseMessage] = [SystemMessage(content=system_prompt)]
@@ -203,10 +210,8 @@ async def agent_node(state: AgentState) -> dict:
     # FAST tier for sub-second first-token; escalate to the frontier model once
     # tools have run (synthesising a tool result is where deep reasoning earns
     # its latency). The brain is unchanged — only the model speed is tuned.
-    from app.llm.stream_mode import voice_mode
-
     primary_model = settings.PRIMARY_MODEL
-    if voice_mode.get() and settings.VOICE_FAST_TIER:
+    if is_voice and settings.VOICE_FAST_TIER:
         has_tool_results = any(isinstance(m, ToolMessage) for m in state["messages"])
         primary_model = settings.PRIMARY_MODEL if has_tool_results else settings.FAST_MODEL
 

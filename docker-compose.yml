@@ -3,6 +3,11 @@ services:
     build: ./backend
     container_name: jarvis-backend
     restart: unless-stopped
+    # Memory cap: a runaway (e.g. a rerank balloon atop a leaked baseline) OOM-kills
+    # THIS container — contained + auto-restart — instead of swap-freezing the whole
+    # ~7.8GB VM (where /api/health hangs and voice+text both die). Idle ~2.6GB + the
+    # ~1.4GB rerank balloon ≈ 4GB, so 5g leaves headroom while still bounding a leak.
+    mem_limit: 5g
     env_file: .env
     environment:
       # Override the .env URLs so the container reaches sibling services via the
@@ -17,6 +22,15 @@ services:
       # rather than the host's localhost:3002, which inside this container
       # resolves to the container itself and 502s on every callback.
       LANGFUSE_HOST: http://langfuse-web:3000
+      # Observability is OFF by default: the langfuse stack is profile-gated (below)
+      # and idles at ~2.6GB. False here means the backend NEVER calls langfuse — both
+      # the LiteLLM success_callback (wire_langfuse_callback) and the LangGraph handler
+      # are gated on LANGFUSE_ENABLED, so traces are simply dropped, never a request
+      # error (verified fail-open). Uses a dedicated JARVIS_TRACING var (not in .env, so
+      # the .env LANGFUSE_ENABLED=true doesn't leak in via interpolation) → defaults
+      # false. Opt in BOTH together:
+      #   JARVIS_TRACING=true docker compose --profile observability up -d
+      LANGFUSE_ENABLED: "${JARVIS_TRACING:-false}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -41,6 +55,7 @@ services:
     build: ./backend
     container_name: jarvis-celery-worker
     restart: unless-stopped
+    mem_limit: 1500m   # prefork children each import the app; cap a leak/runaway
     env_file: .env
     environment:
       # Same overrides as backend: container DNS for sibling services.
@@ -49,6 +64,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_ENABLED: "${JARVIS_TRACING:-false}"   # off by default — see backend note
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -58,7 +74,10 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: celery -A app.scheduler.celery_app worker --loglevel=info --concurrency=4
+    # concurrency=2 (was 4): each prefork child re-imports the whole app (~370MB) →
+    # 4 children idled ~1.5GB. A single-master assistant's periodic tasks (gmail poll,
+    # digests, scheduled jobs) don't need 4-way parallelism; 2 ≈ halves the footprint.
+    command: celery -A app.scheduler.celery_app worker --loglevel=info --concurrency=2
 
   celery-beat:
     build: ./backend
@@ -78,6 +97,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_ENABLED: "${JARVIS_TRACING:-false}"   # off by default — see backend note
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -150,6 +170,12 @@ services:
   langfuse-db:
     image: postgres:16-alpine
     container_name: jarvis-langfuse-db
+    # The whole langfuse stack (these 7 services) is OFF by default — it idles at
+    # ~2.6GB and was the largest reclaimable consumer that tipped the ~7.8GB VM into
+    # OOM. Opt in: `JARVIS_TRACING=true docker compose --profile observability up -d`
+    # (the env var also flips the app's LANGFUSE_ENABLED). See
+    # project_langfuse_stack_weight_deferral.
+    profiles: ["observability"]
     restart: unless-stopped
     environment:
       POSTGRES_DB: langfuse
@@ -166,6 +192,7 @@ services:
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:24
     container_name: jarvis-langfuse-clickhouse
+    profiles: ["observability"]
     restart: unless-stopped
     user: "101:101"
     environment:
@@ -188,6 +215,7 @@ services:
   langfuse-redis:
     image: redis:7-alpine
     container_name: jarvis-langfuse-redis
+    profiles: ["observability"]
     restart: unless-stopped
     # noeviction is critical for a queue — anything else can drop pending jobs
     command: redis-server --maxmemory 512mb --maxmemory-policy noeviction
@@ -202,6 +230,7 @@ services:
   langfuse-minio:
     image: minio/minio:latest
     container_name: jarvis-langfuse-minio
+    profiles: ["observability"]
     restart: unless-stopped
     entrypoint: sh
     # Pre-create the data dir, then run minio. The `mkdir` is harmless on re-runs.
@@ -223,6 +252,7 @@ services:
   langfuse-minio-init:
     image: minio/mc:latest
     container_name: jarvis-langfuse-minio-init
+    profiles: ["observability"]
     depends_on:
       langfuse-minio:
         condition: service_healthy
@@ -238,6 +268,7 @@ services:
   langfuse-worker:
     image: langfuse/langfuse-worker:3
     container_name: jarvis-langfuse-worker
+    profiles: ["observability"]
     restart: unless-stopped
     depends_on:
       langfuse-db:
@@ -284,6 +315,7 @@ services:
   langfuse-web:
     image: langfuse/langfuse:3
     container_name: jarvis-langfuse-web
+    profiles: ["observability"]
     restart: unless-stopped
     depends_on:
       langfuse-worker:
