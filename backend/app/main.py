@@ -187,17 +187,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # populates litellm's global model cache that the agent's primary-model call
     # reuses. Best-effort, never blocks boot (same discipline as reranker/whisper).
     async def _warm_llm_gateway() -> None:
-        try:
-            from app.llm.gateway import llm_gateway
+        from app.llm.gateway import llm_gateway
 
-            await llm_gateway.complete(
-                messages=[{"role": "user", "content": "warmup"}],
-                task_type="reasoning",   # primary slot — the agent's model
-                temperature=0.0,
-            )
-            logger.info("llm_gateway_warmed")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("llm_gateway_warmup_failed", error=str(exc))
+        # Warm BOTH the agent's primary slot (typed turns) AND the fast slot
+        # (voice first-token + classification) — the voice path is where the cold
+        # silence actually showed. The llama3 tokenizer is shared, but warming
+        # each slot also exercises its provider + model-info cache.
+        for task_type in ("reasoning", "classification"):
+            try:
+                await llm_gateway.complete(
+                    messages=[{"role": "user", "content": "warmup"}],
+                    task_type=task_type,
+                    temperature=0.0,
+                )
+                logger.info("llm_gateway_warmed", task_type=task_type)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("llm_gateway_warmup_failed", task_type=task_type, error=str(exc))
 
     asyncio.create_task(_warm_llm_gateway())
 
