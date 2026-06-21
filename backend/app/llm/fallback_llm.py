@@ -57,18 +57,30 @@ def _default_retry_predicate(exc: BaseException) -> bool:
     if isinstance(exc, litellm.Timeout):
         return True
 
-    # BadRequestError is overloaded. Narrow to the specific Groq tool-call
-    # malformation pattern; let other shapes propagate so we notice them.
-    if isinstance(exc, litellm.BadRequestError):
-        msg = str(exc).lower()
-        if "tool_use_failed" in msg:
-            return True
-        if "failed to call a function" in msg:
-            return True
-        return False
+    # Groq's tool-call malformation (llama emitting Llama-native function syntax
+    # instead of OpenAI tool_calls) surfaces in TWO shapes depending on mode:
+    #   - non-streaming (run_turn): a litellm.BadRequestError whose message
+    #     carries "tool_use_failed" / "failed to call a function".
+    #   - streaming (agent_node sets streaming=True for the dashboard): litellm
+    #     re-wraps it MID-STREAM as a MidStreamFallbackError — root cause a
+    #     ValueError from int('tool_use_failed') (litellm's own mid-stream
+    #     fallback choking on the non-numeric Groq status). That is NOT a
+    #     BadRequestError, so the old isinstance-gated check missed it and the
+    #     streaming doc-question died as "internal error".
+    # Match the signature on the MESSAGE across ANY exception type so the
+    # streaming agent path falls over to gpt-4o-mini exactly like run_turn does —
+    # for document_search or any other tool. See
+    # project_open_weights_tool_schema_and_conversation_poisoning.
+    msg = str(exc).lower()
+    if (
+        "tool_use_failed" in msg
+        or "failed to call a function" in msg
+        or "midstreamfallbackerror" in msg
+    ):
+        return True
 
-    # Everything else — including AuthenticationError, InvalidRequestError
-    # for genuinely-bad input, RecursionError, etc. — propagate.
+    # Everything else — AuthenticationError, model-not-found / genuinely-bad-input
+    # BadRequestError, RecursionError, etc. — propagates so we still notice it.
     return False
 
 
