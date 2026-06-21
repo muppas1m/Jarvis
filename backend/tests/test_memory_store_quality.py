@@ -13,11 +13,13 @@ for teardown — see test_memory_recall_integration._wipe_thread).
 """
 import uuid
 
+import numpy as np
 import pytest
 from sqlalchemy import text
 
 from app.config import settings
 from app.db.engine import async_session
+from app.memory.consolidation import _auto_decision, _cluster, _norm, _Row
 from app.memory.manager import MemoryManager
 
 
@@ -146,3 +148,56 @@ async def test_dedup_skips_true_duplicate_keeps_distinct(
         f"a distinct fact's nearest neighbor scored {nearest:.4f} >= the dedup gate "
         f"({settings.MEM0_DEDUP_THRESHOLD}) — it would be wrongly skipped."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Consolidation engine — deterministic core (clustering + auto-merge). The LLM
+# adjudication path is non-deterministic and exercised by the dry-run, not here.
+# --------------------------------------------------------------------------- #
+def _row(mem_id: str, content: str, created_at: str, vec: np.ndarray) -> _Row:
+    return _Row(mem_id=mem_id, content=content, created_at=created_at, vector=vec)
+
+
+def test_consolidation_clusters_similar_excludes_distinct() -> None:
+    """_cluster groups near-identical vectors and leaves a distinct one out
+    (singletons are nothing to consolidate)."""
+    near = np.array([1.0, 0.0, 0.0, 0.02], dtype=np.float32)
+    rows = [
+        _row("a", "x", "2026-01-01", np.array([1.0, 0.0, 0.0, 0.00], dtype=np.float32)),
+        _row("b", "x", "2026-01-02", near),
+        _row("c", "x", "2026-01-03", np.array([1.0, 0.0, 0.0, 0.04], dtype=np.float32)),
+        _row("d", "y", "2026-01-04", np.array([0.0, 1.0, 0.0, 0.00], dtype=np.float32)),  # orthogonal
+    ]
+    clusters = _cluster(rows, threshold=0.99)
+    assert len(clusters) == 1, f"expected one cluster, got {clusters}"
+    assert set(clusters[0]) == {0, 1, 2}, "the orthogonal 'd' must not be clustered"
+
+
+def test_consolidation_auto_merge_keeps_newest_drops_rest() -> None:
+    """A cluster whose rows are the SAME normalized text is pure re-extraction:
+    auto-merge keeps the newest and drops the rest, confidence 1.0, no LLM."""
+    v = np.ones(4, dtype=np.float32)
+    cluster = [
+        _row("old", "User's name is Mahesh", "2026-01-01T00:00:00", v),
+        _row("mid", "User's name is Mahesh.", "2026-01-02T00:00:00", v),   # same after _norm
+        _row("new", "user's name is mahesh", "2026-01-03T00:00:00", v),    # same after _norm
+    ]
+    decision = _auto_decision(cluster)
+    assert decision is not None, "identical-text cluster should auto-merge"
+    assert decision.confidence == 1.0
+    assert {d.drop_id for d in decision.drops} == {"old", "mid"}, "must keep the newest ('new')"
+    assert all(d.folds_into_id == "new" for d in decision.drops)
+    assert all(d.reason == "duplicate" for d in decision.drops)
+
+
+def test_consolidation_auto_merge_refuses_varying_text() -> None:
+    """A cluster with DIFFERENT facts must NOT auto-merge — it returns None so the
+    decision goes to the (conservative) LLM, never an unsupervised drop. This is
+    the guard against silently dropping a distinct fact."""
+    v = np.ones(4, dtype=np.float32)
+    cluster = [
+        _row("a", "User likes coffee", "2026-01-01T00:00:00", v),
+        _row("b", "User likes tea", "2026-01-02T00:00:00", v),
+    ]
+    assert _auto_decision(cluster) is None
+    assert _norm("User's name is Mahesh.") == _norm("user's name is  mahesh")
