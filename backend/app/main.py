@@ -179,6 +179,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     asyncio.create_task(_warm_whisper())
 
+    # Warm the LLM gateway path in the BACKGROUND so the first real turn doesn't
+    # pay a cold litellm tokenizer / model-info fetch on the hot path (the symptom
+    # was a silent, slow first turn after a fresh load). The model ping below pings
+    # each provider, but a real turn goes through the gateway's complete() (token
+    # accounting + cost tracking) — exercising that here on the `reasoning` slot
+    # populates litellm's global model cache that the agent's primary-model call
+    # reuses. Best-effort, never blocks boot (same discipline as reranker/whisper).
+    async def _warm_llm_gateway() -> None:
+        try:
+            from app.llm.gateway import llm_gateway
+
+            await llm_gateway.complete(
+                messages=[{"role": "user", "content": "warmup"}],
+                task_type="reasoning",   # primary slot — the agent's model
+                temperature=0.0,
+            )
+            logger.info("llm_gateway_warmed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("llm_gateway_warmup_failed", error=str(exc))
+
+    asyncio.create_task(_warm_llm_gateway())
+
     await _startup_model_ping(logger)
 
     # --- channels -----------------------------------------------------------

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { signOut } from "next-auth/react";
+import { signOut, useSession } from "next-auth/react";
 
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { BootSequence } from "@/components/BootSequence";
@@ -47,7 +47,17 @@ export default function ChatPage() {
     send,
     orbState,
     statusLabel,
+    turnError,
+    retry,
   } = useVoiceLoop({ enabled: wakeOn });
+
+  // Composer readiness: the session must be established before a turn can
+  // authenticate, and a turn is "in flight" while Jarvis is thinking/responding.
+  // Gate the composer on both so a fresh-load first message never fires into a
+  // void or double-submits mid-turn.
+  const { status: sessionStatus } = useSession();
+  const ready = sessionStatus === "authenticated";
+  const busy = orbState === "thinking" || orbState === "responding";
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -55,7 +65,7 @@ export default function ChatPage() {
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || busy || !ready) return;
     send(input);
     setInput("");
   }
@@ -195,7 +205,17 @@ export default function ChatPage() {
                         : "border border-white/5 bg-black/30 text-ink"
                     }`}
                   >
-                    {it.content || <span className="text-ink-dim caret" />}
+                    {it.content || (
+                      <span className="inline-flex gap-1 py-1" aria-label="Jarvis is thinking">
+                        {[0, 1, 2].map((i) => (
+                          <span
+                            key={i}
+                            className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan/70"
+                            style={{ animationDelay: `${i * 200}ms` }}
+                          />
+                        ))}
+                      </span>
+                    )}
                   </div>
                 </div>
               ) : it.type === "decision" ? (
@@ -219,6 +239,19 @@ export default function ChatPage() {
             )}
           </div>
 
+          {turnError && (
+            <div className="flex items-center justify-between gap-2 border-t border-danger/20 bg-danger/5 px-3 py-2 text-xs text-danger">
+              <span>⚠ That message didn&apos;t go through.</span>
+              <button
+                type="button"
+                onClick={retry}
+                className="rounded-md border border-cyan/40 px-2.5 py-1 font-mono uppercase tracking-wider text-cyan transition hover:bg-cyan/10"
+              >
+                ⟳ Retry
+              </button>
+            </div>
+          )}
+
           <form onSubmit={submit} className="flex gap-2 border-t border-cyan/10 p-3">
             <input
               ref={fileRef}
@@ -238,14 +271,25 @@ export default function ChatPage() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={wakeOn ? 'say "Hey Jarvis…" or type…' : voiceEnabled ? "Message Jarvis — he'll speak…" : "Message Jarvis…"}
-              className="flex-1 rounded-lg border border-cyan/20 bg-black/30 px-4 py-2.5 text-sm text-ink outline-none focus:border-cyan focus:ring-1 focus:ring-cyan/40"
+              disabled={!ready}
+              placeholder={
+                !ready
+                  ? "Connecting…"
+                  : wakeOn
+                    ? 'say "Hey Jarvis…" or type…'
+                    : voiceEnabled
+                      ? "Message Jarvis — he'll speak…"
+                      : "Message Jarvis…"
+              }
+              className="flex-1 rounded-lg border border-cyan/20 bg-black/30 px-4 py-2.5 text-sm text-ink outline-none transition focus:border-cyan focus:ring-1 focus:ring-cyan/40 disabled:opacity-50"
             />
             <button
               type="submit"
-              className="rounded-lg border border-cyan/50 bg-cyan/10 px-5 py-2.5 font-mono text-sm uppercase tracking-widest text-cyan transition hover:bg-cyan/20"
+              disabled={!ready || busy || !input.trim()}
+              title={!ready ? "Connecting…" : busy ? "Jarvis is responding…" : "Send"}
+              className="rounded-lg border border-cyan/50 bg-cyan/10 px-5 py-2.5 font-mono text-sm uppercase tracking-widest text-cyan transition hover:bg-cyan/20 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-cyan/10"
             >
-              Send
+              {busy ? "···" : "Send"}
             </button>
           </form>
         </section>

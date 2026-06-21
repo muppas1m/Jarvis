@@ -112,6 +112,9 @@ export function useJarvis() {
   const [agentState, setAgentState] = useState<AgentState>("idle");
   const [caption, setCaption] = useState("");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  // The user message of the last turn that ERRORED (network/backend) — drives the
+  // retry affordance so a failed turn never just leaves the user with silence.
+  const [turnError, setTurnError] = useState<string | null>(null);
   // approval_ids currently being decided — guards against a double-submit.
   const decidingRef = useRef<Set<string>>(new Set());
 
@@ -238,6 +241,7 @@ export function useJarvis() {
       const trimmed = text.trim();
       if (!trimmed) return;
 
+      setTurnError(null); // a fresh attempt clears any prior failure
       stop(); // cancel any in-flight turn (barge-in foundation)
       const voice = voiceEnabled;
       if (voice) {
@@ -354,7 +358,8 @@ export function useJarvis() {
         }
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
-          patch("⚠ Could not reach Jarvis. Please try again.");
+          patch("⚠ Could not reach Jarvis.");
+          setTurnError(trimmed); // surface a retry affordance for this message
         }
         streamDoneRef.current = true;
         if (!voice) setAgentState("idle");
@@ -364,6 +369,11 @@ export function useJarvis() {
     },
     [voiceEnabled, ensureAudio, enqueueAudio, stop],
   );
+
+  // Re-send the last failed message (the retry affordance).
+  const retry = useCallback(() => {
+    if (turnError) void send(turnError);
+  }, [turnError, send]);
 
   // Decide a pending decision card inline: POST the master's approve/reject, flip
   // THAT card to its resolved state, and append the resumed turn's result to the
@@ -519,5 +529,7 @@ export function useJarvis() {
     getAmplitude,
     send,
     stop,
+    turnError,
+    retry,
   };
 }
