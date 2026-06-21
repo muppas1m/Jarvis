@@ -31,11 +31,11 @@ Isolation:
   cleanup walks get_all() and deletes any memory whose
   metadata.thread_id matches the test thread.
 """
-import asyncio
 import uuid
 
 import pytest
 
+from app.config import settings
 from app.memory.manager import MemoryManager
 
 
@@ -151,4 +151,108 @@ async def test_recall_with_unknown_thread_id_returns_empty(
     assert hits == [], (
         f"recall on a bogus thread_id returned {len(hits)} hits — "
         f"the thread_id filter isn't working."
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_discriminates_relevant_from_unrelated(
+    mem_manager: MemoryManager,
+    test_thread_id: str,
+    memory_cleanup,
+) -> None:
+    """The core 4.B.1 proof: a query's genuinely-relevant memory out-scores
+    unrelated ones with a CLEAR gap, and is top-ranked.
+
+    Root cause (project_mem0_search_quality_root): Mem0 v2's high-level search
+    does HYBRID retrieval and fuses scores `combined = (semantic + bm25) / 2`,
+    which halves + compresses the cosine into an indistinguishable ~0.29-0.48
+    band — the relevant fact was NOT reliably top-ranked and unrelated noise
+    scored the same. `mem0.search` now bypasses that fusion and returns the TRUE
+    cosine, so discrimination is restored.
+
+    A rare namespace token isolates these three rows above the live corpus so
+    they're retrievable in top-k regardless of corpus size (mirrors the Zorblax
+    isolation above; corpus is ~1.4k rows). The assertion is RELATIVE — relevant
+    strictly above unrelated, with a gap the old fused path (gaps < ~0.05) could
+    not produce."""
+    ns = f"Qmark{test_thread_id[-6:]}"  # rare token → ranks our rows above corpus
+    relevant = f"{ns}. I am allergic to shellfish - shrimp and crab give me hives."
+    unrelated_1 = f"{ns}. My favorite programming language is Rust."
+    unrelated_2 = f"{ns}. I usually go hiking in the hills on Sunday mornings."
+    for content in (relevant, unrelated_1, unrelated_2):
+        await _add_no_infer(mem_manager, content=content, thread_id=test_thread_id)
+
+    query = f"{ns} which foods am I allergic to"
+    hits = await mem_manager.mem0.search(query=query, top_k=50)
+    ours = {
+        h["content"]: h["score"]
+        for h in hits
+        if (h.get("metadata") or {}).get("thread_id") == test_thread_id
+    }
+
+    assert set(ours) == {relevant, unrelated_1, unrelated_2}, (
+        f"expected all 3 test rows in top-50, got {sorted(k[:40] for k in ours)}. "
+        f"(With the namespace token they should out-rank the live corpus.)"
+    )
+    rel = ours[relevant]
+    top_unrelated = max(ours[unrelated_1], ours[unrelated_2])
+
+    assert rel > top_unrelated, (
+        f"relevant fact (cosine={rel:.4f}) did not out-score the best unrelated "
+        f"fact (cosine={top_unrelated:.4f}) — search is not discriminating."
+    )
+    assert rel - top_unrelated >= 0.10, (
+        f"score separation {rel - top_unrelated:.4f} < 0.10 — too compressed. "
+        f"This is exactly the failure the hybrid-fusion bypass fixes "
+        f"(measured ~0.27 post-fix; old fused gaps were < ~0.05)."
+    )
+    assert rel >= settings.MEM0_RECALL_THRESHOLD, (
+        f"relevant fact cosine {rel:.4f} fell below the recall gate "
+        f"({settings.MEM0_RECALL_THRESHOLD}) — it would be wrongly dropped."
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_context_relevance_gate(
+    mem_manager: MemoryManager,
+    test_thread_id: str,
+    memory_cleanup,
+) -> None:
+    """build_context injects ONLY memories at/above MEM0_RECALL_THRESHOLD — it no
+    longer force-injects the top-10 regardless of score. Proves the recall gate
+    added in 4.B.1.
+
+    Robust against the live corpus (no dependence on any single score straddling
+    the gate): asserts the gate INVARIANT (everything injected clears the
+    threshold) and gate EQUIVALENCE (the injected set is exactly the
+    threshold-filtered, non-profile search hits — deterministic embeddings make
+    build_context's internal search match a raw search), plus that the
+    genuinely-relevant row (cosine ~0.74) still passes the gate."""
+    ns = f"Qmark{test_thread_id[-6:]}"
+    relevant = f"{ns}. I am allergic to shellfish - shrimp and crab give me hives."
+    await _add_no_infer(mem_manager, content=relevant, thread_id=test_thread_id)
+
+    query = f"{ns} which foods am I allergic to"
+    raw = await mem_manager.mem0.search(query=query, top_k=10)
+    ctx = await mem_manager.build_context(user_message=query)
+    injected = ctx["relevant_memories"]
+    threshold = settings.MEM0_RECALL_THRESHOLD
+
+    # (1) Invariant: nothing sub-threshold reaches <memories>.
+    below = [(round(m["score"], 3), (m.get("content") or "")[:40]) for m in injected if m["score"] < threshold]
+    assert not below, f"sub-threshold memories injected into <memories>: {below}"
+
+    # (2) Equivalence: the gate is exactly a threshold filter on the non-profile hits.
+    expected_ids = {
+        r["id"] for r in raw
+        if r["score"] >= threshold and (r["metadata"] or {}).get("kind") != "profile"
+    }
+    assert {m["id"] for m in injected} == expected_ids, (
+        "build_context's injected set is not the threshold-filtered search result "
+        "— the recall gate isn't applied consistently."
+    )
+
+    # (3) The genuinely-relevant row passed the gate (cosine ~0.74 >> 0.5).
+    assert any(m.get("content") == relevant for m in injected), (
+        "the relevant memory was wrongly dropped by the recall gate."
     )

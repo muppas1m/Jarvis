@@ -47,15 +47,26 @@ class Settings(BaseSettings):
 
     # --- Mem0 interim bloat controls (P5c) -----------------------------------
     # Dedup-on-write: skip a write when an existing memory is near-identical
-    # (cosine score >= threshold). DISABLED by default — P5c calibration showed
-    # today's Mem0 search scores near-identical content at only ~0.45 (raw-turn
-    # query vs condensed-fact store + degraded recall), so it can never fire at a
-    # safe threshold and would just burn one dead search per write. Flip ON +
-    # tune the threshold once Turn 26.5 fixes search/recall quality (the same
-    # degraded search is why Mem0's own infer-dedup fails and the bloat grows).
-    # The ACTIVE interim lever is trivial-turn gating (manager._is_trivial_turn).
+    # (cosine score >= threshold). DISABLED by default. P5c's original blocker —
+    # "search scores near-identical content at only ~0.45, so it can never fire
+    # at a safe threshold" — is RESOLVED as of 4.B.1: mem0_client.search now
+    # returns the true cosine (near-identical ~0.9+), so MEM0_DEDUP_THRESHOLD=0.92
+    # is now meaningful. Re-enabling + calibrating dedup is deliberately scoped to
+    # 4.B.2 (auto-save extraction-scoping + dedup), NOT 4.B.1 (recall-only). The
+    # ACTIVE interim lever remains trivial-turn gating (manager._is_trivial_turn).
     MEM0_DEDUP_ENABLED: bool = False
     MEM0_DEDUP_THRESHOLD: float = 0.92
+
+    # --- Recall relevance gate (4.B.1) ---------------------------------------
+    # Minimum TRUE-cosine score for a memory to be injected into the agent's
+    # <memories> context. mem0_client.search now returns the raw cosine (it
+    # bypasses Mem0 v2's hybrid fusion, which halved + compressed every score
+    # into an indistinguishable ~0.29-0.48 band — see
+    # project_mem0_search_quality_root), so a threshold is finally meaningful:
+    # measured unrelated query↔memory cosines sit ~0.40 and genuinely relevant
+    # ones ~0.57-0.85, so 0.5 cleanly drops the noise the old always-top-10 path
+    # injected as "relevant." Tunable.
+    MEM0_RECALL_THRESHOLD: float = 0.5
 
     # --- Embedding model (LOCKED at BGE-M3, schema depends on dim) -----------
     EMBEDDING_MODEL: str = "ollama/bge-m3"

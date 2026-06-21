@@ -13,6 +13,7 @@ Mem0 v2 deviations from the implementation plan:
   - Plan's LLM config used `"provider": "litellm"`. v2 still has this and
     we keep it so swapping models in `.env` flows through Mem0 too.
 """
+import asyncio
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,6 +24,33 @@ from app.llm.bootstrap import wire_litellm_providers
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Columns Mem0 writes into every pgvector row's payload alongside OUR metadata.
+# Everything in a payload that ISN'T one of these is a key we set (thread_id,
+# kind, key, …) and belongs in the caller-facing `metadata` dict.
+_MEM0_SYSTEM_PAYLOAD_KEYS = frozenset({
+    "data", "hash", "created_at", "updated_at",
+    "user_id", "agent_id", "run_id", "actor_id", "role", "text_lemmatized",
+})
+
+
+def _shape_vector_hit(row: Any) -> dict[str, Any]:
+    """Vector-store ``OutputData`` → our ``{id, content, score, metadata}`` shape.
+
+    ``content`` is the memory text (``payload['data']``); ``metadata`` is the
+    payload minus Mem0's system columns; ``score`` is the raw cosine similarity
+    (``1 - <=> distance``) the store already computed.
+    """
+    payload = dict(getattr(row, "payload", None) or {})
+    content = payload.get("data") or payload.get("memory")
+    metadata = {k: v for k, v in payload.items() if k not in _MEM0_SYSTEM_PAYLOAD_KEYS}
+    return {
+        "id": str(getattr(row, "id", "") or ""),
+        "content": content,
+        "score": float(getattr(row, "score", 0.0) or 0.0),
+        "metadata": metadata,
+    }
+
 
 # Mem0 v2 routes its extraction LLM through LiteLLM, which reads provider keys
 # from os.environ at call time. Without this call, GEMINI_API_KEY (mapped from
@@ -135,26 +163,36 @@ class Mem0Client:
         )
 
     async def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-        """Semantic search over all stored memories.
+        """Pure-semantic search over all stored memories — TRUE cosine, best first.
 
-        Mem0 v2 dropped top-level scope kwargs on search/get_all — entity scope
-        (`user_id`, `agent_id`, `run_id`) now lives in the `filters` dict. The
-        old call signature raises a hard ValueError.
+        We deliberately BYPASS Mem0 v2's high-level ``client.search``. That path
+        does HYBRID retrieval and fuses the scores:
+        ``combined = (semantic + bm25 + entity) / max_possible`` with
+        ``max_possible = 2`` whenever BM25 is active — which HALVES and compresses
+        the cosine into an indistinguishable ~0.29-0.48 band (a 1.0 match reports
+        0.51, a 0.81 match reports 0.42), so recall cannot tell a relevant memory
+        from an unrelated one. That fusion is the root cause diagnosed in 4.B.1
+        (see project_mem0_search_quality_root) and there is no config switch to
+        disable it.
+
+        Instead we embed the query with the SAME ollama embedder and hit the SAME
+        pgvector store directly for the raw cosine (``score = 1 - <=> distance``)
+        and true semantic ordering (``ORDER BY distance``). Entity scope still
+        lives in ``filters`` (Mem0 v2 dropped the top-level scope kwargs). Both
+        underlying calls are sync (CPU/IO-bound) → run off the event loop via
+        ``to_thread``, mirroring Mem0's own AsyncMemory internals.
         """
-        results = await self.client.search(
-            query=query,
-            top_k=top_k,
-            filters={"user_id": self.USER_ID},
+        query_vec = await asyncio.to_thread(
+            self.client.embedding_model.embed, query, "search"
         )
-        return [
-            {
-                "id": m.get("id"),
-                "content": m.get("memory"),
-                "score": m.get("score", 0.0),
-                "metadata": m.get("metadata") or {},
-            }
-            for m in (results.get("results") or [])
-        ]
+        rows = await asyncio.to_thread(
+            self.client.vector_store.search,
+            query,
+            query_vec,
+            top_k,
+            {"user_id": self.USER_ID},
+        )
+        return [_shape_vector_hit(r) for r in rows]
 
     async def get_all(self) -> list[dict[str, Any]]:
         """All memories — used by consolidation + conflict-detection jobs."""

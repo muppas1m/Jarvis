@@ -17,6 +17,7 @@ Tier breakdown:
 """
 from typing import Any
 
+from app.config import settings
 from app.memory.mem0_client import Mem0Client
 from app.memory.user_profile import UserProfileManager
 from app.utils.logging import get_logger
@@ -73,6 +74,16 @@ class MemoryManager:
         (memories whose `kind` is not 'profile')."""
         always_on = await self.profile_mgr.get_always_on()
         relevant = await self.mem0.search(query=user_message, top_k=10)
+
+        # Relevance gate: inject only memories the search is genuinely confident
+        # about. Now that mem0.search returns the true cosine (not Mem0's fused
+        # ~0.4 mush), a threshold is meaningful — unrelated hits (~0.40) drop out
+        # and only real matches (~0.57+) reach the <memories> block, instead of
+        # always force-injecting the top 10. See project_mem0_search_quality_root.
+        relevant = [
+            r for r in relevant
+            if r.get("score", 0.0) >= settings.MEM0_RECALL_THRESHOLD
+        ]
 
         on_demand_profile = [
             r for r in relevant if r["metadata"].get("kind") == "profile"
