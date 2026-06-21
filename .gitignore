@@ -50,3 +50,6 @@ commits.md
 # Eval run artifacts — keep only the committed baseline.json
 backend/evals/results/*.json
 !backend/evals/results/baseline.json
+
+# Local DB backups — real master data, never commit (durable across reboots)
+backend/backups/
