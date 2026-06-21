@@ -80,6 +80,22 @@ class Settings(BaseSettings):
     # injected as "relevant." Tunable.
     MEM0_RECALL_THRESHOLD: float = 0.5
 
+    # --- Conversation compaction (4.B.3) -------------------------------------
+    # At a turn boundary, if the verbatim history exceeds THRESHOLD tokens, the
+    # oldest messages are LLM-summarized into a rolling summary and dropped,
+    # keeping ~KEEP_RECENT tokens verbatim. Durable facts live in Mem0, so the
+    # summary may be lossy on facts but preserves the conversational thread.
+    # Token counts use tiktoken (cl100k) as an APPROXIMATION of llama tokens —
+    # fine for a meter + a tunable threshold (the agent runs on llama/Groq).
+    COMPACT_ENABLED: bool = True
+    COMPACT_THRESHOLD_TOKENS: int = 6000
+    COMPACT_KEEP_RECENT_TOKENS: int = 2500
+    # Summarizer runs on the gateway FALLBACK slot (gpt-4o-mini), NOT the
+    # rate-limited Groq fast tier — so compaction can't persistently fail under
+    # Groq rate-limits and let history grow unbounded.
+    COMPACT_MODEL_SLOT: str = "fallback"
+    COMPACT_TIMEOUT_S: float = 30.0
+
     # --- Embedding model (LOCKED at BGE-M3, schema depends on dim) -----------
     EMBEDDING_MODEL: str = "ollama/bge-m3"
     EMBEDDING_DIMS: int = 1024

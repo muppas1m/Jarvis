@@ -25,13 +25,15 @@ def configure_logging() -> None:
         format="%(message)s",   # structlog renders the actual content
     )
 
-    # Quiet the chattiest third-party loggers so the real signal isn't drowned:
-    #   - httpx / httpcore: one line per request (every litellm provider call).
+    # Quiet the chattiest third-party loggers so the real signal isn't drowned
+    # (they flood especially at LOG_LEVEL=DEBUG):
+    #   - httpx / httpcore: one line per request (every provider call).
     #   - telegram / apscheduler: python-telegram-bot's long-poll logs
-    #     "Calling Bot API endpoint getUpdates" + "No new updates found" every
-    #     ~10s, which dominates the log otherwise.
+    #     "getUpdates" + "No new updates found" every ~10s.
+    #   - LiteLLM: its verbose_logger dumps the full param dict
+    #     ("Params passed to completion()") on EVERY call (worst offender).
     # Pinned to WARNING so only real failures surface.
-    for noisy in ("httpx", "httpcore", "telegram", "apscheduler"):
+    for noisy in ("httpx", "httpcore", "telegram", "apscheduler", "LiteLLM"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     is_prod = settings.ENVIRONMENT == "production"

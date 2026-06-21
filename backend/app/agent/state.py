@@ -23,6 +23,16 @@ class AgentState(TypedDict, total=False):
     # --- conversation history (checkpointer-managed across turns) -----------
     messages: Annotated[list[BaseMessage], add_messages]
 
+    # --- rolling conversation summary (compaction, 4.B.3) -------------------
+    # When the verbatim history grows past the threshold, the oldest messages are
+    # summarized into here and dropped from `messages`. agent_node injects this as
+    # a context block so the thread survives without sending the full history.
+    # Checkpointer-managed (persists across turns).
+    running_summary: str
+    # True ONLY on the turn compaction just fired — drives the live in-chat
+    # "compacted" divider. Not surfaced on history reload (the divider is live).
+    compacted_last_turn: bool
+
     # --- memory context (set by memory_load_node, read by agent_node) -------
     user_profile_always_on: dict
     user_profile_on_demand: list[dict]

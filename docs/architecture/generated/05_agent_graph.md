@@ -18,13 +18,15 @@ graph TD;
 	agent(agent)
 	tool_executor(tool_executor)
 	persist(persist)
+	compact(compact)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> memory_load;
 	agent -.-> persist;
 	agent -.-> tool_executor;
 	memory_load --> agent;
+	persist --> compact;
 	tool_executor -.-> agent;
-	persist --> __end__;
+	compact --> __end__;
 	tool_executor -.-> tool_executor;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0

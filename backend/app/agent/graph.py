@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes import (
     agent_node,
+    compact_node,
     memory_load_node,
     persist_node,
     should_continue,
@@ -119,6 +120,7 @@ def build_graph():
     builder.add_node("agent", agent_node)
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("persist", persist_node)
+    builder.add_node("compact", compact_node)
 
     builder.add_edge(START, "memory_load")
     builder.add_edge("memory_load", "agent")
@@ -138,6 +140,8 @@ def build_graph():
             "agent": "agent",
         },
     )
-    builder.add_edge("persist", END)
+    # persist → compact (4.B.3 rolling summary at the turn boundary) → END.
+    builder.add_edge("persist", "compact")
+    builder.add_edge("compact", END)
 
     return builder.compile(checkpointer=get_checkpointer())

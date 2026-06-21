@@ -30,6 +30,7 @@ Resume safety (the load-bearing design choice, see test_resume_dedup.py):
   ToolMessages built up in a local list never reached the reducer, and
   resume re-executed them.
 """
+import asyncio
 import json
 import time
 import uuid
@@ -39,6 +40,7 @@ from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -197,6 +199,16 @@ async def agent_node(state: AgentState) -> dict:
     )
 
     msgs: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+    # Compaction (4.B.3): if older turns were summarized, inject the rolling
+    # summary as a context block AFTER the stable prompt and BEFORE the recent
+    # verbatim messages — so the conversational thread survives without resending
+    # the full history. Durable facts are already in the <memories> block above.
+    running_summary = (state.get("running_summary") or "").strip()
+    if running_summary:
+        msgs.append(SystemMessage(content=(
+            "[Earlier conversation summary — older turns were compacted to save "
+            "context; specific facts live in long-term memory above]\n" + running_summary
+        )))
     msgs.extend(state["messages"])
 
     # Defense-in-depth: an orphaned tool_call (an AIMessage tool_call with no
@@ -564,6 +576,146 @@ async def persist_node(state: AgentState) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.error("memory_persist_failed", error=str(exc))
     return {}
+
+
+# ============================================================================
+# Conversation compaction (4.B.3) — turn-boundary rolling summary
+# ============================================================================
+_TOKEN_ENCODER = None  # lazy tiktoken encoder
+
+
+def _encoder():
+    """cl100k_base BPE — bundled with tiktoken (no network fetch). NOTE: this is
+    OpenAI's tokenizer and only an APPROXIMATION of the llama/Groq token count.
+    That's fine here: the count only feeds a tunable threshold + the context
+    meter, nothing that needs to match the model's exact accounting."""
+    global _TOKEN_ENCODER
+    if _TOKEN_ENCODER is None:
+        import tiktoken
+
+        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    return _TOKEN_ENCODER
+
+
+def _msg_text(m: BaseMessage) -> str:
+    c = m.content
+    return c if isinstance(c, str) else str(c)
+
+
+def count_message_tokens(messages: list[BaseMessage]) -> int:
+    """Approximate token count of a message list (tiktoken ~ llama; see _encoder)."""
+    enc = _encoder()
+    return sum(len(enc.encode(_msg_text(m))) for m in messages)
+
+
+def split_for_compaction(
+    messages: list[BaseMessage], keep_recent_tokens: int
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """(to_summarize=oldest, keep=most-recent within keep_recent_tokens). Walks
+    from the newest accumulating tokens; everything past the keep window is
+    summarized. Returns ([], all) when the whole history fits the keep window."""
+    enc = _encoder()
+    used = 0
+    kept = 0
+    for m in reversed(messages):
+        t = len(enc.encode(_msg_text(m)))
+        if used + t > keep_recent_tokens and kept > 0:
+            break
+        used += t
+        kept += 1
+    split = len(messages) - kept
+    return messages[:split], messages[split:]
+
+
+_SUMMARY_PROMPT = """You maintain a rolling summary of an ongoing conversation between a user and their AI assistant, so older turns can be dropped from the context window without losing the thread.
+
+Update the summary to fold in the new earlier turns below. Preserve the CONVERSATIONAL THREAD — what was discussed, asked, decided, and any open threads or the user's intent — in a few tight paragraphs. Specific durable facts are stored separately in long-term memory, so do NOT try to capture every fact exhaustively; focus on continuity so the assistant can pick up naturally. Write in third person ("The user asked…", "The assistant…").
+
+EXISTING SUMMARY:
+{existing}
+
+NEW EARLIER TURNS TO FOLD IN:
+{conversation}
+
+Return ONLY the updated summary text."""
+
+
+def _convo_role(m: BaseMessage) -> str:
+    if isinstance(m, HumanMessage):
+        return "User"
+    if isinstance(m, AIMessage):
+        return "Assistant"
+    if isinstance(m, ToolMessage):
+        return "Tool"
+    return "System"
+
+
+async def _summarize_messages(existing: str, messages: list[BaseMessage]) -> str:
+    from app.llm.gateway import llm_gateway
+
+    convo = "\n".join(
+        f"{_convo_role(m)}: {_msg_text(m)}" for m in messages if _msg_text(m).strip()
+    )
+    resp = await llm_gateway.complete(
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            existing=existing or "(none yet)", conversation=convo)}],
+        force_model=settings.COMPACT_MODEL_SLOT,  # fallback (gpt-4o-mini) — off the rate-limited Groq fast tier
+        temperature=0.0,
+    )
+    return (resp["choices"][0]["message"].get("content") or "").strip()
+
+
+async def compact_node(state: AgentState) -> dict:
+    """Turn-boundary compaction. Runs AFTER persist (the turn's response is sent
+    and memories are written). If the verbatim history exceeds the threshold,
+    summarize the OLDEST messages into running_summary and drop them via
+    RemoveMessage, keeping the most recent ~KEEP_RECENT verbatim.
+
+    Safety: best-effort (any failure → no compaction this turn); NEVER drops a
+    message without a successful summary; skips a thread mid-approval; only ever
+    touches already-completed turns (an interrupted turn pauses before persist, so
+    it never reaches this node)."""
+    if not settings.COMPACT_ENABLED:
+        return {"compacted_last_turn": False}
+    messages = state.get("messages") or []
+    if count_message_tokens(messages) <= settings.COMPACT_THRESHOLD_TOKENS:
+        return {"compacted_last_turn": False}
+
+    # skip-on-approval: don't compact across an unresolved interrupt (an AIMessage
+    # tool_call with no answering ToolMessage). Belt-and-suspenders — by topology
+    # an interrupted turn never reaches this node anyway.
+    last = messages[-1] if messages else None
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return {"compacted_last_turn": False}
+
+    to_summarize, _keep = split_for_compaction(messages, settings.COMPACT_KEEP_RECENT_TOKENS)
+    # RemoveMessage targets by id — only summarize+drop messages that carry one.
+    removable = [m for m in to_summarize if getattr(m, "id", None)]
+    if not removable:
+        return {"compacted_last_turn": False}
+
+    try:
+        new_summary = await asyncio.wait_for(
+            _summarize_messages(state.get("running_summary", ""), removable),
+            timeout=settings.COMPACT_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — never drop a message without a successful summary
+        logger.warning("compaction_summarize_failed", error=f"{type(exc).__name__}: {exc}")
+        return {"compacted_last_turn": False}
+    if not new_summary:
+        return {"compacted_last_turn": False}
+
+    logger.info(
+        "conversation_compacted",
+        dropped=len(removable),
+        kept_verbatim=len(messages) - len(removable),
+        summary_chars=len(new_summary),
+    )
+    return {
+        "running_summary": new_summary,
+        "messages": [RemoveMessage(id=m.id) for m in removable],
+        "compacted_last_turn": True,
+    }
 
 
 # ============================================================================
