@@ -201,3 +201,51 @@ def test_consolidation_auto_merge_refuses_varying_text() -> None:
     ]
     assert _auto_decision(cluster) is None
     assert _norm("User's name is Mahesh.") == _norm("user's name is  mahesh")
+
+
+def test_consolidation_lossless_plan_drops_only_exact_repeats() -> None:
+    """The lossless pass collapses ONLY exact-text re-extractions (keeping the
+    newest) and never touches a different-value fact — the safe-apply guarantee."""
+    from app.memory.consolidation import _lossless_plan
+
+    v = np.ones(4, dtype=np.float32)
+    rows = [
+        _row("a1", "User's name is Mahesh", "2026-01-01T00:00:00", v),
+        _row("a2", "User's name is Mahesh.", "2026-01-03T00:00:00", v),   # same norm, NEWEST
+        _row("a3", "user's name is  mahesh", "2026-01-02T00:00:00", v),   # same norm
+        _row("b", "User likes coffee", "2026-01-01T00:00:00", v),         # unique
+        _row("c", "User likes tea", "2026-01-01T00:00:00", v),            # different VALUE
+    ]
+    plan = _lossless_plan(rows)
+    assert {d["drop_id"] for d in plan} == {"a1", "a3"}, "only the exact Mahesh repeats collapse"
+    assert all(d["folds_into_id"] == "a2" for d in plan), "survivor is the newest"
+    assert all(d["lossless"] is True and d["reason"] == "duplicate" for d in plan)
+    # different-value facts (coffee vs tea) are NEVER dropped by the lossless pass
+    assert {"b", "c"} & {d["drop_id"] for d in plan} == set()
+
+
+def test_consolidation_report_selection_respects_filters() -> None:
+    """report.selected() — what an apply actually deletes — honors the reasons +
+    lossless_only safety filters; the full plan stays intact for review."""
+    from app.memory.consolidation import ConsolidationReport
+
+    drops = [
+        {"drop_id": "1", "reason": "duplicate", "lossless": True},
+        {"drop_id": "2", "reason": "duplicate", "lossless": False},
+        {"drop_id": "3", "reason": "superseded", "lossless": False},
+    ]
+
+    def rep(**kw):
+        return ConsolidationReport(corpus_before=10, clusters_examined=0,
+                                   auto_merge_clusters=0, llm_clusters=0,
+                                   dry_run=True, drops=list(drops), **kw)
+
+    lossless = rep(apply_lossless_only=True)
+    assert {d["drop_id"] for d in lossless.selected()} == {"1"}
+    assert lossless.corpus_after == 9   # only 1 selected
+
+    dup_only = rep(apply_reasons=["duplicate"])
+    assert {d["drop_id"] for d in dup_only.selected()} == {"1", "2"}
+
+    unfiltered = rep()
+    assert len(unfiltered.selected()) == 3   # whole plan applies when no filter
