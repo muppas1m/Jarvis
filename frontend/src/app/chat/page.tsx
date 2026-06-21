@@ -8,6 +8,7 @@ import { signOut, useSession } from "next-auth/react";
 
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { BootSequence } from "@/components/BootSequence";
+import { ContextMeterBar } from "@/components/ContextMeterBar";
 import { UploadChip } from "@/components/UploadChip";
 import { clearBootPending } from "@/lib/boot";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
@@ -49,6 +50,7 @@ export default function ChatPage() {
     statusLabel,
     turnError,
     retry,
+    context,
   } = useVoiceLoop({ enabled: wakeOn });
 
   // Composer readiness: the session must be established before a turn can
@@ -186,6 +188,7 @@ export default function ChatPage() {
               </p>
             </div>
           )}
+          <ContextMeterBar ctx={context} />
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
             {items.length === 0 && (
               <p className="mt-8 text-center text-sm text-ink-dim">
@@ -229,11 +232,20 @@ export default function ChatPage() {
                     />
                   </div>
                 </div>
-              ) : (
+              ) : it.type === "upload" ? (
                 <div key={it.id} className="flex justify-start">
                   <div className="w-full max-w-[90%]">
                     <UploadChip upload={it.upload} />
                   </div>
+                </div>
+              ) : (
+                <div
+                  key={it.id}
+                  className="flex items-center gap-3 py-1 text-[10px] uppercase tracking-[0.2em] text-ink-dim"
+                >
+                  <div className="h-px flex-1 bg-cyan/15" />
+                  <span className="font-mono">⟳ {it.label}</span>
+                  <div className="h-px flex-1 bg-cyan/15" />
                 </div>
               ),
             )}

@@ -6,6 +6,7 @@ import type {
   AgentState,
   ApprovalRequest,
   ApprovalStatus,
+  ContextMeter,
   StreamEvent,
   StreamItem,
   UploadItem,
@@ -115,6 +116,8 @@ export function useJarvis() {
   // The user message of the last turn that ERRORED (network/backend) — drives the
   // retry affordance so a failed turn never just leaves the user with silence.
   const [turnError, setTurnError] = useState<string | null>(null);
+  // Context-meter snapshot (4.B.3) — token usage vs the compaction threshold.
+  const [context, setContext] = useState<ContextMeter | null>(null);
   // approval_ids currently being decided — guards against a double-submit.
   const decidingRef = useRef<Set<string>>(new Set());
 
@@ -342,6 +345,20 @@ export function useJarvis() {
               }
               case "done":
                 patch(ev.content.response || acc);
+                if (ev.content.context) {
+                  setContext(ev.content.context);
+                  // Compaction just fired this turn → drop a subtle live divider.
+                  if (ev.content.context.compacted) {
+                    setItems((m) => [
+                      ...m,
+                      {
+                        type: "divider",
+                        id: crypto.randomUUID(),
+                        label: "Earlier conversation compacted",
+                      },
+                    ]);
+                  }
+                }
                 break;
               case "error":
                 patch(`⚠ ${ev.content}`);
@@ -501,9 +518,14 @@ export function useJarvis() {
       try {
         const res = await fetch("/api/chat/history");
         if (!res.ok) return;
-        const data = (await res.json()) as { thread_id?: string; items?: BackendItem[] };
+        const data = (await res.json()) as {
+          thread_id?: string;
+          items?: BackendItem[];
+          context?: ContextMeter;
+        };
         if (cancelled) return;
         if (data.thread_id) threadRef.current = data.thread_id;
+        if (data.context) setContext(data.context);
         const hydrated = itemsFromHistory(data.items ?? []);
         if (hydrated.length) setItems((prev) => (prev.length ? prev : hydrated));
       } catch {
@@ -531,5 +553,6 @@ export function useJarvis() {
     stop,
     turnError,
     retry,
+    context,
   };
 }

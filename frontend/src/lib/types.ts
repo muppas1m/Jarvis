@@ -41,14 +41,26 @@ export interface UploadItem {
   error?: string;
 }
 
-/** One row of the chat timeline: a message bubble, a decision card, or a
- *  document upload. The whole conversation (incl. resolved/discarded cards) is an
- *  ordered StreamItem[] so a reload re-renders everything in conversation
- *  position. */
+/** Context-meter snapshot (4.B.3): the thread's token usage vs the compaction
+ *  threshold, tiered recent-verbatim + rolling-summary. `compacted` is the live
+ *  "just compacted" signal — true only in a turn's done event, never on reload. */
+export interface ContextMeter {
+  used_tokens: number;
+  threshold_tokens: number;
+  recent_tokens: number;
+  summary_tokens: number;
+  compacted: boolean;
+}
+
+/** One row of the chat timeline: a message bubble, a decision card, a document
+ *  upload, or a compaction divider. The whole conversation (incl.
+ *  resolved/discarded cards) is an ordered StreamItem[] so a reload re-renders
+ *  everything in conversation position. The divider is live-only (not persisted). */
 export type StreamItem =
   | { type: "message"; id: string; role: "user" | "assistant"; content: string }
   | { type: "decision"; id: string; approval: ApprovalRequest }
-  | { type: "upload"; id: string; upload: UploadItem };
+  | { type: "upload"; id: string; upload: UploadItem }
+  | { type: "divider"; id: string; label: string };
 
 /** Mirrors backend PendingApprovalView (app/api/approvals.py). */
 export interface ApprovalView {
@@ -81,6 +93,7 @@ export type StreamEvent =
         response: string;
         usage?: unknown;
         thread_id: string;
+        context?: ContextMeter;
       };
     }
   | { type: "error"; content: string; stop_reason?: string };

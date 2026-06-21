@@ -37,7 +37,13 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.runner import canonical_thread_id, get_history, run_turn, stream_turn
+from app.agent.runner import (
+    canonical_thread_id,
+    get_history,
+    run_turn,
+    stream_turn,
+    thread_context,
+)
 from app.api.approvals import get_thread_decisions
 from app.security.auth import UserContext, get_current_user
 
@@ -111,7 +117,11 @@ async def chat_history(
     tid = thread_id or canonical_thread_id(user.user_id)
     messages = await get_history(tid)
     decisions = await get_thread_decisions(tid)
-    return {"thread_id": tid, "items": _conversation_items(messages, decisions)}
+    return {
+        "thread_id": tid,
+        "items": _conversation_items(messages, decisions),
+        "context": await thread_context(tid),  # 4.B.3 context meter (live=False on reload)
+    }
 
 
 @router.post("/stream", response_model=None)

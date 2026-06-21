@@ -167,6 +167,7 @@ export function useVoiceLoop({ enabled }: { enabled: boolean }) {
     send: jarvis.send, // raw send for the typed input form
     turnError: jarvis.turnError, // last failed message (retry affordance)
     retry: jarvis.retry,
+    context: jarvis.context, // context-meter snapshot (4.B.3)
     // voice loop
     phase,
     orbState,

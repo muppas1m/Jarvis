@@ -36,12 +36,14 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     RemoveMessage,
+    SystemMessage,
     ToolMessage,
 )
 from langgraph.types import Command
 
 from app.agent.decision_resolver import resolve_decision
 from app.agent.graph import build_graph
+from app.agent.nodes import count_message_tokens
 from app.config import settings
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
@@ -127,6 +129,31 @@ async def get_history(thread_id: str) -> list[dict[str, Any]]:
     values = getattr(snapshot, "values", None) or {}
     messages: list[BaseMessage] = values.get("messages") or []
     return [_serialize_message(m) for m in messages]
+
+
+def _context_from_state(state: dict[str, Any], *, live: bool) -> dict[str, Any]:
+    """Context-meter snapshot from a graph state: verbatim-recent + rolling-summary
+    token counts vs the compaction threshold (4.B.3). Tokens are tiktoken-approximate
+    (see nodes._encoder). ``compacted`` is the live "just compacted" signal — only
+    true in a turn's done event, never on a history reload (the divider is live)."""
+    messages = state.get("messages") or []
+    summary = (state.get("running_summary") or "").strip()
+    recent = count_message_tokens(messages)
+    summ = count_message_tokens([SystemMessage(content=summary)]) if summary else 0
+    return {
+        "used_tokens": recent + summ,
+        "threshold_tokens": settings.COMPACT_THRESHOLD_TOKENS,
+        "recent_tokens": recent,
+        "summary_tokens": summ,
+        "compacted": bool(live and state.get("compacted_last_turn")),
+    }
+
+
+async def thread_context(thread_id: str, *, live: bool = False) -> dict[str, Any]:
+    """Context-meter snapshot loaded from a thread's checkpoint (used by /history)."""
+    snapshot = await graph().aget_state({"configurable": {"thread_id": thread_id}})
+    values = getattr(snapshot, "values", None) or {}
+    return _context_from_state(values, live=live)
 
 
 async def note_document_upload(
@@ -231,6 +258,7 @@ async def run_turn(
             1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
         ),
     )
+    envelope["context"] = _context_from_state(result, live=True)  # 4.B.3 context meter
     return envelope
 
 
@@ -472,7 +500,10 @@ async def stream_turn(
     if envelope["status"] == "interrupted":
         yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
     else:
-        yield {"type": "done", "content": _terminal_payload(envelope)}
+        yield {"type": "done", "content": {
+            **_terminal_payload(envelope),
+            "context": _context_from_state(result, live=True),  # 4.B.3 context meter
+        }}
 
 
 def _chunk_text(chunk: Any) -> str:
