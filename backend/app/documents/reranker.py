@@ -61,7 +61,14 @@ def _get_reranker() -> CrossEncoder:
                 logger.info("loading_reranker", model=settings.RERANK_MODEL)
                 # fp16 only helps on GPU; CrossEncoder takes it via model_kwargs.
                 model_kwargs = {"torch_dtype": "float16"} if settings.RERANK_USE_FP16 else {}
-                _reranker = CrossEncoder(settings.RERANK_MODEL, model_kwargs=model_kwargs)
+                # max_length truncates (query, doc) pairs — bounds the O(seq²) CPU
+                # time + activation memory of each forward pass so a search can't
+                # pin/OOM the single worker. See settings.RERANK_MAX_LENGTH.
+                _reranker = CrossEncoder(
+                    settings.RERANK_MODEL,
+                    max_length=settings.RERANK_MAX_LENGTH,
+                    model_kwargs=model_kwargs,
+                )
                 logger.info("reranker_loaded", model=settings.RERANK_MODEL)
     return _reranker
 
@@ -86,7 +93,14 @@ def rerank(
 
     reranker = _get_reranker()
     pairs = [(query, c[content_key]) for c in candidates]
-    scores = reranker.predict(pairs, show_progress_bar=False)
+    # batch_size bounds the PEAK memory of the forward pass: a large batch on this
+    # CPU cross-encoder balloons ~2GB of activations and can OOM the single worker
+    # mid-rerank — before the caller's wait_for can degrade (it bounds the await,
+    # not this compute). Small batches cap the high-water mark. See
+    # settings.RERANK_BATCH_SIZE / project_rerank_sync_on_async_loop.
+    scores = reranker.predict(
+        pairs, batch_size=settings.RERANK_BATCH_SIZE, show_progress_bar=False
+    )
 
     enriched: list[dict[str, Any]] = []
     for cand, score in zip(candidates, scores):

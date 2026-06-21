@@ -75,6 +75,21 @@ _BM25_FULL_SCAN_WARN = 5000
 # --------------------------------------------------------------------------- #
 # Public API                                                                  #
 # --------------------------------------------------------------------------- #
+def _free_memory_mb() -> float:
+    """VM free memory (``MemAvailable``) in MB from /proc/meminfo. The backend
+    container has no mem_limit, so this is the shared VM's free memory — what the
+    reranker's ~1.4GB forward-pass balloon must fit into. Fail-open (return inf)
+    on any read error so a parse hiccup never needlessly blocks the rerank."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024  # KB → MB
+    except Exception:  # noqa: BLE001
+        pass
+    return float("inf")
+
+
 async def search_documents(
     query: str,
     top_k: int | None = None,
@@ -130,26 +145,43 @@ async def search_documents(
     # the cascade exhausted the pool and wedged the whole backend (health
     # included). On timeout/failure we fall back to the fusion ranking; the model
     # keeps loading in its thread for the next search.
+    # Shape-compatible fallback used by BOTH degrade paths: carry rrf_score as
+    # rerank_score so the audit + presentation downstream stay intact (the rerank
+    # threshold is skipped when degraded — it's calibrated for the cross-encoder's
+    # 0–1 sigmoid, meaningless on rrf_score).
+    fusion_ranking = [{**c, "rerank_score": c.get("rrf_score", 0.0)} for c in fused_pool]
+
     degraded = False
-    try:
-        reranked = await asyncio.wait_for(
-            asyncio.to_thread(
-                rerank, query=query, candidates=fused_pool, content_key="content"
-            ),
-            timeout=settings.RERANK_TIMEOUT_S,
-        )
-    except Exception as exc:  # TimeoutError or any model load/predict failure
+    free_mb = _free_memory_mb()
+    if free_mb < settings.RERANK_MIN_FREE_MB:
+        # Not enough headroom for the cross-encoder's ~1.4GB forward-pass balloon —
+        # running it now could OOM/swap-freeze the single worker BEFORE wait_for
+        # fires (it bounds the await, not the to_thread compute). Skip → fusion.
         degraded = True
         logger.warning(
-            "rag_rerank_degraded",
-            error=f"{type(exc).__name__}: {exc}",
-            fused_pool=len(fused_pool),
-            note="reranker slow/unavailable — returning fusion ranking",
+            "rag_rerank_skipped_low_memory",
+            free_mb=round(free_mb),
+            min_free_mb=settings.RERANK_MIN_FREE_MB,
+            note="degrading to fusion ranking to avoid an OOM wedge",
         )
-        # Shape-compatible fallback: carry rrf_score as rerank_score so the audit
-        # + presentation downstream stay intact. Skip the rerank threshold — it's
-        # calibrated for the cross-encoder's 0–1 sigmoid, meaningless on rrf_score.
-        reranked = [{**c, "rerank_score": c.get("rrf_score", 0.0)} for c in fused_pool]
+        reranked = fusion_ranking
+    else:
+        try:
+            reranked = await asyncio.wait_for(
+                asyncio.to_thread(
+                    rerank, query=query, candidates=fused_pool, content_key="content"
+                ),
+                timeout=settings.RERANK_TIMEOUT_S,
+            )
+        except Exception as exc:  # TimeoutError or any model load/predict failure
+            degraded = True
+            logger.warning(
+                "rag_rerank_degraded",
+                error=f"{type(exc).__name__}: {exc}",
+                fused_pool=len(fused_pool),
+                note="reranker slow/unavailable — returning fusion ranking",
+            )
+            reranked = fusion_ranking
 
     # --- policy stage: threshold + top_k + dropped-candidate audit ---
     eff_threshold = 0.0 if degraded else threshold

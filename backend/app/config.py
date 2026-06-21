@@ -76,7 +76,12 @@ class Settings(BaseSettings):
     # Hybrid search (vector + BM25) → RRF fusion → bge-reranker-v2-m3 → threshold.
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
     RERANK_USE_FP16: bool = False           # CPU deployment; set True only on GPU
-    RAG_CANDIDATE_POOL: int = 50            # per-retriever candidate cap fed to fusion
+    RAG_CANDIDATE_POOL: int = 12            # per-retriever candidate cap fed to fusion — bounded so the
+    #                                         CPU cross-encoder actually COMPLETES the rerank within
+    #                                         RERANK_TIMEOUT_S and the memory budget on the single-worker
+    #                                         box (was 50 → ~21s + a ~2GB balloon that OOM'd the worker;
+    #                                         24 still timed out → degrade-every-time; 12 completes fast).
+    #                                         Raise on a bigger box / larger corpus (it's the recall pool).
     RAG_TOP_K: int = 5                      # final passages returned after rerank+threshold
     RAG_RERANK_THRESHOLD: float = 0.3       # permissive; drops below-score chunks (logged)
     RAG_RRF_K: int = 60                     # Reciprocal Rank Fusion smoothing constant
@@ -87,6 +92,26 @@ class Settings(BaseSettings):
     # turn, and the cascade exhausted the pool. Reranker is warmed at startup, so
     # in steady state predict is sub-second; this only bites on an anomaly.
     RERANK_TIMEOUT_S: int = 20
+    # Cross-encoder predict() batch size — bounds the PEAK memory of one forward pass. A large batch on
+    # bge-reranker-v2-m3 transiently allocates ~2GB of activations; on the single-worker box (no
+    # per-service mem limit, a ~7.6GB VM shared with the 8-service langfuse stack) that balloon OOM/swaps
+    # the worker MID-rerank — before wait_for(RERANK_TIMEOUT_S) can degrade, because wait_for bounds the
+    # await, not the to_thread compute. Small batches cap the high-water mark so a single search can
+    # never wedge the worker on memory. See project_rerank_sync_on_async_loop.
+    RERANK_BATCH_SIZE: int = 16
+    # Cross-encoder input truncation (tokens). Attention cost is O(seq_len²), so this bounds BOTH the
+    # rerank's CPU time AND its activation memory far more than batch/pool alone (which barely moved the
+    # ~1.4GB forward-pass working set). bge-reranker-v2-m3's max is 512; long legal-PDF chunks near that
+    # made a 12-pair rerank take ~18s on the single-worker CPU box. 256 keeps the relevance signal (it's
+    # in the lead tokens) while cutting time + memory ~4×. Raise toward 512 on a faster box.
+    RERANK_MAX_LENGTH: int = 256
+    # Hard OOM-wedge guard: skip the rerank (degrade to fusion) when the VM's free
+    # memory is below this, since one forward pass balloons ~1.4GB and wait_for
+    # bounds the AWAIT not the to_thread compute — so under low headroom the
+    # rerank can OOM/swap-freeze the single worker (health 000) before it can
+    # degrade. With this, a search can never wedge the worker on memory: tight box
+    # → fusion ranking; healthy box → full rerank. See project_rerank_sync_on_async_loop.
+    RERANK_MIN_FREE_MB: int = 2000
 
     # --- Telegram (Phase 1) --------------------------------------------------
     TELEGRAM_BOT_TOKEN: str = ""
