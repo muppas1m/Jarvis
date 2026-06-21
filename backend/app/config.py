@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     MEM0_DEDUP_ENABLED: bool = False
     MEM0_DEDUP_THRESHOLD: float = 0.92
 
+    # Upper bound for Mem0Client.get_all(). Mem0's get_all/list default to
+    # top_k=20 and SILENTLY truncate — a 1393-row corpus came back as 20, which
+    # would make consolidation/conflict-detection process a subset and corrupt
+    # the store. We pass this explicit high limit so the FULL corpus returns;
+    # get_all logs a canary if the row count ever reaches it (corpus outgrew the
+    # bound → raise it). 50k = ~36x current corpus; far below any real scale
+    # concern for a single-master store that consolidation will SHRINK.
+    MEM0_GET_ALL_LIMIT: int = 50_000
+
     # --- Recall relevance gate (4.B.1) ---------------------------------------
     # Minimum TRUE-cosine score for a memory to be injected into the agent's
     # <memories> context. mem0_client.search now returns the raw cosine (it
