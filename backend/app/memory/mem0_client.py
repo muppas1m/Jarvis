@@ -60,6 +60,33 @@ def _shape_vector_hit(row: Any) -> dict[str, Any]:
 wire_litellm_providers()
 
 
+# Highest-priority rules injected into Mem0's extraction LLM (see Mem0
+# ADDITIVE_EXTRACTION_PROMPT — custom_instructions are "User-defined rules,
+# highest priority"). Steers auto-save toward DURABLE personal facts and away
+# from the transient/task/agent chatter the default prompt over-extracts. We
+# pass the turn as a single "User: …/Assistant: …" string (persist_turn), so
+# Mem0 can't natively scope to user-role messages — these rules carry the
+# "Assistant line is context only" guard explicitly. Measured 4.B.2: 7→3
+# facts/turn on a representative mix, with every dropped fact being noise
+# (agent commentary, one-off task requests). See project_mem0_search_quality_root.
+JARVIS_EXTRACTION_INSTRUCTIONS = """You are extracting DURABLE long-term memories for a personal AI assistant whose single user is its owner. Each input is ONE conversation turn formatted as "User: ... / Assistant: ...". The "Assistant:" portion is CONTEXT ONLY — never store the assistant's actions, confirmations, or statements as facts.
+
+ONLY extract facts that are about the USER as a person AND will still matter weeks from now:
+- Stable preferences (likes/dislikes, communication style, food, tools, brands).
+- Durable personal details (name, relationships, important recurring dates, home location, profession).
+- Health & dietary facts (allergies, restrictions, fitness routines).
+- Lasting goals and standing commitments (recurring plans, ongoing projects).
+
+Do NOT extract (transient, or not a durable user fact):
+- One-off task requests or commands ("send an email to X", "what's the distance to Orlando", "summarize this", "remind me to call now").
+- The status/outcome of a task ("the email was sent", "both tools completed").
+- Anything the Assistant said or did.
+- Ephemeral conversational mechanics, acknowledgements, or pleasantries.
+- A question the user asked that reveals no durable fact about them.
+
+When uncertain whether a fact is durable, DO NOT store it. Prefer precision over recall."""
+
+
 def _mem0_config() -> dict[str, Any]:
     """Build the Mem0 config dict from app settings.
 
@@ -108,6 +135,9 @@ def _mem0_config() -> dict[str, Any]:
                 "embedding_dims": settings.EMBEDDING_DIMS,
             },
         },
+        # Scope auto-save to durable personal facts (4.B.2). Mem0 injects this as
+        # the highest-priority block of its extraction prompt.
+        "custom_instructions": JARVIS_EXTRACTION_INSTRUCTIONS,
     }
 
 

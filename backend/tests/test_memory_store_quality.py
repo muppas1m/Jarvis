@@ -89,3 +89,23 @@ async def test_get_all_returns_full_corpus_not_capped(
     # The whole corpus is well past the old cap — a direct guard against a 20-cap.
     assert len(rows) > 20, f"get_all returned only {len(rows)} rows total — still capped."
     assert len(rows) <= settings.MEM0_GET_ALL_LIMIT, "corpus reached the configured bound"
+
+
+def test_extraction_custom_instructions_wired() -> None:
+    """Auto-save scoping (4.B.2) depends on Mem0 receiving our durable-facts
+    extraction rules. Lock the WIRING so a config refactor can't silently drop
+    them. (Extraction behavior itself is LLM-measured — 7→3 facts/turn on a
+    representative mix — not unit-tested, since the extraction LLM is
+    non-deterministic.)"""
+    from app.memory.mem0_client import JARVIS_EXTRACTION_INSTRUCTIONS, _mem0_config
+
+    cfg = _mem0_config()
+    assert cfg.get("custom_instructions") == JARVIS_EXTRACTION_INSTRUCTIONS, (
+        "Mem0 config no longer carries the durable-facts extraction rules — "
+        "auto-save would fall back to the noisy default prompt."
+    )
+    ci = JARVIS_EXTRACTION_INSTRUCTIONS.lower()
+    # the load-bearing guards must survive any future edit to the rules
+    assert "durable" in ci
+    assert "assistant" in ci          # "Assistant line is context only" guard
+    assert "do not extract" in ci
