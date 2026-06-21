@@ -16,6 +16,7 @@ it is NEVER auto-applied.
 """
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
@@ -95,6 +96,8 @@ REMOVE (label "noise") — categorize as exactly one of:
 - "task_status": the status or outcome of a one-off task ("the email was sent", "both tools completed", "reminder was set").
 - "transient": a one-off request or ephemeral detail with no lasting value about the user.
 
+DURABLE-FACT OVERRIDE (highest priority): if a memory STATES a concrete durable fact about the user — their birthday, an allergy or dietary fact, their name, a partner/relationship name, where they live, their profession — label it "durable" EVEN when wrapped in assistant or question framing. "Assistant noted the user's birthday is August 27, 1998" STATES the birthday → durable. "User stated he has no allergies" STATES a health fact → durable. Only label noise when the memory records a QUESTION, an ASSISTANT capability/action/story, or a one-off TASK with NO durable user fact stated in it.
+
 Be CONSERVATIVE: when unsure, KEEP it (label "durable"). Only label "noise" when it clearly fits a category. A specific durable fact (a date, a name, a place) is NOT noise just because it is event-related.
 
 Memories:
@@ -132,10 +135,39 @@ async def _classify_batch(batch: list[tuple[str, str]]) -> list[_Classification]
     return [c for c in result.items if c.mem_id in valid]
 
 
-def _should_drop(c: _Classification, min_confidence: float) -> bool:
-    """Delete-path gate: drop ONLY a confident, validly-categorized noise label.
-    Anything labeled durable — or low-confidence, or with an unknown category —
-    is kept. Conservative by construction."""
+def _states_durable_fact(text: str) -> bool:
+    """Deterministic durable-fact protector — True when the text STATES a
+    high-value durable fact (so it must not be purged as noise, regardless of the
+    LLM's label — the LLM is non-deterministic and wraps these in question /
+    assistant framing). Matches STATEMENTS, not topic mentions: "birthday is X" /
+    "name is Mahesh" / "no allergies" are protected; "asked about her name" /
+    "name is not recorded" still purge. Keyword anchors are case-insensitive;
+    identity/relationship/place facts additionally require a Capitalized
+    name/place in the ORIGINAL text (the proper-noun signal of a real value)."""
+    t = text or ""
+    low = t.lower()
+    # health / dietary / birth facts — keyword statements
+    if re.search(r"\bbirthday\s+(?:is|as|on|:)|\bborn\s+(?:on|in)\b", low):
+        return True
+    if re.search(r"\ballergic\s+to\b|\b(?:no|any)\s+allergies\b|\bnot\s+have\s+any\s+allergies\b", low):
+        return True
+    if re.search(r"\bdietary\b|\bvegetarian\b|\bvegan\b", low):
+        return True
+    # identity / relationship / location — require a Capitalized name/place
+    if re.search(r"\bname\s+is\s+[A-Z][a-z]+", t):
+        return True
+    if re.search(r"\b(?:girlfriend|partner|wife|husband|fianc\w+)(?:'s)?\s+(?:name\s+is\s+)?[A-Z][a-z]+", t):
+        return True
+    return bool(re.search(r"\blives?\s+in\s+[A-Z][a-z]+|\bworks?\s+(?:as|at)\s+[A-Z][a-z]+", t))
+
+
+def _should_drop(c: _Classification, min_confidence: float, text: str = "") -> bool:
+    """Delete-path gate: drop ONLY a confident, validly-categorized noise label —
+    AND never a memory that STATES a durable fact (deterministic veto over the
+    LLM). Durable / low-confidence / unknown-category / durable-fact-stating are
+    all kept. Conservative by construction."""
+    if _states_durable_fact(text):
+        return False
     return (
         c.label == "noise"
         and c.category in _NOISE_CATEGORIES
@@ -176,7 +208,7 @@ async def run_noise_purge(
     for batch_result in results:
         for c in batch_result:
             report.classified += 1
-            if _should_drop(c, min_confidence):
+            if _should_drop(c, min_confidence, text_by_id.get(c.mem_id, "")):
                 report.drops.append({
                     "mem_id": c.mem_id,
                     "category": c.category,

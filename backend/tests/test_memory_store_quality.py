@@ -287,3 +287,23 @@ def test_consolidation_value_preserved_guard() -> None:
     assert not _value_preserved("House Warming June 21", "House Warming June 20")
     # different names → NOT preserved
     assert not _value_preserved("girlfriend is Amruta", "girlfriend is Priya")
+
+
+def test_noise_purge_durable_protector_vetoes_noise() -> None:
+    """The deterministic durable-fact protector vetoes a (confident) noise label
+    when the text STATES a durable fact, but lets genuine recorded-questions
+    through — protecting birthday/allergy/name from a misclassification."""
+    from app.memory.noise_purge import _Classification, _should_drop, _states_durable_fact
+
+    noise = _Classification(mem_id="x", label="noise", category="assistant_statement", confidence=1.0)
+    # confident noise label VETOED — the text states a durable fact
+    assert not _should_drop(noise, 0.85, "Assistant noted the user's birthday is August 27, 1998")
+    assert not _should_drop(noise, 0.85, "User Mahesh stated he does not have any allergies")
+    assert not _should_drop(noise, 0.85, "User's name is Mahesh")
+    assert not _should_drop(noise, 0.85, "User's girlfriend Priya is coming over")
+    # genuine recorded-questions / stale meta-facts still purge (no stated fact)
+    assert _should_drop(noise, 0.85, "User asked about their girlfriend's name")
+    assert _should_drop(noise, 0.85, "User's girlfriend's name is not recorded yet")
+    # spot the statement/mention distinction directly
+    assert _states_durable_fact("his birthday is on August 27")
+    assert not _states_durable_fact("User asked what day it was")
