@@ -109,3 +109,40 @@ def test_extraction_custom_instructions_wired() -> None:
     assert "durable" in ci
     assert "assistant" in ci          # "Assistant line is context only" guard
     assert "do not extract" in ci
+
+
+@pytest.mark.asyncio
+async def test_dedup_skips_true_duplicate_keeps_distinct(
+    mem_manager: MemoryManager,
+    test_thread_id: str,
+    memory_cleanup,
+    monkeypatch,
+) -> None:
+    """Dedup-on-write (4.B.2) skips a near-identical re-write but lets a genuinely
+    distinct fact through. Hermetic — forces the calibrated gate on regardless of
+    the deployment default, so the test pins the LOGIC, not the env.
+
+    Calibration (true post-4.B.1 cosines): duplicates 0.972-1.0; contradictions
+    up to 0.958; distinct facts <= 0.93. 0.97 skips dups, keeps the rest."""
+    monkeypatch.setattr(settings, "MEM0_DEDUP_ENABLED", True)
+    monkeypatch.setattr(settings, "MEM0_DEDUP_THRESHOLD", 0.97)
+
+    ns = f"Qmark{test_thread_id[-6:]}"  # unique token → these rows isolate from the corpus
+    seed = f"{ns}. The user's lucky number is forty-two."
+    await _add_no_infer(mem_manager, seed, test_thread_id)  # verbatim seed in the store
+
+    # (1) exact re-write → dedup search finds the seed (~1.0) → SKIPPED before any
+    #     extraction (returns early, no LLM call).
+    r_dup = await mem_manager.mem0.add(content=seed, thread_id=test_thread_id)
+    assert r_dup.get("skipped_duplicate") is True, f"true duplicate not skipped: {r_dup}"
+
+    # (2) a genuinely distinct fact (its own unique token → no near neighbor) stays
+    #     BELOW the gate, so it would be stored, not skipped. Checked via the same
+    #     search the gate uses — no extraction-LLM call, fully deterministic.
+    distinct = f"Zflux{test_thread_id[-6:]}. The user collects vintage typewriters."
+    hits = await mem_manager.mem0.search(query=distinct, top_k=1)
+    nearest = hits[0]["score"] if hits else 0.0
+    assert nearest < settings.MEM0_DEDUP_THRESHOLD, (
+        f"a distinct fact's nearest neighbor scored {nearest:.4f} >= the dedup gate "
+        f"({settings.MEM0_DEDUP_THRESHOLD}) — it would be wrongly skipped."
+    )

@@ -45,17 +45,23 @@ class Settings(BaseSettings):
     # PRIMARY_MODEL on Groq free tier saturates TPM after ~1 memory write.
     MEMORY_EXTRACTION_MODEL: str = "gemini/gemini-2.5-flash-lite"
 
-    # --- Mem0 interim bloat controls (P5c) -----------------------------------
-    # Dedup-on-write: skip a write when an existing memory is near-identical
-    # (cosine score >= threshold). DISABLED by default. P5c's original blocker —
-    # "search scores near-identical content at only ~0.45, so it can never fire
-    # at a safe threshold" — is RESOLVED as of 4.B.1: mem0_client.search now
-    # returns the true cosine (near-identical ~0.9+), so MEM0_DEDUP_THRESHOLD=0.92
-    # is now meaningful. Re-enabling + calibrating dedup is deliberately scoped to
-    # 4.B.2 (auto-save extraction-scoping + dedup), NOT 4.B.1 (recall-only). The
-    # ACTIVE interim lever remains trivial-turn gating (manager._is_trivial_turn).
-    MEM0_DEDUP_ENABLED: bool = False
-    MEM0_DEDUP_THRESHOLD: float = 0.92
+    # --- Mem0 dedup-on-write (4.B.2) -----------------------------------------
+    # Skip a write when an existing memory is near-identical (true cosine >=
+    # threshold). ENABLED as of 4.B.2 now that 4.B.1 restored the true cosine
+    # (the old fused ~0.45 made any threshold meaningless). Threshold CALIBRATED
+    # against real post-4.B.1 scores, biased high because the cost is asymmetric
+    # — wrongly skipping a DISTINCT fact loses information, wrongly keeping a dup
+    # is minor bloat that consolidation later merges:
+    #   duplicates (paraphrase/reorder/exact): 0.972 – 1.0
+    #   contradictions (e.g. "morning" vs "afternoon meetings"): up to 0.958  ← must NOT skip
+    #   negations ("allergic" vs "not allergic"): <= 0.895
+    #   distinct facts (different allergen/value): <= 0.93
+    # 0.97 sits above every contradiction/negation/distinct case (so those flow
+    # through to supersession/consolidation) and catches identical re-extraction,
+    # the dominant bloat driver. Trivial-turn gating (manager._is_trivial_turn)
+    # still runs upstream.
+    MEM0_DEDUP_ENABLED: bool = True
+    MEM0_DEDUP_THRESHOLD: float = 0.97
 
     # Upper bound for Mem0Client.get_all(). Mem0's get_all/list default to
     # top_k=20 and SILENTLY truncate — a 1393-row corpus came back as 20, which
