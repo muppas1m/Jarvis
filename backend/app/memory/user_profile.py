@@ -48,7 +48,7 @@ class UserProfileManager:
             return (profile.on_demand or {}).get(key)
 
     async def get_full(self) -> dict[str, Any]:
-        """Whole profile. Used by consolidation jobs and the dashboard, NOT by
+        """Whole profile. Used by the dashboard / inspection paths, NOT by
         the agent prompt path."""
         async with async_session() as session:
             result = await session.execute(select(UserProfile).limit(1))

@@ -4,6 +4,7 @@ Postgres + pgvector, extraction LLM bypassed.
 
 Companion to test_memory_recall_integration.py (the read side). What this locks:
   - get_all() returns the FULL corpus, not Mem0's default top_k=20 truncation.
+  - the durable-fact extraction rules stay wired into Mem0.
   - dedup-on-write skips a near-identical fact and keeps a distinct one.
 
 infer=False everywhere for the same reason as the recall suite: deterministic
@@ -13,13 +14,11 @@ for teardown — see test_memory_recall_integration._wipe_thread).
 """
 import uuid
 
-import numpy as np
 import pytest
 from sqlalchemy import text
 
 from app.config import settings
 from app.db.engine import async_session
-from app.memory.consolidation import _auto_decision, _cluster, _norm, _Row
 from app.memory.manager import MemoryManager
 
 
@@ -71,8 +70,7 @@ async def test_get_all_returns_full_corpus_not_capped(
     top_k=20. Write >20 rows under one marker thread; every one must come back.
 
     Pre-fix (4.B.2): get_all() passed no top_k → Mem0 returned 20 of ~1.4k, so
-    consolidation/conflict-detection would have processed a 20-row subset and
-    corrupted the store."""
+    any batch job over the corpus would have processed a 20-row subset."""
     n = 25  # deliberately above the old default-20 cap
     for i in range(n):
         await _add_no_infer(
@@ -148,162 +146,3 @@ async def test_dedup_skips_true_duplicate_keeps_distinct(
         f"a distinct fact's nearest neighbor scored {nearest:.4f} >= the dedup gate "
         f"({settings.MEM0_DEDUP_THRESHOLD}) — it would be wrongly skipped."
     )
-
-
-# --------------------------------------------------------------------------- #
-# Consolidation engine — deterministic core (clustering + auto-merge). The LLM
-# adjudication path is non-deterministic and exercised by the dry-run, not here.
-# --------------------------------------------------------------------------- #
-def _row(mem_id: str, content: str, created_at: str, vec: np.ndarray) -> _Row:
-    return _Row(mem_id=mem_id, content=content, created_at=created_at, vector=vec)
-
-
-def test_consolidation_clusters_similar_excludes_distinct() -> None:
-    """_cluster groups near-identical vectors and leaves a distinct one out
-    (singletons are nothing to consolidate)."""
-    near = np.array([1.0, 0.0, 0.0, 0.02], dtype=np.float32)
-    rows = [
-        _row("a", "x", "2026-01-01", np.array([1.0, 0.0, 0.0, 0.00], dtype=np.float32)),
-        _row("b", "x", "2026-01-02", near),
-        _row("c", "x", "2026-01-03", np.array([1.0, 0.0, 0.0, 0.04], dtype=np.float32)),
-        _row("d", "y", "2026-01-04", np.array([0.0, 1.0, 0.0, 0.00], dtype=np.float32)),  # orthogonal
-    ]
-    clusters = _cluster(rows, threshold=0.99)
-    assert len(clusters) == 1, f"expected one cluster, got {clusters}"
-    assert set(clusters[0]) == {0, 1, 2}, "the orthogonal 'd' must not be clustered"
-
-
-def test_consolidation_auto_merge_keeps_newest_drops_rest() -> None:
-    """A cluster whose rows are the SAME normalized text is pure re-extraction:
-    auto-merge keeps the newest and drops the rest, confidence 1.0, no LLM."""
-    v = np.ones(4, dtype=np.float32)
-    cluster = [
-        _row("old", "User's name is Mahesh", "2026-01-01T00:00:00", v),
-        _row("mid", "User's name is Mahesh.", "2026-01-02T00:00:00", v),   # same after _norm
-        _row("new", "user's name is mahesh", "2026-01-03T00:00:00", v),    # same after _norm
-    ]
-    decision = _auto_decision(cluster)
-    assert decision is not None, "identical-text cluster should auto-merge"
-    assert decision.confidence == 1.0
-    assert {d.drop_id for d in decision.drops} == {"old", "mid"}, "must keep the newest ('new')"
-    assert all(d.folds_into_id == "new" for d in decision.drops)
-    assert all(d.reason == "duplicate" for d in decision.drops)
-
-
-def test_consolidation_auto_merge_refuses_varying_text() -> None:
-    """A cluster with DIFFERENT facts must NOT auto-merge — it returns None so the
-    decision goes to the (conservative) LLM, never an unsupervised drop. This is
-    the guard against silently dropping a distinct fact."""
-    v = np.ones(4, dtype=np.float32)
-    cluster = [
-        _row("a", "User likes coffee", "2026-01-01T00:00:00", v),
-        _row("b", "User likes tea", "2026-01-02T00:00:00", v),
-    ]
-    assert _auto_decision(cluster) is None
-    assert _norm("User's name is Mahesh.") == _norm("user's name is  mahesh")
-
-
-def test_consolidation_lossless_plan_drops_only_exact_repeats() -> None:
-    """The lossless pass collapses ONLY exact-text re-extractions (keeping the
-    newest) and never touches a different-value fact — the safe-apply guarantee."""
-    from app.memory.consolidation import _lossless_plan
-
-    v = np.ones(4, dtype=np.float32)
-    rows = [
-        _row("a1", "User's name is Mahesh", "2026-01-01T00:00:00", v),
-        _row("a2", "User's name is Mahesh.", "2026-01-03T00:00:00", v),   # same norm, NEWEST
-        _row("a3", "user's name is  mahesh", "2026-01-02T00:00:00", v),   # same norm
-        _row("b", "User likes coffee", "2026-01-01T00:00:00", v),         # unique
-        _row("c", "User likes tea", "2026-01-01T00:00:00", v),            # different VALUE
-    ]
-    plan = _lossless_plan(rows)
-    assert {d["drop_id"] for d in plan} == {"a1", "a3"}, "only the exact Mahesh repeats collapse"
-    assert all(d["folds_into_id"] == "a2" for d in plan), "survivor is the newest"
-    assert all(d["lossless"] is True and d["reason"] == "duplicate" for d in plan)
-    # different-value facts (coffee vs tea) are NEVER dropped by the lossless pass
-    assert {"b", "c"} & {d["drop_id"] for d in plan} == set()
-
-
-def test_consolidation_report_selection_respects_filters() -> None:
-    """report.selected() — what an apply actually deletes — honors the reasons +
-    lossless_only safety filters; the full plan stays intact for review."""
-    from app.memory.consolidation import ConsolidationReport
-
-    drops = [
-        {"drop_id": "1", "reason": "duplicate", "lossless": True},
-        {"drop_id": "2", "reason": "duplicate", "lossless": False},
-        {"drop_id": "3", "reason": "superseded", "lossless": False},
-    ]
-
-    def rep(**kw):
-        return ConsolidationReport(corpus_before=10, clusters_examined=0,
-                                   auto_merge_clusters=0, llm_clusters=0,
-                                   dry_run=True, drops=list(drops), **kw)
-
-    lossless = rep(apply_lossless_only=True)
-    assert {d["drop_id"] for d in lossless.selected()} == {"1"}
-    assert lossless.corpus_after == 9   # only 1 selected
-
-    dup_only = rep(apply_reasons=["duplicate"])
-    assert {d["drop_id"] for d in dup_only.selected()} == {"1", "2"}
-
-    unfiltered = rep()
-    assert len(unfiltered.selected()) == 3   # whole plan applies when no filter
-
-
-def test_noise_purge_drop_gate_is_conservative() -> None:
-    """The noise-purge delete gate drops ONLY confident, validly-categorized
-    noise — durable labels, low confidence, and unknown categories are kept."""
-    from app.memory.noise_purge import _Classification, _should_drop
-
-    # a durable fact is never dropped, even at full confidence
-    assert not _should_drop(_Classification(mem_id="1", label="durable", confidence=1.0), 0.85)
-    # confident, valid noise category → drop
-    assert _should_drop(
-        _Classification(mem_id="2", label="noise", category="recorded_question", confidence=0.9), 0.85)
-    # noise but below the confidence gate → keep
-    assert not _should_drop(
-        _Classification(mem_id="3", label="noise", category="task_status", confidence=0.5), 0.85)
-    # noise with an unknown/hallucinated category → keep (conservative)
-    assert not _should_drop(
-        _Classification(mem_id="4", label="noise", category="made_up", confidence=0.99), 0.85)
-
-
-def test_consolidation_value_preserved_guard() -> None:
-    """The deterministic value guard: a duplicate may be dropped only if the
-    survivor keeps every specific value (date/time/name) the drop carries —
-    formatting differences don't count, real value differences do."""
-    from app.memory.consolidation import _value_preserved
-
-    # same date, different format (ISO vs "June 16, 2026") → preserved
-    assert _value_preserved("met on June 16, 2026", "met girlfriend on 2026-06-16")
-    # clock-time formatting ("7 AM" vs "7:00 AM") → preserved
-    assert _value_preserved("event at 7 AM", "event at 7:00 AM today")
-    # survivor is a superset of the drop's values → preserved
-    assert _value_preserved("House Warming June 20", "House Warming June 20, week of June 15")
-    # drop has a concrete date the survivor only states vaguely → NOT preserved (loss)
-    assert not _value_preserved("Costco shopping June 15, 2026", "Costco shopping tomorrow")
-    # different dates → NOT preserved
-    assert not _value_preserved("House Warming June 21", "House Warming June 20")
-    # different names → NOT preserved
-    assert not _value_preserved("girlfriend is Amruta", "girlfriend is Priya")
-
-
-def test_noise_purge_durable_protector_vetoes_noise() -> None:
-    """The deterministic durable-fact protector vetoes a (confident) noise label
-    when the text STATES a durable fact, but lets genuine recorded-questions
-    through — protecting birthday/allergy/name from a misclassification."""
-    from app.memory.noise_purge import _Classification, _should_drop, _states_durable_fact
-
-    noise = _Classification(mem_id="x", label="noise", category="assistant_statement", confidence=1.0)
-    # confident noise label VETOED — the text states a durable fact
-    assert not _should_drop(noise, 0.85, "Assistant noted the user's birthday is August 27, 1998")
-    assert not _should_drop(noise, 0.85, "User Mahesh stated he does not have any allergies")
-    assert not _should_drop(noise, 0.85, "User's name is Mahesh")
-    assert not _should_drop(noise, 0.85, "User's girlfriend Priya is coming over")
-    # genuine recorded-questions / stale meta-facts still purge (no stated fact)
-    assert _should_drop(noise, 0.85, "User asked about their girlfriend's name")
-    assert _should_drop(noise, 0.85, "User's girlfriend's name is not recorded yet")
-    # spot the statement/mention distinction directly
-    assert _states_durable_fact("his birthday is on August 27")
-    assert not _states_durable_fact("User asked what day it was")

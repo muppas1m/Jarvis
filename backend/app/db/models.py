@@ -100,7 +100,7 @@ class ConversationAnalytics(Base):
 class MemoryEpisode(Base):
     """Custom-query view over episodic/semantic memories. Mem0's pgvector backend
     creates its own `mem0_memories` table; this one mirrors entries we want for
-    consolidation jobs and conflict detection."""
+    future corpus-analysis / maintenance use."""
     __tablename__ = "memory_episodes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -2,12 +2,11 @@
 
 Imported at celery_app build time; mutates celery_app.conf.beat_schedule.
 
-Five jobs in Phase 2 (Turn 17). Three of them — gmail-renew, gmail-check,
-approval-expiry-sweep — are belt-and-braces safety nets. The other two —
-morning-brief, memory-consolidation — are user-facing maintenance.
+Three of the jobs — gmail-renew, gmail-check, approval-expiry-sweep — are
+belt-and-braces safety nets; morning-brief is user-facing maintenance.
 
-Phase 3 adds news-briefing and memory-conflict-check; that's Turn 25 and
-Turn 26.5 work respectively.
+(A nightly memory-consolidation beat was removed when the 4.B consolidation/
+noise-purge engine was deferred to a real-usage signal — recoverable from git.)
 """
 from celery.schedules import crontab
 
@@ -53,13 +52,6 @@ celery_app.conf.beat_schedule = {
     "gmail-watch-renew": {
         "task": "app.scheduler.tasks.gmail_renew.renew_gmail_watch",
         "schedule": crontab(hour=3, minute=0, day_of_week="0,6"),
-    },
-    # Nightly memory consolidation at 2am.
-    # Phase 2 ships a log-only stub; real implementation lands in Turn 26.5
-    # (project plan close-out section) alongside memory_conflict_check.
-    "memory-consolidation": {
-        "task": "app.scheduler.tasks.memory_consolidation.consolidate_memory",
-        "schedule": crontab(hour=2, minute=0),
     },
     # Hourly approval expiry sweeper — auto-expires approvals past expires_at.
     "approval-expiry-sweep": {

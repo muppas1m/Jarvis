@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (96 modules)
+## `app/` — the system (93 modules)
 
 ```
 app/
@@ -76,10 +76,8 @@ app/
 │   └── stream_mode.py — Token-stream flag — turns on internal LLM streaming for the agent's chat
 ├── memory/
 │   ├── __init__.py — —
-│   ├── consolidation.py — Memory consolidation — collapse the Mem0 corpus's near-duplicate and
 │   ├── manager.py — MemoryManager — the single entry point the rest of the codebase uses to read
 │   ├── mem0_client.py — Mem0 self-hosted wrapper.
-│   ├── noise_purge.py — Retroactive meta-noise purge — apply the durable-fact extraction criteria to
 │   ├── session.py — Tier 2 — Session analytics view.
 │   └── user_profile.py — Tier 5 — Master's profile.
 ├── messaging/
@@ -98,7 +96,6 @@ app/
 │   │   ├── gmail_check.py — 15-min Gmail safety-net poll.
 │   │   ├── gmail_renew.py — Renew the Gmail Pub/Sub watch twice weekly + sweep the recent inbox.
 │   │   ├── inbound_health.py — Inbound-email health canary.
-│   │   ├── memory_consolidation.py — Nightly memory consolidation (beat: 2am UTC).
 │   │   └── morning_brief.py — 8am daily morning brief — email digest + (future) news section.
 │   ├── __init__.py — Celery scheduler package — Celery app, beat schedule, periodic tasks.
 │   ├── beat_schedule.py — Celery beat schedule — periodic task definitions.

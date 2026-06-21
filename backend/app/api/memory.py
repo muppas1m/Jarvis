@@ -7,8 +7,7 @@ useful for debugging — `curl /api/memory/search?q=...` is the fastest way
 to verify Mem0 is finding what you'd expect.
 
 These are read-only on purpose. Profile mutations happen via the agent's
-own update flows (memory consolidation Celery job, in-conversation profile
-updates), not directly through HTTP.
+own update flows (in-conversation profile updates), not directly through HTTP.
 """
 from fastapi import APIRouter, Query
 from pydantic import BaseModel

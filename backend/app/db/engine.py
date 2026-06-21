@@ -3,8 +3,7 @@ Database engine + session factory.
 
 We expose two surfaces:
   - `engine` / `async_session` — used directly by app code that wants its own
-    transaction scope (the LangGraph nodes, the memory consolidation Celery
-    job, etc.)
+    transaction scope (the LangGraph nodes, the Celery beat tasks, etc.)
   - `get_session()` — FastAPI dependency that yields an AsyncSession per
     request and cleans it up afterwards.
 

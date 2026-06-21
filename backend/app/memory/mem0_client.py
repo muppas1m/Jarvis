@@ -225,16 +225,15 @@ class Mem0Client:
         return [_shape_vector_hit(r) for r in rows]
 
     async def get_all(self) -> list[dict[str, Any]]:
-        """EVERY stored memory — used by consolidation + conflict-detection jobs.
+        """EVERY stored memory — used by corpus-maintenance + inspection jobs.
 
         Mem0's ``get_all``/``list`` default to ``top_k=20`` and silently truncate
-        (the live 1393-row corpus came back as 20). Those jobs MUST see the whole
-        corpus or they merge/supersede against a 20-row subset and corrupt the
-        store, so we pass an explicit high limit. ``pgvector.list`` supports only
-        ``LIMIT`` (no ``OFFSET``), so true page-looping isn't available at the
-        store layer — the bound + canary is the robust option at this scale. If
-        the count ever reaches the bound we log loudly rather than truncate
-        silently (raise ``MEM0_GET_ALL_LIMIT``)."""
+        (a ~1.4k-row corpus came back as 20). A job that scans the corpus MUST see
+        all of it or it operates on a 20-row subset, so we pass an explicit high
+        limit. ``pgvector.list`` supports only ``LIMIT`` (no ``OFFSET``), so true
+        page-looping isn't available at the store layer — the bound + canary is the
+        robust option at this scale. If the count ever reaches the bound we log
+        loudly rather than truncate silently (raise ``MEM0_GET_ALL_LIMIT``)."""
         limit = settings.MEM0_GET_ALL_LIMIT
         results = await self.client.get_all(
             filters={"user_id": self.USER_ID},
@@ -246,7 +245,7 @@ class Mem0Client:
                 "mem0_get_all_hit_limit",
                 returned=len(rows),
                 limit=limit,
-                message="corpus reached MEM0_GET_ALL_LIMIT — raise it so consolidation isn't truncated",
+                message="corpus reached MEM0_GET_ALL_LIMIT — raise it so corpus scans aren't truncated",
             )
         return rows
 

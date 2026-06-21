@@ -36,7 +36,6 @@ celery_app = Celery(
         "app.scheduler.tasks.gmail_check",
         "app.scheduler.tasks.inbound_health",
         "app.scheduler.tasks.morning_brief",
-        "app.scheduler.tasks.memory_consolidation",
         "app.scheduler.tasks.approval_expiry",
     ],
 )

@@ -51,55 +51,22 @@ class Settings(BaseSettings):
     # (the old fused ~0.45 made any threshold meaningless). Threshold CALIBRATED
     # against real post-4.B.1 scores, biased high because the cost is asymmetric
     # — wrongly skipping a DISTINCT fact loses information, wrongly keeping a dup
-    # is minor bloat that consolidation later merges:
+    # is only minor bloat:
     #   duplicates (paraphrase/reorder/exact): 0.972 – 1.0
     #   contradictions (e.g. "morning" vs "afternoon meetings"): up to 0.958  ← must NOT skip
     #   negations ("allergic" vs "not allergic"): <= 0.895
     #   distinct facts (different allergen/value): <= 0.93
-    # 0.97 sits above every contradiction/negation/distinct case (so those flow
-    # through to supersession/consolidation) and catches identical re-extraction,
-    # the dominant bloat driver. Trivial-turn gating (manager._is_trivial_turn)
-    # still runs upstream.
+    # 0.97 sits above every contradiction/negation/distinct case (so those are
+    # kept, not skipped) and catches identical re-extraction, the dominant bloat
+    # driver. Trivial-turn gating (manager._is_trivial_turn) still runs upstream.
     MEM0_DEDUP_ENABLED: bool = True
     MEM0_DEDUP_THRESHOLD: float = 0.97
 
-    # --- Memory consolidation (4.B.2 step 4/5) -------------------------------
-    # Batch job (nightly + on-demand) that collapses the corpus's accumulated
-    # near-duplicate and superseded memories. Candidate clusters are formed at
-    # SIM_THRESHOLD (true cosine, post-4.B.1); within each cluster, exact-text
-    # repeats auto-merge, and varying-text clusters are LLM-adjudicated (drop
-    # only at/above MIN_CONFIDENCE). DRY-RUN by default — it reports the plan and
-    # mutates nothing until explicitly applied. Conservative on purpose: it
-    # deletes real master memories.
-    MEM0_CONSOLIDATION_SIM_THRESHOLD: float = 0.92
-    MEM0_CONSOLIDATION_MIN_CONFIDENCE: float = 0.85
-    # Adjudication routes through the LLM gateway — this is a gateway SLOT KEY
-    # ("primary"/"fast"/"fallback"), not a raw model id. Default "fallback"
-    # (gpt-4o-mini, paid OpenAI) keeps a many-cluster batch run OFF the Groq free
-    # tier (whose TPM cap can't sustain it); bump to a stronger slot if the
-    # dry-run shows weak merge/supersession judgment.
-    MEM0_CONSOLIDATION_MODEL_SLOT: str = "fallback"
-    # The nightly scheduled task runs consolidation in DRY-RUN (logs the plan,
-    # mutates nothing) until this is flipped on. Stays False until the master has
-    # reviewed a dry-run and is satisfied; then nightly auto-apply takes over.
-    MEM0_CONSOLIDATION_AUTO_APPLY: bool = False
-
-    # --- Meta-noise purge (4.B.2 step 2b) ------------------------------------
-    # Retroactively applies the durable-fact extraction criteria to the EXISTING
-    # corpus via a batched LLM classifier (recorded-question / assistant-statement
-    # / task-status / transient → noise). DRY-RUN + master review before any
-    # delete; never auto-applied. Reuses MEM0_CONSOLIDATION_MODEL_SLOT.
-    MEM0_NOISE_PURGE_MIN_CONFIDENCE: float = 0.85
-    MEM0_NOISE_PURGE_BATCH_SIZE: int = 20
-    MEM0_NOISE_PURGE_CONCURRENCY: int = 5
-
     # Upper bound for Mem0Client.get_all(). Mem0's get_all/list default to
-    # top_k=20 and SILENTLY truncate — a 1393-row corpus came back as 20, which
-    # would make consolidation/conflict-detection process a subset and corrupt
-    # the store. We pass this explicit high limit so the FULL corpus returns;
-    # get_all logs a canary if the row count ever reaches it (corpus outgrew the
-    # bound → raise it). 50k = ~36x current corpus; far below any real scale
-    # concern for a single-master store that consolidation will SHRINK.
+    # top_k=20 and SILENTLY truncate — a 1.4k-row corpus came back as 20, which
+    # would make any batch job over the corpus process a 20-row subset. We pass
+    # this explicit high limit so the FULL corpus returns; get_all logs a canary
+    # if the row count ever reaches it (corpus outgrew the bound → raise it).
     MEM0_GET_ALL_LIMIT: int = 50_000
 
     # --- Recall relevance gate (4.B.1) ---------------------------------------

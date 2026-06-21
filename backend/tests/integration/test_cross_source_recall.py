@@ -7,11 +7,10 @@ that motivated Turn 17.7 (FallbackChatLLM).
 **Provisional scope (Turn 20.5b) — "cross-source recall verified" is QUALIFIED:**
 this test HARD-verifies the cross-source CHAINING (both recall tools fire) + the
 EMAIL leg surfaces + grounding (names the contact, no fabrication). The MEM0 leg
-is BEST-EFFORT, NOT a gate — memory_search recall is currently degraded by Mem0
-store bloat (un-consolidated duplicate preferences crowd bge-m3's flat cosine out
-of top_k=5, no reranker; the fact IS recalled at top_k=80). It should be hardened
-to a hard gate once Turn 26.5 restores recall quality (consolidation/dedup). So
-the chaining + email integration are verified; the Mem0 leg awaits 26.5.
+is BEST-EFFORT, NOT a gate — 4.B.1 fixed recall discrimination (mem0_client.search
+returns the true cosine, not Mem0's fused ~0.4), but a single freshly-seeded fact
+can still be crowded out of a small top_k by a populated corpus, so the Mem0 leg
+stays best-effort while the chaining + email integration are hard-verified.
 
 Isolation (footguns):
   - `eval_mode` (item #3): the real agent turn routes through the gateway, so it
@@ -127,14 +126,10 @@ async def test_cross_source_recall_references_both_mem0_and_email(
         )
         assert "quentin" in response, "response should reference the actual contact, not deflect"
 
-        # BEST-EFFORT (documented finding, NOT a gate): the Mem0 fact. memory_search
-        # recall is currently DEGRADED by Mem0 store bloat — un-consolidated duplicate
-        # preferences crowd bge-m3's tightly-clustered cosine (~0.39 for everything vs a
-        # short name query) out of top_k=5, with no reranker on memory_search. The fact
-        # IS recalled at top_k=80, so this is a recall-QUALITY issue, not a storage bug.
-        # Fix belongs to Turn 26.5 (memory_consolidation, currently a stub) + a possible
-        # memory-reranker lift. We surface it rather than hard-gate on it (or wipe the
-        # master's real preferences to force it).
+        # BEST-EFFORT (NOT a gate): the Mem0 fact. 4.B.1 fixed search discrimination
+        # (mem0_client.search returns the true cosine, not Mem0's fused ~0.4), so recall
+        # works; but a single freshly-seeded fact can still be crowded out of a small
+        # top_k by a populated corpus, so we surface this rather than hard-gate on it.
         if not any(t in response for t in MEM0_TOKENS):
             print(
                 f"[w] NOTE: Mem0 fact {MEM0_TOKENS} did not surface via memory_search — "
