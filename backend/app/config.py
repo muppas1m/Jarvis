@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     # reviewed a dry-run and is satisfied; then nightly auto-apply takes over.
     MEM0_CONSOLIDATION_AUTO_APPLY: bool = False
 
+    # --- Meta-noise purge (4.B.2 step 2b) ------------------------------------
+    # Retroactively applies the durable-fact extraction criteria to the EXISTING
+    # corpus via a batched LLM classifier (recorded-question / assistant-statement
+    # / task-status / transient → noise). DRY-RUN + master review before any
+    # delete; never auto-applied. Reuses MEM0_CONSOLIDATION_MODEL_SLOT.
+    MEM0_NOISE_PURGE_MIN_CONFIDENCE: float = 0.85
+    MEM0_NOISE_PURGE_BATCH_SIZE: int = 20
+    MEM0_NOISE_PURGE_CONCURRENCY: int = 5
+
     # Upper bound for Mem0Client.get_all(). Mem0's get_all/list default to
     # top_k=20 and SILENTLY truncate — a 1393-row corpus came back as 20, which
     # would make consolidation/conflict-detection process a subset and corrupt

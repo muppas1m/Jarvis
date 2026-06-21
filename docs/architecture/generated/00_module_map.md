@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (95 modules)
+## `app/` — the system (96 modules)
 
 ```
 app/
@@ -79,6 +79,7 @@ app/
 │   ├── consolidation.py — Memory consolidation — collapse the Mem0 corpus's near-duplicate and
 │   ├── manager.py — MemoryManager — the single entry point the rest of the codebase uses to read
 │   ├── mem0_client.py — Mem0 self-hosted wrapper.
+│   ├── noise_purge.py — Retroactive meta-noise purge — apply the durable-fact extraction criteria to
 │   ├── session.py — Tier 2 — Session analytics view.
 │   └── user_profile.py — Tier 5 — Master's profile.
 ├── messaging/

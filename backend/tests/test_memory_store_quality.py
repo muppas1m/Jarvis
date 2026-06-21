@@ -249,3 +249,41 @@ def test_consolidation_report_selection_respects_filters() -> None:
 
     unfiltered = rep()
     assert len(unfiltered.selected()) == 3   # whole plan applies when no filter
+
+
+def test_noise_purge_drop_gate_is_conservative() -> None:
+    """The noise-purge delete gate drops ONLY confident, validly-categorized
+    noise — durable labels, low confidence, and unknown categories are kept."""
+    from app.memory.noise_purge import _Classification, _should_drop
+
+    # a durable fact is never dropped, even at full confidence
+    assert not _should_drop(_Classification(mem_id="1", label="durable", confidence=1.0), 0.85)
+    # confident, valid noise category → drop
+    assert _should_drop(
+        _Classification(mem_id="2", label="noise", category="recorded_question", confidence=0.9), 0.85)
+    # noise but below the confidence gate → keep
+    assert not _should_drop(
+        _Classification(mem_id="3", label="noise", category="task_status", confidence=0.5), 0.85)
+    # noise with an unknown/hallucinated category → keep (conservative)
+    assert not _should_drop(
+        _Classification(mem_id="4", label="noise", category="made_up", confidence=0.99), 0.85)
+
+
+def test_consolidation_value_preserved_guard() -> None:
+    """The deterministic value guard: a duplicate may be dropped only if the
+    survivor keeps every specific value (date/time/name) the drop carries —
+    formatting differences don't count, real value differences do."""
+    from app.memory.consolidation import _value_preserved
+
+    # same date, different format (ISO vs "June 16, 2026") → preserved
+    assert _value_preserved("met on June 16, 2026", "met girlfriend on 2026-06-16")
+    # clock-time formatting ("7 AM" vs "7:00 AM") → preserved
+    assert _value_preserved("event at 7 AM", "event at 7:00 AM today")
+    # survivor is a superset of the drop's values → preserved
+    assert _value_preserved("House Warming June 20", "House Warming June 20, week of June 15")
+    # drop has a concrete date the survivor only states vaguely → NOT preserved (loss)
+    assert not _value_preserved("Costco shopping June 15, 2026", "Costco shopping tomorrow")
+    # different dates → NOT preserved
+    assert not _value_preserved("House Warming June 21", "House Warming June 20")
+    # different names → NOT preserved
+    assert not _value_preserved("girlfriend is Amruta", "girlfriend is Priya")

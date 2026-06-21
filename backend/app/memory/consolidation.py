@@ -26,6 +26,7 @@ Safety (it deletes the master's real memories):
   - Idempotent — a second run over a consolidated corpus produces an empty plan.
 """
 import json
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -81,6 +82,7 @@ class ConsolidationReport:
     drops: list[dict] = field(default_factory=list)
     apply_reasons: list[str] | None = None     # apply filter actually used (None = all reasons)
     apply_lossless_only: bool = False
+    apply_value_safe_only: bool = False
     applied: int = 0
     errors: int = 0
 
@@ -91,6 +93,7 @@ class ConsolidationReport:
             d for d in self.drops
             if (self.apply_reasons is None or d["reason"] in self.apply_reasons)
             and (not self.apply_lossless_only or d["lossless"])
+            and (not self.apply_value_safe_only or d.get("value_safe", False))
         ]
 
     @property
@@ -122,6 +125,7 @@ class ConsolidationReport:
             "selected_by_reason": self.by_reason(self.selected()),
             "apply_reasons": self.apply_reasons,
             "apply_lossless_only": self.apply_lossless_only,
+            "apply_value_safe_only": self.apply_value_safe_only,
             "clusters_examined": self.clusters_examined,
             "auto_merge_clusters": self.auto_merge_clusters,
             "llm_clusters": self.llm_clusters,
@@ -191,6 +195,49 @@ def _norm(s: str) -> str:
     return " ".join((s or "").lower().split()).rstrip(".")
 
 
+# Ubiquitous capitalized tokens that are NOT distinguishing values (so a reworded
+# duplicate isn't flagged just because both mention "User" or "Saturday").
+_VALUE_STOPWORDS = frozenset({
+    "user", "mahesh", "assistant", "the", "his", "her", "their", "they", "ceremony",
+    "event", "party", "schedule", "calendar", "week", "weekend", "next", "this",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+})
+_MONTHS_RE = "january|february|march|april|may|june|july|august|september|october|november|december"
+
+
+def _extract_values(s: str) -> set[str]:
+    """Specific values whose loss would be DATA LOSS — dates, clock times, years,
+    money, and proper nouns (names/places). Normalized so formatting differences
+    ("7 AM" vs "7:00 AM", "June 16, 2026" vs "2026-06-16") are NOT counted as
+    different values."""
+    low = (s or "").lower()
+    vals: set[str] = set()
+    for m in re.findall(rf"(?:{_MONTHS_RE})\s+\d{{1,2}}", low):     # "june 16"
+        mon, day = m.split()
+        vals.add(f"{mon[:3]}{int(day)}")
+    for iso in re.findall(r"20\d\d-(\d{2})-(\d{2})", low):          # "2026-06-16" → "jun16"
+        mon = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"][int(iso[0]) - 1]
+        vals.add(f"{mon}{int(iso[1])}")
+    for t in re.findall(r"\d{1,2}(?::\d{2})?\s*[ap]m", low):        # "7 am" / "7:00 am"
+        vals.add(t.replace(":00", "").replace(" ", ""))
+    vals |= set(re.findall(r"\$\d[\d,]*", low))                     # money
+    for w in re.findall(r"\b[A-Z][a-zA-Z]{2,}\b", s or ""):        # proper nouns
+        wl = w.lower()
+        if wl not in _VALUE_STOPWORDS:
+            vals.add(wl)
+    return vals
+
+
+def _value_preserved(drop_text: str, keep_text: str) -> bool:
+    """True when the survivor keeps EVERY specific value the dropped row carries —
+    so deleting the drop loses no concrete information. A deterministic guard that
+    does NOT trust the LLM's merge judgment (the prompt guard alone still produced
+    value-conflating drops in review)."""
+    return _extract_values(drop_text) <= _extract_values(keep_text)
+
+
 # --------------------------------------------------------------------------- #
 # Adjudication
 # --------------------------------------------------------------------------- #
@@ -202,6 +249,7 @@ A memory may be removed only as:
 
 CRITICAL — do NOT lose information:
 - If two memories differ in any SPECIFIC VALUE — a date, a name, a number, a place, a time — they are DIFFERENT FACTS. Do NOT drop either as a "duplicate" (e.g. "met on June 11" and "met on June 17" are two different events; "deadline is June 13" and "deadline was initially June 13" carry different status — keep both).
+- When you DO mark a duplicate, the survivor you KEEP must contain EVERY specific value the dropped memory has. If the dropped one names a concrete date/time/place the survivor lacks or states only vaguely (e.g. "tomorrow"), keep BOTH — never trade a concrete value for a vaguer one.
 - Only mark "superseded" when the SAME attribute of the SAME subject has a NEW value AND created_at clearly shows which is newer AND the older is genuinely obsolete. Resolve by TRUTH + timestamp, never by which phrasing sounds more current.
 - When in any doubt, keep BOTH and list no drop. A wrongly kept duplicate is harmless; a wrongly dropped distinct fact is permanent data loss.
 
@@ -279,6 +327,10 @@ def _drop_dict(d: _Drop, drop_row: _Row, keep_row: _Row) -> dict:
         # provably lossless ⇔ the dropped row's text is identical to its survivor's,
         # so deleting it cannot lose information (an exact re-extraction).
         "lossless": _norm(drop_row.content) == _norm(keep_row.content),
+        # value-safe ⇔ the survivor keeps every specific value (date/time/name) the
+        # dropped row has — deterministic guard against the LLM merging a
+        # different-value fact as a "duplicate".
+        "value_safe": _value_preserved(drop_row.content, keep_row.content),
         "drop_text": drop_row.content,
         "keep_text": keep_row.content,
     }
@@ -315,16 +367,19 @@ async def run_consolidation(
     max_clusters: int | None = None,
     reasons: set[str] | None = None,
     lossless_only: bool = False,
+    value_safe_only: bool = False,
 ) -> ConsolidationReport:
     """Consolidate the Mem0 corpus. DRY-RUN by default.
 
-    Apply-safety filters:
+    Apply-safety filters (composable):
       - ``lossless_only=True`` → SKIP the LLM entirely and plan only
         provably-lossless exact-text duplicate collapses. Fast, deterministic,
         cannot lose information — the safe FIRST apply.
-      - ``reasons={"duplicate"}`` → in a full run, only drops of these reasons are
-        applied (e.g. hold ``"superseded"`` out until entity-attribute
-        supersession lands and a human has reviewed it).
+      - ``reasons={"duplicate"}`` → only drops of these reasons are applied (e.g.
+        hold ``"superseded"`` out until entity-attribute supersession lands).
+      - ``value_safe_only=True`` → only drops whose survivor preserves every
+        specific value (date/time/name) the dropped row has. Deterministic guard
+        against the LLM merging a different-value fact as a duplicate.
 
     The full ``report.drops`` is always the complete plan; ``report.selected()``
     is the gated subset that an apply would delete. ``max_clusters`` caps LLM
@@ -341,6 +396,7 @@ async def run_consolidation(
         llm_clusters=0, dry_run=dry_run,
         apply_reasons=sorted(reasons) if reasons else None,
         apply_lossless_only=lossless_only,
+        apply_value_safe_only=value_safe_only,
     )
 
     if lossless_only:
@@ -403,3 +459,22 @@ async def run_consolidation(
 
     logger.info("consolidation_done", **report.summary())
     return report
+
+
+async def apply_drop_ids(drop_ids: list[str]) -> dict:
+    """Delete an explicit, pre-reviewed set of memory ids — the post-dry-run apply
+    path. Deterministic (no re-clustering, no LLM, so the applied set is EXACTLY
+    the reviewed plan, not a fresh non-deterministic re-run). Caller is
+    responsible for the pg_dump backup + the review that produced ``drop_ids``."""
+    mem = get_memory().mem0
+    applied = errors = 0
+    for mid in drop_ids:
+        try:
+            await mem.delete(mid)
+            applied += 1
+            logger.info("consolidation_applied_drop", mem_id=mid)
+        except Exception as exc:  # noqa: BLE001 — one failed delete shouldn't abort the batch
+            errors += 1
+            logger.error("consolidation_apply_failed", mem_id=mid, error=str(exc))
+    logger.info("consolidation_apply_done", applied=applied, errors=errors, requested=len(drop_ids))
+    return {"applied": applied, "errors": errors, "requested": len(drop_ids)}
