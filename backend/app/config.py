@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     GMAIL_PUBSUB_SUBSCRIPTION: str = ""
     GOOGLE_CREDENTIALS_PATH: str = "backend/secrets/google_credentials.json"
     WEBHOOK_SECRET_GMAIL: str = ""
+    # Gmail webhook OIDC enforcement (Phase 4.5). SHADOW by default: the real
+    # verifier runs + logs its verdict on every push, but a FAILED verdict does
+    # NOT 403 — so flipping the Phase-2 always-True stub to the real verifier
+    # can't 403 the whole inbox before the live Pub/Sub subscription's
+    # oidcToken.audience is confirmed to match WEBHOOK_SECRET_GMAIL. Flip to True
+    # to ENFORCE once a real push has been observed passing (look for the
+    # `gmail_webhook_verified` log line).
+    GMAIL_WEBHOOK_ENFORCE: bool = False
 
     # --- Inbound-email health canary (P2) ------------------------------------
     # gmail_check writes a heartbeat on every clean poll; the canary alerts the

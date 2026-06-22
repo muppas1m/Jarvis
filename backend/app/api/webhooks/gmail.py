@@ -42,6 +42,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from googleapiclient.errors import HttpError as GoogleAPIError
 from sqlalchemy.exc import DBAPIError, OperationalError
 
+from app.config import settings
 from app.email.gmail_pubsub import handle_gmail_push
 from app.security.webhook_verify import verify_gmail_webhook
 from app.utils.logging import get_logger
@@ -76,9 +77,18 @@ def _is_retry_worthy(exc: BaseException) -> bool:
 async def gmail_webhook(request: Request) -> dict:
     """Receive a Gmail Pub/Sub push, verify auth, dispatch with ACK policy."""
     auth_header = request.headers.get("Authorization", "")
-    if not verify_gmail_webhook(auth_header):
-        logger.warning("gmail_webhook_unauthorized")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Pub/Sub JWT")
+    valid = verify_gmail_webhook(auth_header)  # always runs + logs its verdict
+    if not valid:
+        if settings.GMAIL_WEBHOOK_ENFORCE:
+            logger.warning("gmail_webhook_unauthorized")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Pub/Sub JWT"
+            )
+        # Shadow/observe rollout (Phase 4.5): log the would-be 403 but STILL
+        # process — no silent pipeline breakage before the subscription's OIDC
+        # audience is confirmed. Flip GMAIL_WEBHOOK_ENFORCE=True once a real push
+        # is seen passing (`gmail_webhook_verified`).
+        logger.warning("gmail_webhook_shadow_would_reject")
 
     body = await request.json()
     message = body.get("message", {})
@@ -100,7 +110,7 @@ async def gmail_webhook(request: Request) -> dict:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="transient",
-            )
+            ) from exc
         # Default: log + 200 so Pub/Sub stops retrying. The audit trail
         # is in the structured log; manual investigation if needed.
         logger.exception(
