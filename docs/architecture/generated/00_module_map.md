@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (93 modules)
+## `app/` — the system (95 modules)
 
 ```
 app/
@@ -44,6 +44,7 @@ app/
 │   ├── health.py — Public liveness/readiness endpoint.
 │   ├── memory.py — Read-only memory inspector endpoints.
 │   ├── router.py — API router aggregator.
+│   ├── system.py — Authenticated dashboard telemetry (4.C.2).
 │   └── voice.py — POST /api/voice/stream — SSE token-streamed + spoken agent turn (Phase 4 4.1).
 ├── db/
 │   ├── __init__.py — —
@@ -109,7 +110,8 @@ app/
 ├── utils/
 │   ├── __init__.py — —
 │   ├── exceptions.py — Custom exception hierarchy.
-│   └── logging.py — Structured logging helper — single import point for the rest of the codebase.
+│   ├── logging.py — Structured logging helper — single import point for the rest of the codebase.
+│   └── runtime_stats.py — In-process runtime stats for the dashboard (4.C.2): process uptime + a real
 ├── voice/
 │   ├── __init__.py — Voice layer (Phase 4) — streaming TTS + the voice-turn orchestration helpers.
 │   ├── chunker.py — Sentence chunker — slices a streamed token feed into speakable sentences.

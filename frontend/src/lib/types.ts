@@ -85,3 +85,33 @@ export type StreamEvent =
       };
     }
   | { type: "error"; content: string; stop_reason?: string };
+
+/** Real VM telemetry (4.C.2) — mirrors backend app.api.system.SystemStats.
+ *  /proc-backed; `null` fields = that read failed (widget shows "—"). */
+export interface SystemStats {
+  cpu_pct: number | null;
+  cpu_count: number;
+  mem_used_mb: number | null;
+  mem_total_mb: number | null;
+  disk_used_gb: number | null;
+  disk_total_gb: number | null;
+  load_1m: number | null;
+  load_5m: number | null;
+  load_15m: number | null;
+  uptime_s: number;
+  session_turns: number;
+  today_turns: number;
+}
+
+export type SubsystemStatus = "ok" | "degraded" | "down" | "skipped";
+
+/** Grouped subsystem health (4.C.2) — mirrors backend health_groups(). The ring
+ *  reads `status` per group; the expand lists `members`. */
+export interface HealthGroup {
+  status: SubsystemStatus;
+  members: { name: string; status: SubsystemStatus }[];
+}
+export interface GroupedHealth {
+  status: "ok" | "degraded";
+  groups: Record<string, HealthGroup>;
+}

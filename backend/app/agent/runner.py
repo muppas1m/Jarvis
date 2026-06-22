@@ -47,6 +47,7 @@ from app.agent.nodes import count_message_tokens
 from app.config import settings
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
+from app.utils import runtime_stats
 from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
 from app.voice.chunker import SentenceChunker
@@ -192,6 +193,7 @@ async def run_turn(
     channel_user_id: str,
 ) -> dict[str, Any]:
     """Execute one user turn through the agent graph."""
+    runtime_stats.record_turn()
     config, handler = _config_with_handler(thread_id)
 
     # A pending approval interrupt: do NOT start a fresh turn (a free-text
@@ -418,6 +420,7 @@ async def stream_turn(
     fall-over re-emits tokens (rare; the primary streamed a partial before
     erroring), the client renders the canonical answer from "done"/"approval".
     """
+    runtime_stats.record_turn()
     yield {"type": "thread_id", "content": thread_id}
 
     config, handler = _config_with_handler(thread_id)
@@ -665,6 +668,7 @@ async def voice_turn(
     barge-in) stops iterating, the producer task and the in-flight graph turn
     are cancelled. That is the barge-in foundation architected from 4.1.
     """
+    runtime_stats.record_turn()
     yield {"type": "thread_id", "content": thread_id}
 
     config, handler = _config_with_handler(thread_id)

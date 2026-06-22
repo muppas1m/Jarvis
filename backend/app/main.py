@@ -121,6 +121,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger = get_logger(__name__)
     logger.info("startup_begin", environment=settings.ENVIRONMENT)
 
+    # Stamp process start for the dashboard's uptime gauge (4.C.2).
+    from app.utils import runtime_stats
+
+    runtime_stats.mark_started()
+
     await init_db()
     logger.info("db_engine_ready")
 

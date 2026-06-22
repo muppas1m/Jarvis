@@ -24,6 +24,7 @@ from app.api.costs import router as costs_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.memory import router as memory_router
+from app.api.system import router as system_router
 from app.api.voice import router as voice_router
 from app.api.voice import ws_router as voice_ws_router
 from app.api.webhooks.gmail import router as gmail_webhook_router
@@ -60,5 +61,6 @@ protected_router.include_router(approvals_router)
 protected_router.include_router(memory_router)
 protected_router.include_router(costs_router)
 protected_router.include_router(documents_router)
+protected_router.include_router(system_router)
 
 api_router.include_router(protected_router)

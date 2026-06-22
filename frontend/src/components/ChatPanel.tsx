@@ -2,13 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { StreamItem } from "@/lib/types";
+import type { ContextMeter, StreamItem } from "@/lib/types";
 
 import { ApprovalCard } from "./ApprovalCard";
+import { ContextMeterBar } from "./ContextMeterBar";
 import { UploadChip } from "./UploadChip";
 
 interface ChatPanelProps {
   items: StreamItem[];
+  /** Context-meter snapshot (4.B.3) — re-homed to the top of the chat (4.C.2). */
+  ctx: ContextMeter | null;
   /** Turn dispatch (typed input). */
   send: (text: string) => void;
   decideApproval: (approvalId: string, approved: boolean) => void;
@@ -32,6 +35,7 @@ interface ChatPanelProps {
  */
 export function ChatPanel({
   items,
+  ctx,
   send,
   decideApproval,
   uploadDocument,
@@ -91,6 +95,8 @@ export function ChatPanel({
           </p>
         </div>
       )}
+
+      <ContextMeterBar ctx={ctx} />
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {items.length === 0 && (

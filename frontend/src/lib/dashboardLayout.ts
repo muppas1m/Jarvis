@@ -11,12 +11,13 @@
  *
  * Tiling is exhaustive + non-overlapping across all 12×12 cells (verified by
  * eye against the map below); empty cells would simply reveal the backdrop.
+ * (4.C.2: the context meter moved back into the chat widget, so its old row-8
+ * strip is gone — the middle band now runs rows 2–8 to keep the grid full.)
  *
  *   cols →            0  1  2 | 3  4  5  6  7 | 8  9 10 11
  *   row 0-1   clock(0-2)      | weather(3-6)  status(7-8) | uptime(9-11)
  *   row 2-4   system(0-2)     | orb(3-7).............. | chat(8-11)......
- *   row 5-7   health(0-2)     | orb(3-7).............. | chat(8-11)......
- *   row 8     context(0-11) — full-width re-homed meter strip
+ *   row 5-8   health(0-2)     | orb(3-7).............. | chat(8-11)......
  *   row 9-11  event-log(0-11) — full-width
  */
 export const GRID_COLS = 12;
@@ -38,7 +39,6 @@ export type WidgetId =
   | "orb"
   | "chat"
   | "health"
-  | "context"
   | "eventlog";
 
 export const DASHBOARD_LAYOUT: Record<WidgetId, GridSpec> = {
@@ -47,10 +47,9 @@ export const DASHBOARD_LAYOUT: Record<WidgetId, GridSpec> = {
   status: { x: 7, y: 0, w: 2, h: 2 },
   uptime: { x: 9, y: 0, w: 3, h: 2 },
   system: { x: 0, y: 2, w: 3, h: 3 },
-  orb: { x: 3, y: 2, w: 5, h: 6 },
-  chat: { x: 8, y: 2, w: 4, h: 6 },
-  health: { x: 0, y: 5, w: 3, h: 3 },
-  context: { x: 0, y: 8, w: 12, h: 1 },
+  orb: { x: 3, y: 2, w: 5, h: 7 },
+  chat: { x: 8, y: 2, w: 4, h: 7 },
+  health: { x: 0, y: 5, w: 3, h: 4 },
   eventlog: { x: 0, y: 9, w: 12, h: 3 },
 };
 

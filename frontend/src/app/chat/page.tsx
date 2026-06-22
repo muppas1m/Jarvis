@@ -8,12 +8,18 @@ import { signOut, useSession } from "next-auth/react";
 import { BootSequence } from "@/components/BootSequence";
 import { ChatPanel } from "@/components/ChatPanel";
 import { CircuitBackdrop } from "@/components/CircuitBackdrop";
-import { ContextMeterBar } from "@/components/ContextMeterBar";
 import { HudControls } from "@/components/HudControls";
 import { PlaceholderWidget } from "@/components/PlaceholderWidget";
 import { WidgetCard } from "@/components/WidgetCard";
+import { ClockWidget } from "@/components/widgets/ClockWidget";
+import { HealthRingWidget } from "@/components/widgets/HealthRingWidget";
+import { StatusPillWidget } from "@/components/widgets/StatusPillWidget";
+import { SystemStatsWidget } from "@/components/widgets/SystemStatsWidget";
+import { UptimeWidget } from "@/components/widgets/UptimeWidget";
 import { clearBootPending } from "@/lib/boot";
 import { DASHBOARD_LAYOUT as L, GRID_COLS, GRID_ROWS } from "@/lib/dashboardLayout";
+import type { GroupedHealth, SystemStats } from "@/lib/types";
+import { usePolledJSON } from "@/lib/usePolledJSON";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
 
 // Client-only — Three.js must not run during SSR (Next 16: ssr:false is only
@@ -57,6 +63,13 @@ export default function ChatPage() {
   const ready = sessionStatus === "authenticated";
   const busy = orbState === "thinking" || orbState === "responding";
   const voiceActive = voiceEnabled || wakeOn;
+
+  // Two shared polls (4.C.2) feed the data widgets via the one usePolledJSON
+  // hook — lifted here so System+Uptime share a /api/system poll and
+  // Status+Health share a /api/system/health poll (no double-fetch, no CPU-delta
+  // contention). System stats tick faster than the heavier subsystem probes.
+  const sys = usePolledJSON<SystemStats>("/api/system", 4000);
+  const health = usePolledJSON<GroupedHealth>("/api/system/health", 7000);
 
   return (
     <main className="relative flex h-screen flex-col overflow-hidden p-3">
@@ -106,10 +119,11 @@ export default function ChatPage() {
           </div>
         </WidgetCard>
 
-        {/* Chat — tall corner widget */}
+        {/* Chat — tall corner widget (context meter re-homed to its top) */}
         <WidgetCard spec={L.chat}>
           <ChatPanel
             items={items}
+            ctx={context}
             send={send}
             decideApproval={decideApproval}
             uploadDocument={uploadDocument}
@@ -122,18 +136,15 @@ export default function ChatPage() {
           />
         </WidgetCard>
 
-        {/* Context meter — re-homed into its own full-width readout strip */}
-        <WidgetCard spec={L.context} className="flex flex-col justify-center px-1">
-          <ContextMeterBar ctx={context} />
-        </WidgetCard>
+        {/* Live data widgets (4.C.2) — real data via the shared polls */}
+        <ClockWidget spec={L.clock} />
+        <StatusPillWidget spec={L.status} state={health} />
+        <SystemStatsWidget spec={L.system} state={sys} />
+        <HealthRingWidget spec={L.health} state={health} />
+        <UptimeWidget spec={L.uptime} state={sys} />
 
-        {/* Upcoming data widgets (4.C.2 / 4.C.3) — labeled placeholders for now */}
-        <PlaceholderWidget title="Clock" glyph="◷" spec={L.clock} />
+        {/* Still placeholders — land in 4.C.3 (external API + activity aggregation) */}
         <PlaceholderWidget title="Weather" glyph="☁" spec={L.weather} />
-        <PlaceholderWidget title="Status" glyph="◉" spec={L.status} />
-        <PlaceholderWidget title="System" glyph="▦" spec={L.system} />
-        <PlaceholderWidget title="Health" glyph="✚" spec={L.health} />
-        <PlaceholderWidget title="Uptime" glyph="⟲" spec={L.uptime} />
         <PlaceholderWidget title="Event Log" glyph="☰" spec={L.eventlog} />
       </div>
 

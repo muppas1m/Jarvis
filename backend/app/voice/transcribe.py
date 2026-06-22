@@ -57,6 +57,12 @@ def get_whisper() -> WhisperModel:
     return _model
 
 
+def is_loaded() -> bool:
+    """True once the whisper model is resident (warmed at startup or first use).
+    Cheap, non-loading — backs the dashboard's Voice health probe (4.C.2)."""
+    return _model is not None
+
+
 def transcribe_pcm(pcm_int16: np.ndarray) -> str:
     """Transcribe a finalized utterance (16 kHz mono int16 PCM) → text.
 
