@@ -305,6 +305,16 @@ class Settings(BaseSettings):
     # generous safety backstop above CAPTURE_MAX_MS.
     CAPTURE_NO_SPEECH_MS: int = 7000
 
+    # --- Weather widget (dashboard 4.C.3) ------------------------------------
+    # Open-Meteo (no API key). Default location Pompano Beach, FL + °F, all
+    # config-backed so a future settings UI can edit them — the seam is here, the
+    # UI isn't built yet. Override via env (WEATHER_LAT, WEATHER_LON, …).
+    WEATHER_LAT: float = 26.2379
+    WEATHER_LON: float = -80.1248
+    WEATHER_LABEL: str = "Pompano Beach"
+    WEATHER_TEMP_UNIT: str = "fahrenheit"   # "fahrenheit" | "celsius"
+    WEATHER_WIND_UNIT: str = "mph"          # "mph" | "kmh" | "ms" | "kn"
+
     # --- Approval flow -------------------------------------------------------
     APPROVAL_EXPIRY_HOURS: int = 72
     AUTO_APPROVE_REPLY_MAX_WORDS: int = 80

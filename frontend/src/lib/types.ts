@@ -115,3 +115,33 @@ export interface GroupedHealth {
   status: "ok" | "degraded";
   groups: Record<string, HealthGroup>;
 }
+
+/** Current weather (4.C.3) — mirrors backend app.api.weather.WeatherResponse. */
+export interface Weather {
+  location: string;
+  temp: number | null;
+  temp_unit: string;
+  condition: string;
+  glyph: string;
+  humidity: number | null;
+  wind: number | null;
+  wind_unit: string;
+}
+
+/** 24h activity (4.C.3) — mirrors backend app.api.activity.ActivityResponse.
+ *  Master-facing phrasing already applied server-side. */
+export interface ActivityItem {
+  glyph: string;
+  text: string;
+  when: string; // ISO-8601
+  kind: string; // action | email | memory
+}
+export interface ActivitySummaryRow {
+  glyph: string;
+  label: string;
+  count: number;
+}
+export interface Activity {
+  summary: ActivitySummaryRow[];
+  feed: ActivityItem[];
+}

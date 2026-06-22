@@ -37,6 +37,7 @@ from typing import Any, Callable, Optional
 import litellm
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from app.utils.llm_health import record_llm_result
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -108,8 +109,11 @@ class FallbackChatLLM(Runnable):
 
     def invoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
         try:
-            return self.primary.invoke(input, config=config, **kwargs)
+            result = self.primary.invoke(input, config=config, **kwargs)
+            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
+            return result
         except Exception as exc:  # noqa: BLE001 — predicate decides which propagate
+            record_llm_result(False)  # primary failed — even if the fallback recovers below
             if not self.retry_predicate(exc):
                 raise
             self._log_fallback(exc)
@@ -117,8 +121,11 @@ class FallbackChatLLM(Runnable):
 
     async def ainvoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
         try:
-            return await self.primary.ainvoke(input, config=config, **kwargs)
+            result = await self.primary.ainvoke(input, config=config, **kwargs)
+            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
+            return result
         except Exception as exc:  # noqa: BLE001
+            record_llm_result(False)  # primary failed — even if the fallback recovers below
             if not self.retry_predicate(exc):
                 raise
             self._log_fallback(exc)

@@ -33,6 +33,7 @@ from app.llm.cost_tracker import CostTracker
 from app.llm.models import TASK_ROUTING, get_models
 from app.llm.eval_mode import eval_mode
 from app.utils.exceptions import CostCapExceededError
+from app.utils.llm_health import record_llm_result
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -99,7 +100,9 @@ class LLMGateway:
             response = await self._call_llm(
                 model.model_id, messages, tools, temperature, thread_id, task_type, response_format
             )
+            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
         except Exception as exc:
+            record_llm_result(False)  # primary failed — even if fallback recovers below
             logger.error(
                 "llm_call_failed",
                 model=model.model_id,

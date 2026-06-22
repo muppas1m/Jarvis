@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (95 modules)
+## `app/` — the system (98 modules)
 
 ```
 app/
@@ -37,6 +37,7 @@ app/
 │   │   ├── gmail.py — Gmail Pub/Sub push notification receiver.
 │   │   └── telegram.py — Telegram webhook receiver — production inbound path.
 │   ├── __init__.py — —
+│   ├── activity.py — Authenticated 24h activity feed (4.C.3) — a dignified, master-facing view of
 │   ├── approvals.py — Approvals API + helpers.
 │   ├── chat.py — POST /api/chat — synchronous, non-streaming agent turn over HTTP.
 │   ├── costs.py — GET /api/costs — LLM spend snapshot, honestly labelled.
@@ -45,7 +46,8 @@ app/
 │   ├── memory.py — Read-only memory inspector endpoints.
 │   ├── router.py — API router aggregator.
 │   ├── system.py — Authenticated dashboard telemetry (4.C.2).
-│   └── voice.py — POST /api/voice/stream — SSE token-streamed + spoken agent turn (Phase 4 4.1).
+│   ├── voice.py — POST /api/voice/stream — SSE token-streamed + spoken agent turn (Phase 4 4.1).
+│   └── weather.py — Authenticated weather (4.C.3) — Open-Meteo, no API key. Config-backed location
 ├── db/
 │   ├── __init__.py — —
 │   ├── engine.py — Database engine + session factory.
@@ -110,6 +112,7 @@ app/
 ├── utils/
 │   ├── __init__.py — —
 │   ├── exceptions.py — Custom exception hierarchy.
+│   ├── llm_health.py — Passive LLM-call health (4.C.3) — zero token cost.
 │   ├── logging.py — Structured logging helper — single import point for the rest of the codebase.
 │   └── runtime_stats.py — In-process runtime stats for the dashboard (4.C.2): process uptime + a real
 ├── voice/

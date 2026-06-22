@@ -7,6 +7,9 @@
  *
  * Pure decoration: aria-hidden, pointer-events-none, pinned at -z-10 so every
  * grid widget floats above it and reveals it through their translucent fills.
+ * NOTE (4.C.3): this -z-10 only renders ABOVE the opaque body background
+ * because <main> is a stacking context (`isolate`) — without that, the body
+ * fill paints over it and the circuit vanishes. Keep `isolate` on the page main.
  */
 export function CircuitBackdrop() {
   return (
@@ -17,8 +20,10 @@ export function CircuitBackdrop() {
       <div
         className="absolute inset-0"
         style={{
+          // Lighter wash (4.C.3) — keeps content readable (the widgets carry
+          // their own blur+fill) while letting the circuit glow through.
           background:
-            "radial-gradient(125% 125% at 72% 4%, rgba(7,11,24,0.5), rgba(7,11,24,0.88))",
+            "radial-gradient(130% 130% at 70% 0%, rgba(7,11,24,0.28), rgba(7,11,24,0.7))",
         }}
       />
     </div>

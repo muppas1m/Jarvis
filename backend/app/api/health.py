@@ -136,19 +136,28 @@ def _check_whisper() -> DepStatus:
         return "down"
 
 
-def _check_brain() -> DepStatus:
-    """The agent can reason only if an LLM provider key is configured. Cheap
-    config-presence — NOT a live provider-reachability probe (that would cost
-    tokens/latency every poll); it catches misconfig, not a provider outage."""
-    if settings.GROQ_API_KEY or settings.OPENAI_API_KEY or settings.GOOGLE_GEMINI_API_KEY:
-        return "ok"
-    return "down"
+def _check_brain() -> "MemberStatus":
+    """Live brain health (4.C.3). Reads the passive last-call signal that the
+    gateway + FallbackChatLLM record on every PRIMARY call — so a real Groq
+    rate-limit/outage turns Brain amber (degraded) / red (down), not just the old
+    always-green config check. Before any call this process (`unknown`), falls
+    back to config-presence so a fresh boot with keys still reads green."""
+    from app.utils.llm_health import brain_status
+
+    st = brain_status()
+    if st == "unknown":
+        configured = bool(
+            settings.GROQ_API_KEY or settings.OPENAI_API_KEY or settings.GOOGLE_GEMINI_API_KEY
+        )
+        return "ok" if configured else "down"
+    return st  # type: ignore[return-value]  # "ok" | "degraded" | "down"
 
 
 GroupStatus = Literal["ok", "degraded", "down"]
+MemberStatus = Literal["ok", "degraded", "down", "skipped"]
 
 
-def _group(members: list[tuple[str, DepStatus]]) -> dict:
+def _group(members: list[tuple[str, MemberStatus]]) -> dict:
     """Worst-of aggregation over a group's members (skipped probes excluded)."""
     live = [(n, s) for n, s in members if s != "skipped"]
     statuses = [s for _, s in live]

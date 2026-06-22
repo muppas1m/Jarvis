@@ -18,6 +18,7 @@ it.
 """
 from fastapi import APIRouter, Depends
 
+from app.api.activity import router as activity_router
 from app.api.approvals import router as approvals_router
 from app.api.chat import router as chat_router
 from app.api.costs import router as costs_router
@@ -26,6 +27,7 @@ from app.api.health import router as health_router
 from app.api.memory import router as memory_router
 from app.api.system import router as system_router
 from app.api.voice import router as voice_router
+from app.api.weather import router as weather_router
 from app.api.voice import ws_router as voice_ws_router
 from app.api.webhooks.gmail import router as gmail_webhook_router
 from app.api.webhooks.telegram import router as telegram_webhook_router
@@ -62,5 +64,7 @@ protected_router.include_router(memory_router)
 protected_router.include_router(costs_router)
 protected_router.include_router(documents_router)
 protected_router.include_router(system_router)
+protected_router.include_router(weather_router)
+protected_router.include_router(activity_router)
 
 api_router.include_router(protected_router)

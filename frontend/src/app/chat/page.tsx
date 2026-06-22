@@ -9,16 +9,17 @@ import { BootSequence } from "@/components/BootSequence";
 import { ChatPanel } from "@/components/ChatPanel";
 import { CircuitBackdrop } from "@/components/CircuitBackdrop";
 import { HudControls } from "@/components/HudControls";
-import { PlaceholderWidget } from "@/components/PlaceholderWidget";
 import { WidgetCard } from "@/components/WidgetCard";
 import { ClockWidget } from "@/components/widgets/ClockWidget";
+import { EventLogWidget } from "@/components/widgets/EventLogWidget";
 import { HealthRingWidget } from "@/components/widgets/HealthRingWidget";
 import { StatusPillWidget } from "@/components/widgets/StatusPillWidget";
 import { SystemStatsWidget } from "@/components/widgets/SystemStatsWidget";
 import { UptimeWidget } from "@/components/widgets/UptimeWidget";
+import { WeatherWidget } from "@/components/widgets/WeatherWidget";
 import { clearBootPending } from "@/lib/boot";
 import { DASHBOARD_LAYOUT as L, GRID_COLS, GRID_ROWS } from "@/lib/dashboardLayout";
-import type { GroupedHealth, SystemStats } from "@/lib/types";
+import type { Activity, GroupedHealth, SystemStats, Weather } from "@/lib/types";
 import { usePolledJSON } from "@/lib/usePolledJSON";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
 
@@ -70,9 +71,12 @@ export default function ChatPage() {
   // contention). System stats tick faster than the heavier subsystem probes.
   const sys = usePolledJSON<SystemStats>("/api/system", 4000);
   const health = usePolledJSON<GroupedHealth>("/api/system/health", 7000);
+  // Weather changes slowly (20 min); the activity feed is near-live (20 s).
+  const weather = usePolledJSON<Weather>("/api/weather", 1_200_000);
+  const activity = usePolledJSON<Activity>("/api/activity", 20_000);
 
   return (
-    <main className="relative flex h-screen flex-col overflow-hidden p-3">
+    <main className="relative isolate flex h-screen flex-col overflow-hidden p-3">
       <CircuitBackdrop />
       <BootSequence />
 
@@ -143,9 +147,9 @@ export default function ChatPage() {
         <HealthRingWidget spec={L.health} state={health} />
         <UptimeWidget spec={L.uptime} state={sys} />
 
-        {/* Still placeholders — land in 4.C.3 (external API + activity aggregation) */}
-        <PlaceholderWidget title="Weather" glyph="☁" spec={L.weather} />
-        <PlaceholderWidget title="Event Log" glyph="☰" spec={L.eventlog} />
+        {/* Weather (Open-Meteo) + 24h activity feed (4.C.3) */}
+        <WeatherWidget spec={L.weather} state={weather} />
+        <EventLogWidget spec={L.eventlog} state={activity} />
       </div>
 
       {/* Low-prominence controls, bottom-right */}

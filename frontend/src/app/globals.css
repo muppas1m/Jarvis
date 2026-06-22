@@ -98,8 +98,10 @@ body {
   background-image: url("/circuit-backdrop.jpg");
   background-size: cover;
   background-position: center;
-  filter: blur(5px) saturate(115%);
-  transform: scale(1.06);
+  /* Lighter blur + a brightness/saturate lift so the cyan traces actually read
+     through the translucent widgets (4.C.3 — they were washed out before). */
+  filter: blur(3px) saturate(140%) brightness(1.3);
+  transform: scale(1.05);
 }
 
 /* Cyan neon glow. */
