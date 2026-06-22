@@ -8,7 +8,7 @@ import type { NextAuthConfig } from "next-auth";
  * Single-master model: identity is always "master". The session is long-lived
  * so the dashboard (and, in 4.4, wake-word/voice) doesn't force re-auth mid-use.
  */
-const PROTECTED_PREFIXES = ["/chat", "/approvals"];
+const PROTECTED_PREFIXES = ["/chat"];
 
 export const authConfig = {
   trustHost: true,

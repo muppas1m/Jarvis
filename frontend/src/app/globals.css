@@ -29,6 +29,13 @@
   color-scheme: dark;
 }
 
+html {
+  /* Compact pass (4.C.1): base 14px (from the 16px default). Tailwind sizing is
+   * rem-based, so this scales every tile, gap, and type-step proportionally —
+   * the dashboard holds many widgets, so density matters. */
+  font-size: 14px;
+}
+
 html,
 body {
   background:
@@ -56,6 +63,43 @@ body {
   backdrop-filter: blur(18px) saturate(130%);
   -webkit-backdrop-filter: blur(18px) saturate(130%);
   border: 1px solid rgba(0, 212, 255, 0.22);
+}
+
+/* Translucent HUD widget surface (4.C.1) — the shared <WidgetCard> fill. Lower
+ * opacity than .glass on purpose, so the blurred circuit backdrop reads THROUGH
+ * each tile (the see-through HUD effect) while backdrop-blur + the dim wash keep
+ * the crisp neon content on top fully legible. One surface; every widget uses it. */
+.widget-card {
+  background: linear-gradient(160deg, rgba(13, 21, 48, 0.42), rgba(8, 13, 30, 0.30));
+  backdrop-filter: blur(10px) saturate(125%);
+  -webkit-backdrop-filter: blur(10px) saturate(125%);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.05) inset,
+    0 0 16px rgba(0, 212, 255, 0.1),
+    0 8px 30px rgba(0, 0, 0, 0.4);
+  transition:
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.widget-card:hover {
+  border-color: rgba(0, 212, 255, 0.38);
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.08) inset,
+    0 0 22px rgba(0, 212, 255, 0.18),
+    0 8px 34px rgba(0, 0, 0, 0.45);
+}
+
+/* The HUD back-fill (4.C.1): blurred circuit-board art under a dim wash. The
+ * blur softens the fine traces and masks the source's low resolution; the
+ * scale-up hides the blur's feathered edges. The dim overlay is a sibling layer
+ * in <CircuitBackdrop>, not here, so the dim is tunable without touching this. */
+.circuit-backdrop {
+  background-image: url("/circuit-backdrop.jpg");
+  background-size: cover;
+  background-position: center;
+  filter: blur(5px) saturate(115%);
+  transform: scale(1.06);
 }
 
 /* Cyan neon glow. */

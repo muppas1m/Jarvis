@@ -9,10 +9,9 @@ export interface ChatMessage {
 }
 
 /** A live approval the master must decide, rendered as an inline card in the
- *  chat (A2). Normalized from EITHER the `approval_required` stream event
- *  (interrupt payload) OR GET /api/approvals (a pending row). `tool_args` is the
- *  REAL structured action — rendered field-by-field so the card shows exactly
- *  what will execute, never an LLM re-summary. */
+ *  chat (A2). Normalized from the `approval_required` stream event (interrupt
+ *  payload). `tool_args` is the REAL structured action — rendered field-by-field
+ *  so the card shows exactly what will execute, never an LLM re-summary. */
 export type ApprovalStatus =
   | "pending"
   | "resolving"
@@ -61,17 +60,6 @@ export type StreamItem =
   | { type: "decision"; id: string; approval: ApprovalRequest }
   | { type: "upload"; id: string; upload: UploadItem }
   | { type: "divider"; id: string; label: string };
-
-/** Mirrors backend PendingApprovalView (app/api/approvals.py). */
-export interface ApprovalView {
-  id: string;
-  thread_id: string;
-  action_type: string;
-  description: string;
-  payload: Record<string, unknown>;
-  created_at: string;
-  expires_at: string;
-}
 
 /** SSE event contract — mirrors app.agent.runner.stream_turn exactly. */
 export type StreamEvent =
