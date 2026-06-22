@@ -258,8 +258,7 @@ async def run_turn(
             1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
         ),
     )
-    envelope["context"] = _context_from_state(result, live=True)  # 4.B.3 context meter
-    return envelope
+    return envelope  # context already on the envelope (set in _build_envelope)
 
 
 async def resume_turn(
@@ -500,10 +499,7 @@ async def stream_turn(
     if envelope["status"] == "interrupted":
         yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
     else:
-        yield {"type": "done", "content": {
-            **_terminal_payload(envelope),
-            "context": _context_from_state(result, live=True),  # 4.B.3 context meter
-        }}
+        yield {"type": "done", "content": _terminal_payload(envelope)}
 
 
 def _chunk_text(chunk: Any) -> str:
@@ -536,6 +532,7 @@ def _terminal_payload(envelope: dict[str, Any]) -> dict[str, Any]:
         "response": envelope.get("response", ""),
         "usage": envelope.get("usage"),
         "thread_id": envelope["thread_id"],
+        "context": envelope.get("context"),  # 4.B.3 meter (None on synthetic envelopes)
     }
 
 
@@ -1014,6 +1011,12 @@ async def _build_envelope(
     usage = _aggregate_usage(new_messages, duration_ms)
     trace_id = _safe_trace_id(handler)
 
+    # Context meter (4.B.3) — computed ONCE here at envelope finalization so it
+    # rides EVERY terminal path (run_turn, stream_turn, voice_turn, resume) via
+    # _terminal_payload, not just the text done-sites. `live=True` surfaces the
+    # "just compacted" signal that drives the in-chat divider.
+    context = _context_from_state(result, live=True)
+
     interrupts = _collect_interrupts(state)
     if interrupts:
         first = interrupts[0]
@@ -1027,6 +1030,7 @@ async def _build_envelope(
             "interrupt": payload,
             "trace_id": trace_id,
             "usage": usage,
+            "context": context,
         }
 
     return {
@@ -1038,6 +1042,7 @@ async def _build_envelope(
         "interrupt": None,
         "trace_id": trace_id,
         "usage": usage,
+        "context": context,
     }
 
 
