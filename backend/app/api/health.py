@@ -137,11 +137,13 @@ def _check_whisper() -> DepStatus:
 
 
 def _check_brain() -> "MemberStatus":
-    """Live brain health (4.C.3). Reads the passive last-call signal that the
-    gateway + FallbackChatLLM record on every PRIMARY call — so a real Groq
-    rate-limit/outage turns Brain amber (degraded) / red (down), not just the old
-    always-green config check. Before any call this process (`unknown`), falls
-    back to config-presence so a fresh boot with keys still reads green."""
+    """Live, FUNCTIONAL brain health (4.C.3-fix). Reads the passive signal the
+    gateway + FallbackChatLLM record at each call's FINAL outcome — ok if the
+    agent answered by ANY path, degraded/down only when no path could. So a
+    handled Groq rate-limit (fallback covers it) stays GREEN; only a both-paths
+    failure goes amber/red. Before any call this process (`unknown`), falls back
+    to config-presence so a fresh boot with keys still reads green. (The 'running
+    on backup' nuance is a member-name hint in health_groups, not the status.)"""
     from app.utils.llm_health import brain_status
 
     st = brain_status()
@@ -192,11 +194,18 @@ async def health_groups() -> dict:
         _check_celery(),
     )
     whisper = _check_whisper()  # sync — module flag
-    brain = _check_brain()  # sync — config presence
+    brain = _check_brain()  # sync — functional last-call health
+
+    # Subtle "running on backup" hint (4.C.3-fix): only when the agent IS
+    # answering (ok) but the primary provider is degraded and the fallback is
+    # covering it. It rides the member NAME — the ring stays green, never red.
+    from app.utils.llm_health import primary_degraded
+
+    brain_name = "Language model (on backup)" if brain == "ok" and primary_degraded() else "Language model"
 
     groups = {
         "Core": _group([("Database", db), ("Cache", redis_s), ("Checkpointer", ckpt)]),
-        "Brain": _group([("Language model", brain)]),
+        "Brain": _group([(brain_name, brain)]),
         "Memory": _group([("Embeddings", ollama)]),
         "Voice": _group([("Speech-to-text", whisper)]),
         "Background jobs": _group([("Task workers", celery)]),

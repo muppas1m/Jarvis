@@ -100,9 +100,8 @@ class LLMGateway:
             response = await self._call_llm(
                 model.model_id, messages, tools, temperature, thread_id, task_type, response_format
             )
-            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
+            used_fallback = False
         except Exception as exc:
-            record_llm_result(False)  # primary failed — even if fallback recovers below
             logger.error(
                 "llm_call_failed",
                 model=model.model_id,
@@ -111,6 +110,7 @@ class LLMGateway:
             )
             # Don't recurse if we already hit the fallback slot.
             if model_key == "fallback":
+                record_llm_result(False)  # the only path failed — genuinely no answer
                 raise
             fallback = self._models["fallback"]
             logger.info(
@@ -118,11 +118,20 @@ class LLMGateway:
                 from_=model.model_id,
                 to=fallback.model_id,
             )
-            response = await self._call_llm(
-                fallback.model_id, messages, tools, temperature, thread_id, task_type, response_format
-            )
+            try:
+                response = await self._call_llm(
+                    fallback.model_id, messages, tools, temperature, thread_id, task_type, response_format
+                )
+            except Exception:
+                record_llm_result(False)  # both paths failed — genuinely no answer
+                raise
+            used_fallback = True
             model = fallback   # cost-tracking should reflect the fallback model
             model_key = "fallback"
+        # A response was obtained (primary OR fallback) → functional health is ok.
+        # `via_fallback` is the subtle "primary degraded, on backup" hint (4.C.3-fix),
+        # never the ring going red — Jarvis answered.
+        record_llm_result(True, via_fallback=used_fallback)
 
         duration_ms = int((time.time() - start) * 1000)
 

@@ -110,26 +110,38 @@ class FallbackChatLLM(Runnable):
     def invoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
         try:
             result = self.primary.invoke(input, config=config, **kwargs)
-            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
+            record_llm_result(True, via_fallback=False)  # primary answered
             return result
         except Exception as exc:  # noqa: BLE001 — predicate decides which propagate
-            record_llm_result(False)  # primary failed — even if the fallback recovers below
             if not self.retry_predicate(exc):
+                record_llm_result(False)  # not retryable → no answer (4.C.3-fix)
                 raise
             self._log_fallback(exc)
-            return self.fallback.invoke(input, config=config, **kwargs)
+            try:
+                result = self.fallback.invoke(input, config=config, **kwargs)
+            except Exception:
+                record_llm_result(False)  # both paths failed → genuinely no answer
+                raise
+            record_llm_result(True, via_fallback=True)  # fallback answered → green + subtle hint
+            return result
 
     async def ainvoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
         try:
             result = await self.primary.ainvoke(input, config=config, **kwargs)
-            record_llm_result(True)  # primary-attempt health (4.C.3 Brain probe)
+            record_llm_result(True, via_fallback=False)  # primary answered
             return result
         except Exception as exc:  # noqa: BLE001
-            record_llm_result(False)  # primary failed — even if the fallback recovers below
             if not self.retry_predicate(exc):
+                record_llm_result(False)  # not retryable → no answer (4.C.3-fix)
                 raise
             self._log_fallback(exc)
-            return await self.fallback.ainvoke(input, config=config, **kwargs)
+            try:
+                result = await self.fallback.ainvoke(input, config=config, **kwargs)
+            except Exception:
+                record_llm_result(False)  # both paths failed → genuinely no answer
+                raise
+            record_llm_result(True, via_fallback=True)  # fallback answered → green + subtle hint
+            return result
 
     def _log_fallback(self, exc: BaseException) -> None:
         """Structured log event for every fall-over. Production monitoring
