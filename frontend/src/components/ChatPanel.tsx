@@ -6,6 +6,7 @@ import type { ContextMeter, StreamItem } from "@/lib/types";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { ContextMeterBar } from "./ContextMeterBar";
+import { MarkdownMessage } from "./MarkdownMessage";
 import { UploadChip } from "./UploadChip";
 
 interface ChatPanelProps {
@@ -111,13 +112,21 @@ export function ChatPanel({
               className={it.role === "user" ? "flex justify-end" : "flex justify-start"}
             >
               <div
-                className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-4 py-2 text-sm ${
+                className={`max-w-[85%] rounded-xl px-4 py-2 text-sm ${
                   it.role === "user"
-                    ? "border border-cyan/30 bg-cyan/10 text-ink"
+                    ? "whitespace-pre-wrap border border-cyan/30 bg-cyan/10 text-ink"
                     : "border border-white/5 bg-black/30 text-ink"
                 }`}
               >
-                {it.content || (
+                {it.content ? (
+                  // User text is shown verbatim (they didn't write markdown);
+                  // assistant markdown renders as HUD-themed formatting.
+                  it.role === "user" ? (
+                    it.content
+                  ) : (
+                    <MarkdownMessage content={it.content} />
+                  )
+                ) : (
                   <span className="inline-flex gap-1 py-1" aria-label="Jarvis is thinking">
                     {[0, 1, 2].map((i) => (
                       <span

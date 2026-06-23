@@ -51,6 +51,7 @@ from app.utils import runtime_stats
 from app.utils.exceptions import CostCapExceededError
 from app.utils.logging import get_logger
 from app.voice.chunker import SentenceChunker
+from app.voice.markdown_strip import strip_markdown_for_speech
 from app.voice.tts import audio_mime, synthesize
 
 logger = get_logger(__name__)
@@ -601,7 +602,11 @@ def _approval_speech(
 
 async def _speak_text(text: str) -> dict[str, Any] | None:
     """Synthesize one spoken line → an audio event (None if TTS yields nothing).
-    Module-level twin of voice_turn's inner _speak, for the voice resolver path."""
+    Module-level twin of voice_turn's inner _speak, for the voice resolver path.
+    Strips markdown so the audio + caption (same string) speak as clean words."""
+    text = strip_markdown_for_speech(text)
+    if not text:
+        return None
     audio = await synthesize(text)
     return _audio_event(text, audio) if audio else None
 
@@ -721,6 +726,11 @@ async def voice_turn(
     error_exc: BaseException | None = None
 
     async def _speak(sentence: str, *, filler: bool = False):
+        # Strip markdown on the SAME string that feeds both TTS + the caption, so
+        # the spoken audio and the on-screen caption stay clean AND in lockstep.
+        sentence = strip_markdown_for_speech(sentence)
+        if not sentence:
+            return None
         audio = await synthesize(sentence)
         if audio:
             return _audio_event(sentence, audio, filler=filler)
