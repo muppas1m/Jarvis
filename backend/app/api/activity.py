@@ -10,14 +10,14 @@ Each source is queried fail-graceful: one source erroring drops only its rows,
 never the whole feed.
 """
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from app.db.engine import async_session
-from app.db.models import AuditTrail, EmailLog
+from app.db.models import AuditTrail, EmailLog, SystemAlert
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -75,11 +75,19 @@ def _friendly_memory(data: str) -> str:
     return f"Remembered: {s}"
 
 
+def _friendly_alert(text: str) -> str:
+    """A '🚨 SYSTEM' alert, lightly cleaned — these are WARNINGS the master should
+    grasp at a glance, so we keep the substance and only strip markdown noise +
+    collapse whitespace (don't over-sanitize a warning into meaninglessness)."""
+    s = re.sub(r"[`*_]+", "", text or "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 class ActivityItem(BaseModel):
     glyph: str
     text: str
     when: str  # ISO-8601
-    kind: str  # action | email | memory
+    kind: str  # action | email | memory | alert
 
 
 class ActivitySummaryRow(BaseModel):
@@ -104,9 +112,9 @@ def _parse(ts: str | None) -> datetime | None:
 
 @router.get("/activity", response_model=ActivityResponse)
 async def activity() -> ActivityResponse:
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    since = datetime.now(UTC) - timedelta(hours=24)
     collected: list[tuple[datetime, ActivityItem]] = []
-    counts = {"action": 0, "email": 0, "memory": 0}
+    counts = {"action": 0, "email": 0, "memory": 0, "alert": 0}
 
     async with async_session() as session:
         # 1) tool actions — the richest source (audit_trail), successes only.
@@ -171,10 +179,31 @@ async def activity() -> ActivityResponse:
         except Exception as exc:  # noqa: BLE001
             logger.warning("activity_memory_failed", error=str(exc))
 
+        # 4) system alerts (warnings) — the only source that's a WARNING, not a
+        #    calm "did X". Rendered to stand out (kind="alert" → amber treatment).
+        try:
+            rows = (
+                await session.execute(
+                    select(SystemAlert)
+                    .where(SystemAlert.created_at > since)
+                    .order_by(SystemAlert.created_at.desc())
+                    .limit(100)
+                )
+            ).scalars().all()
+            for r in rows:
+                counts["alert"] += 1
+                collected.append(
+                    (r.created_at, ActivityItem(glyph="⚠", text=_friendly_alert(r.text), when=r.created_at.isoformat(), kind="alert"))
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("activity_alerts_failed", error=str(exc))
+
     collected.sort(key=lambda pair: pair[0], reverse=True)
     feed = [item for _, item in collected[:_FEED_LIMIT]]
 
     summary: list[ActivitySummaryRow] = []
+    if counts["alert"]:
+        summary.append(ActivitySummaryRow(glyph="⚠", label="System alerts", count=counts["alert"]))
     if counts["email"]:
         summary.append(ActivitySummaryRow(glyph="✉", label="Emails triaged", count=counts["email"]))
     if counts["memory"]:

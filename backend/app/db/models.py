@@ -14,14 +14,13 @@ Naming gotcha:
   JSON metadata column on these models is named `meta` instead.
 """
 import uuid
-from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
     Float,
-    ForeignKey,
     Index,
     Integer,
     String,
@@ -30,7 +29,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase
-from pgvector.sqlalchemy import Vector
 
 from app.config import settings
 
@@ -285,6 +283,23 @@ class RateLimitEvent(Base):
     actual_value = Column(Integer, nullable=False)
     blocked = Column(Boolean, default=True, nullable=False)
     occurred_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+class SystemAlert(Base):
+    """A '🚨 SYSTEM' alert — Gmail token expired, a scheduled job failing 3×, etc.
+    Persisted ONLY so the HUD Activity feed can surface recent alerts; the
+    authoritative delivery is still the best-effort Telegram ping in
+    failure_alerter.send_system_alert (the two are written independently). Ages off
+    the 24h feed naturally — durable unresolved-issue tracking is a later
+    readiness-layer concern, not this row. Deliberately NOT audit_trail (that's
+    tool-execution-shaped and would fight the feed's _TOOL_MAP)."""
+    __tablename__ = "system_alerts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    text = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
 
 
 # --- Composite indexes for the hottest read paths ---

@@ -16,6 +16,8 @@ configurable per master preference, swap the constant for a Settings field.
 All three are best-effort — a delivery failure logs but never raises into
 the caller, so a Telegram outage can't take down the agent path.
 """
+from app.db.engine import async_session
+from app.db.models import SystemAlert
 from app.messaging.channel_registry import channel_registry
 from app.utils.logging import get_logger
 
@@ -59,9 +61,28 @@ async def send_approval_request_to_master(
         )
 
 
+async def _persist_alert(text: str) -> None:
+    """Best-effort persist of a system alert so the HUD Activity feed can surface
+    it. Fully wrapped + INDEPENDENT of the Telegram send: a DB failure here can't
+    break the alerter — it's literally reporting that something already went
+    wrong, so it must never raise into the caller."""
+    try:
+        async with async_session() as session:
+            session.add(SystemAlert(text=text))
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — alerting path; never raise
+        logger.error("system_alert_persist_failed", error=str(exc))
+
+
 async def send_system_alert(text: str) -> None:
     """Generic system alert. Used by `@critical_task` Celery wrapper and any
-    other path that needs to surface a non-conversational ping."""
+    other path that needs to surface a non-conversational ping.
+
+    Persisted (for the HUD Activity feed) AND pushed to Telegram, INDEPENDENTLY +
+    best-effort: each is wrapped so neither a DB nor a Telegram outage can sink the
+    other or raise into the caller. Persist first so the feed records it even if
+    delivery is down."""
+    await _persist_alert(text)  # wrapped internally; never raises
     try:
         ch = channel_registry.get(PRIMARY_ALERT_CHANNEL)
         await ch.send_alert(f"🚨 *SYSTEM*\n\n{text}")

@@ -55,17 +55,32 @@ export function EventLogWidget({
                 Nothing to report just yet, Sir.
               </p>
             ) : (
-              data.feed.map((it, i) => (
-                <div key={i} className="flex items-start gap-2 text-[12px]">
-                  <span className="mt-px shrink-0 opacity-70">{it.glyph}</span>
-                  <span className="min-w-0 flex-1 truncate text-ink" title={it.text}>
-                    {it.text}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-ink-dim">
-                    {relTime(it.when)}
-                  </span>
-                </div>
-              ))
+              data.feed.map((it, i) => {
+                // System alerts are WARNINGS — render them to stand out from the
+                // calm "Remembered…/Sent…" items (amber, subtle tint).
+                const alert = it.kind === "alert";
+                return (
+                  <div
+                    key={i}
+                    className={`flex items-start gap-2 text-[12px] ${
+                      alert ? "-mx-1 rounded bg-amber/5 px-1 py-0.5" : ""
+                    }`}
+                  >
+                    <span className={`mt-px shrink-0 ${alert ? "text-amber" : "opacity-70"}`}>
+                      {it.glyph}
+                    </span>
+                    <span
+                      className={`min-w-0 flex-1 truncate ${alert ? "text-amber" : "text-ink"}`}
+                      title={it.text}
+                    >
+                      {it.text}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-ink-dim">
+                      {relTime(it.when)}
+                    </span>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>

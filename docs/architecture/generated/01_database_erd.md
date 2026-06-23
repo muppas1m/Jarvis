@@ -4,7 +4,7 @@
 
 # Database ERD
 
-11 tables, introspected from `app/db/models.py` (`Base.metadata`). **No DB-level foreign keys** — this is intentional: tables are associated at the application layer by `thread_id` (a string), and LangGraph's checkpoint tables own the canonical per-thread conversation state. So the entities below stand alone in the schema.
+12 tables, introspected from `app/db/models.py` (`Base.metadata`). **No DB-level foreign keys** — this is intentional: tables are associated at the application layer by `thread_id` (a string), and LangGraph's checkpoint tables own the canonical per-thread conversation state. So the entities below stand alone in the schema.
 
 ```mermaid
 erDiagram
@@ -106,6 +106,11 @@ erDiagram
         Integer actual_value
         Boolean blocked
         DateTime occurred_at
+    }
+    system_alerts {
+        UUID id PK
+        Text text
+        DateTime created_at
     }
     tool_embeddings {
         UUID id PK
