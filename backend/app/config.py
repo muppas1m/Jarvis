@@ -295,9 +295,10 @@ class Settings(BaseSettings):
     # core and starve the event loop (or contend with the reranker's torch threads).
     WHISPER_CPU_THREADS: int = 4
     # Bound transcription so a slow/stuck model DEGRADES the turn ("I didn't catch
-    # that, Sir") instead of hanging it — same lesson as RERANK_TIMEOUT_S. Raised to
-    # cover the longer CAPTURE_MAX_MS (30s) at beam_size 5 (both raise transcribe time).
-    WHISPER_TIMEOUT_S: int = 30
+    # that, Sir") instead of hanging it — same lesson as RERANK_TIMEOUT_S. Covers the
+    # 45s CAPTURE_MAX_MS at beam5: measured worst-case transcribe ≈0.45× real-time
+    # (temperature-fallback) → ~20s for 45s, so 40s is ~2× margin; typical ≈1-3s.
+    WHISPER_TIMEOUT_S: int = 40
 
     # --- STT quality (Phase 4.5; all additive + reversible-by-env) -----------
     # Bias the decoder toward the master's name (accented "Jarvis" → "Jovis"/"Gavis"
@@ -330,8 +331,13 @@ class Settings(BaseSettings):
     # silence; a hard cap bounds a runaway utterance; the pre-roll buffer keeps the
     # onset (the first word of a barge-in command) from being clipped.
     CAPTURE_VAD_THRESHOLD: float = 0.3      # frame VAD score above this = speech
-    CAPTURE_SILENCE_HANGOVER_MS: int = 700  # trailing silence that finalizes a transcript
-    CAPTURE_MAX_MS: int = 30000             # hard cap on one utterance (~30s; let long speech finish)
+    # Trailing silence that finalizes a capture. 1600ms (=20 frames @ 80ms) lets a
+    # natural MID-SENTENCE pause up to ~1.5s ride without ending the turn (a 1.5s
+    # pause is ~18-19 silence frames < 20). TRADEOFF: this same delay is added to
+    # the end of EVERY turn before Jarvis responds, so it's the smallest that
+    # reliably covers the master's ≤1.5s cadence — dial by feel via env.
+    CAPTURE_SILENCE_HANGOVER_MS: int = 1600
+    CAPTURE_MAX_MS: int = 45000             # hard cap on one utterance (~45s; long monologue, pauses ride)
     CAPTURE_PREROLL_MS: int = 400           # rolling onset buffer prepended to the capture
     # No-speech timeout: if NO speech onset arrives within this of a capture
     # starting, emit an empty transcript so the client idles back to wake-word.

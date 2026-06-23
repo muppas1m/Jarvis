@@ -34,10 +34,10 @@ export const BARGE_IN_IGNORE_MS = num(process.env.NEXT_PUBLIC_BARGE_IN_IGNORE_MS
 // --- Capture windows (SAFETY BACKSTOPS only — the backend owns endpointing) --
 // The backend (Silero VAD) now decides when a capture ends: no speech onset
 // within CAPTURE_NO_SPEECH_MS (~7s) → it emits an empty transcript and we idle;
-// once speech starts, its hangover + CAPTURE_MAX_MS (30s, Phase 4.5) finalize even
+// once speech starts, its hangover + CAPTURE_MAX_MS (45s, Phase 4.5) finalize even
 // a long command. These wall-clocks are a last-resort backstop only — they must
-// stay ABOVE the worst legit case (CAPTURE_MAX_MS 30s + WHISPER_TIMEOUT_S 30s
-// transcribe = ~60s) so a long utterance's transcript is never cut off; they fire
+// stay ABOVE the worst legit case (CAPTURE_MAX_MS 45s + WHISPER_TIMEOUT_S 40s
+// transcribe = ~85s) so a long utterance's transcript is never cut off; they fire
 // only if the backend goes truly silent.
-export const CONTINUITY_WINDOW_MS = num(process.env.NEXT_PUBLIC_CONTINUITY_WINDOW_MS, 65000);
-export const LISTEN_WINDOW_MS = num(process.env.NEXT_PUBLIC_LISTEN_WINDOW_MS, 65000);
+export const CONTINUITY_WINDOW_MS = num(process.env.NEXT_PUBLIC_CONTINUITY_WINDOW_MS, 90000);
+export const LISTEN_WINDOW_MS = num(process.env.NEXT_PUBLIC_LISTEN_WINDOW_MS, 90000);
