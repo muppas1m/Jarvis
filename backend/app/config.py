@@ -290,20 +290,48 @@ class Settings(BaseSettings):
     WHISPER_MODEL: str = "base.en"          # base.en/small.en; base.en = lower CPU latency
     WHISPER_DEVICE: str = "cpu"
     WHISPER_COMPUTE_TYPE: str = "int8"      # int8 = fastest on CPU; float32 = most accurate
-    WHISPER_BEAM_SIZE: int = 1              # greedy — lowest latency; raise for accuracy
+    WHISPER_BEAM_SIZE: int = 5              # small beam — better accented proper-noun decode than greedy(1)
     # Bound CTranslate2's intra-op threads so one transcription can't grab every
     # core and starve the event loop (or contend with the reranker's torch threads).
     WHISPER_CPU_THREADS: int = 4
     # Bound transcription so a slow/stuck model DEGRADES the turn ("I didn't catch
-    # that, Sir") instead of hanging it — same lesson as RERANK_TIMEOUT_S.
-    WHISPER_TIMEOUT_S: int = 15
+    # that, Sir") instead of hanging it — same lesson as RERANK_TIMEOUT_S. Raised to
+    # cover the longer CAPTURE_MAX_MS (30s) at beam_size 5 (both raise transcribe time).
+    WHISPER_TIMEOUT_S: int = 30
+
+    # --- STT quality (Phase 4.5; all additive + reversible-by-env) -----------
+    # Bias the decoder toward the master's name (accented "Jarvis" → "Jovis"/"Gavis"
+    # otherwise). faster-whisper 1.2.1 supports `hotwords`. Empty string = no bias.
+    WHISPER_HOTWORDS: str = "Jarvis"
+    # Break the "okay okay all right all right" repetition loop the small model falls
+    # into on noise — the standard command-STT fix. True restores the old looping.
+    WHISPER_CONDITION_ON_PREVIOUS_TEXT: bool = False
+    # whisper's OWN native non-speech / hallucination gates (its defaults, exposed
+    # so they're tunable). A segment over no_speech_threshold with logprob under
+    # log_prob_threshold is treated as silence; compression_ratio over its threshold
+    # flags repetitive hallucination.
+    WHISPER_NO_SPEECH_THRESHOLD: float = 0.6
+    WHISPER_LOG_PROB_THRESHOLD: float = -1.0
+    WHISPER_COMPRESSION_RATIO_THRESHOLD: float = 2.4
+    # Post-transcribe non-speech rejection (return "" → no phantom turn). CONSERVATIVE
+    # by design — dropping real quiet/short speech is worse than the rare junk turn,
+    # so reject only CLEAR non-speech. Set WHISPER_REJECT_NONSPEECH=false to disable
+    # the whole post-filter by env. Thresholds tuned from measured noise-vs-speech gap.
+    WHISPER_REJECT_NONSPEECH: bool = True
+    WHISPER_REJECT_AVG_LOGPROB: float = -1.2   # mean avg_logprob at/under this → reject (very low confidence)
+    WHISPER_REJECT_NO_SPEECH_PROB: float = 0.9  # mean no_speech_prob at/over this → reject (near-certain silence)
+    WHISPER_REJECT_MIN_WORDS: int = 6           # repetition guard only kicks in past this many words
+    WHISPER_REJECT_UNIQUE_RATIO: float = 0.4    # unique/total words at/under this (and ≥ min words) …
+    WHISPER_REJECT_REPEAT_LOGPROB: float = -0.8  # … AND mean logprob at/under this → reject. The
+    #     confidence gate keeps a CONFIDENT but repetitive real command (logprob well above this)
+    #     from being dropped — only the low-confidence repetition of a hallucination is rejected.
     # Capture endpointing (Silero VAD owns the listening window — no more Web
     # Speech premature no-speech idle-drop). Speech ends after this much trailing
     # silence; a hard cap bounds a runaway utterance; the pre-roll buffer keeps the
     # onset (the first word of a barge-in command) from being clipped.
     CAPTURE_VAD_THRESHOLD: float = 0.3      # frame VAD score above this = speech
     CAPTURE_SILENCE_HANGOVER_MS: int = 700  # trailing silence that finalizes a transcript
-    CAPTURE_MAX_MS: int = 15000             # hard cap on one utterance (prolonged speech)
+    CAPTURE_MAX_MS: int = 30000             # hard cap on one utterance (~30s; let long speech finish)
     CAPTURE_PREROLL_MS: int = 400           # rolling onset buffer prepended to the capture
     # No-speech timeout: if NO speech onset arrives within this of a capture
     # starting, emit an empty transcript so the client idles back to wake-word.

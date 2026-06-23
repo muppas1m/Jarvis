@@ -16,6 +16,7 @@ in the background, and the transcribe call is bounded by the caller
 """
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 
@@ -63,12 +64,50 @@ def is_loaded() -> bool:
     return _model is not None
 
 
+def _is_nonspeech(segments: list, text: str) -> bool:
+    """Conservative non-speech rejection from whisper's OWN confidence (Phase 4.5).
+
+    The small model hallucinates filler on room noise ("okay okay all right…").
+    This rejects only CLEAR non-speech — over-rejection (dropping real quiet/short
+    speech → Jarvis goes deaf) is worse than the rare junk turn, so every gate is
+    deliberately loose and thresholds are settings. Reject when ANY fires:
+      - mean no_speech_prob ≥ threshold (whisper near-certain it's silence), or
+      - mean avg_logprob ≤ threshold (decode confidence collapsed → hallucination), or
+      - a repetition loop: enough words AND a very low unique-word ratio.
+    """
+    if not segments:
+        return True
+    n = len(segments)
+    mean_no_speech = sum(s.no_speech_prob for s in segments) / n
+    mean_logprob = sum(s.avg_logprob for s in segments) / n
+    if mean_no_speech >= settings.WHISPER_REJECT_NO_SPEECH_PROB:
+        return True
+    if mean_logprob <= settings.WHISPER_REJECT_AVG_LOGPROB:
+        return True
+    # Repetition loop ("okay okay all right…") — BUT only when confidence is also
+    # weak. A confident real utterance that legitimately repeats phrasing (mean
+    # logprob well above the gate) is kept; only repetitive AND low-confidence
+    # output (the hallucination signature) is dropped. This is what stops the
+    # guard from eating a long, slightly-repetitive real command.
+    words = re.findall(r"[a-z']+", text.lower())
+    return (
+        len(words) >= settings.WHISPER_REJECT_MIN_WORDS
+        and len(set(words)) / len(words) <= settings.WHISPER_REJECT_UNIQUE_RATIO
+        and mean_logprob <= settings.WHISPER_REJECT_REPEAT_LOGPROB
+    )
+
+
 def transcribe_pcm(pcm_int16: np.ndarray) -> str:
     """Transcribe a finalized utterance (16 kHz mono int16 PCM) → text.
 
     Sync + CPU-bound (CTranslate2) → the caller runs it via ``asyncio.to_thread``
     and bounds it with ``asyncio.wait_for``. Too-short audio → "" (no model call).
-    Greedy by default (beam_size=1) for the lowest CPU latency.
+
+    Uses whisper's own confidence gates + a conservative post-filter to drop
+    non-speech (room noise → phantom turn), `condition_on_previous_text=False` to
+    break the repetition loop, and `hotwords` to bias the master's name — all
+    settings-gated + reversible by env. Returns "" for rejected/empty captures
+    (the caller already treats "" as no-speech → no phantom turn).
     """
     if pcm_int16 is None or pcm_int16.size < _MIN_SAMPLES:
         return ""
@@ -78,8 +117,26 @@ def transcribe_pcm(pcm_int16: np.ndarray) -> str:
         beam_size=settings.WHISPER_BEAM_SIZE,
         language="en",
         vad_filter=False,  # we own endpointing (Silero VAD upstream)
+        condition_on_previous_text=settings.WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+        no_speech_threshold=settings.WHISPER_NO_SPEECH_THRESHOLD,
+        log_prob_threshold=settings.WHISPER_LOG_PROB_THRESHOLD,
+        compression_ratio_threshold=settings.WHISPER_COMPRESSION_RATIO_THRESHOLD,
+        hotwords=settings.WHISPER_HOTWORDS or None,
     )
-    return "".join(seg.text for seg in segments).strip()
+    segs = list(segments)  # materialize the generator (we read confidence twice)
+    text = "".join(s.text for s in segs).strip()
+    if not text:
+        return ""
+    if settings.WHISPER_REJECT_NONSPEECH and _is_nonspeech(segs, text):
+        logger.info(
+            "whisper_rejected_nonspeech",
+            n_seg=len(segs),
+            mean_no_speech=round(sum(s.no_speech_prob for s in segs) / len(segs), 3),
+            mean_logprob=round(sum(s.avg_logprob for s in segs) / len(segs), 3),
+            preview=text[:60],
+        )
+        return ""
+    return text
 
 
 class CaptureEndpointer:
