@@ -331,12 +331,13 @@ class Settings(BaseSettings):
     # silence; a hard cap bounds a runaway utterance; the pre-roll buffer keeps the
     # onset (the first word of a barge-in command) from being clipped.
     CAPTURE_VAD_THRESHOLD: float = 0.3      # frame VAD score above this = speech
-    # Trailing silence that finalizes a capture. 1600ms (=20 frames @ 80ms) lets a
-    # natural MID-SENTENCE pause up to ~1.5s ride without ending the turn (a 1.5s
-    # pause is ~18-19 silence frames < 20). TRADEOFF: this same delay is added to
-    # the end of EVERY turn before Jarvis responds, so it's the smallest that
-    # reliably covers the master's ≤1.5s cadence — dial by feel via env.
-    CAPTURE_SILENCE_HANGOVER_MS: int = 1600
+    # Trailing silence that finalizes a capture. The master's tuned-by-feel value:
+    # 1600ms felt laggy on every turn, so 1200ms (=15 frames @ 80ms) — covers a
+    # natural MID-SENTENCE pause up to ~1.2s. TRADEOFF (accepted by the master): a
+    # rare full ~1.5s pause may still finalize, traded for a snappier end-of-turn
+    # since this same delay is added to the end of EVERY turn before Jarvis
+    # responds. Dial by feel via env.
+    CAPTURE_SILENCE_HANGOVER_MS: int = 1200
     CAPTURE_MAX_MS: int = 45000             # hard cap on one utterance (~45s; long monologue, pauses ride)
     CAPTURE_PREROLL_MS: int = 400           # rolling onset buffer prepended to the capture
     # No-speech timeout: if NO speech onset arrives within this of a capture
