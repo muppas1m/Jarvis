@@ -13,10 +13,21 @@ import Markdown from "markdown-to-jsx";
  * final render is always correct.
  *
  * markdown-to-jsx over react-markdown: a single, light dependency (no remark/
- * micromark tree), themeable per-element via `overrides`, safe by default (no
- * raw-HTML injection), React-version-agnostic (pure JSX — no React-19 risk).
+ * micromark tree), themeable per-element via `overrides`, React-version-agnostic
+ * (pure JSX — no React-19 risk).
+ *
+ * SECURITY: assistant content is LLM text that echoes untrusted material (emails,
+ * uploaded docs), so this is an attacker-influenceable surface. markdown-to-jsx
+ * PARSES raw HTML by default — an injected <iframe>/<form>/styled element would
+ * render (React blocks <script> execution, but framed phishing / clickjacking is
+ * a real surface with no upside; assistant answers are markdown, never raw HTML).
+ * `disableParsingRawHTML: true` makes any raw HTML in the content render as
+ * literal text instead. URL schemes (e.g. javascript:) are blocked by the lib's
+ * built-in `sanitizer`, which we leave on (default).
  */
 const OPTIONS = {
+  // Raw HTML in assistant content → literal text, not live elements (see SECURITY).
+  disableParsingRawHTML: true,
   // Force block rendering so a one-line answer still gets a <p> (consistent
   // spacing), and multi-paragraph answers lay out properly.
   forceBlock: true,
