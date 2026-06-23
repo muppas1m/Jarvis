@@ -31,12 +31,59 @@ def looks_like_function_leak(content: str | None) -> bool:
     return bool(content) and bool(_LEAK_TAG.search(content))
 
 
-def strip_function_leak(text: str | None) -> str:
+def strip_function_leak(text: str | None, *, trim: bool = True) -> str:
     """Remove `<function…>…</function>` leak shapes from `text`, leaving the rest
     intact. Fast no-op unless the literal `<function` tag is present (so ordinary
-    prose containing the word "function" is never modified)."""
+    prose containing the word "function" is never modified). `trim=False` keeps
+    leading/trailing whitespace — used by the streaming filter, which needs the
+    cleaned text to grow monotonically (trimming would make it shrink)."""
     if not text or "<function" not in text.lower():
         return text or ""
     s = _LEAK_CLOSED.sub("", text)
     s = _LEAK_UNCLOSED.sub("", s)  # any unclosed tail the closed pass left behind
-    return s.strip()
+    return s.strip() if trim else s
+
+
+_TAG = "<function"
+
+
+def _held_tag_prefix_len(seen: str) -> int:
+    """Length of the trailing run of `seen` that could still grow into `<function`
+    — held back rather than rendered as a partial tag (so even a tag SPLIT across
+    tokens never flashes). 0 if the tail can't be a tag prefix. O(len(_TAG))."""
+    window = seen[-len(_TAG):].lower()
+    for i in range(len(window)):
+        if _TAG.startswith(window[i:]):
+            return len(window) - i
+    return 0
+
+
+def make_stream_leak_filter():
+    """A stateful, per-stream filter for the LIVE token stream (the secondary
+    visual-flash fix): feed it each streamed token delta, get back only the text
+    safe to render NOW. It drops a `<function…>` leak span as it streams — the
+    primary streams its full leak first, then the re-issued clean answer (no
+    `<function` tag) flows through. Monotonic (never un-renders), holds a forming
+    tag back so not even a partial flashes, and is a near pass-through until a
+    `<function` tag appears, so a normal turn is unaffected (O(1) per token)."""
+    state = {"seen": "", "shown": 0, "dirty": False}
+
+    def feed(text: str) -> str:
+        state["seen"] += text
+        seen = state["seen"]
+        if not state["dirty"]:
+            recent = seen[-(len(text) + len(_TAG)):].lower()
+            if _TAG not in recent:
+                # No full tag yet — render everything except a tag-prefix that may
+                # still be forming at the very end (held until the next token).
+                safe = len(seen) - _held_tag_prefix_len(seen)
+                out = seen[state["shown"]:safe]
+                state["shown"] = safe
+                return out
+            state["dirty"] = True
+        clean = strip_function_leak(seen, trim=False)
+        out = clean[state["shown"]:]
+        state["shown"] = len(clean)
+        return out  # only the newly-revealed CLEAN text (often "" mid-leak)
+
+    return feed

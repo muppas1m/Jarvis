@@ -46,7 +46,7 @@ from app.agent.decision_resolver import resolve_decision
 from app.agent.graph import build_graph
 from app.agent.nodes import count_message_tokens
 from app.config import settings
-from app.llm.leak_sanitize import strip_function_leak
+from app.llm.leak_sanitize import make_stream_leak_filter, strip_function_leak
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
 from app.utils import runtime_stats
@@ -450,6 +450,10 @@ async def stream_turn(
 
     started_ms = time.monotonic()
     flag = stream_tokens.set(True)
+    # Drop a <function…> leak from the LIVE token stream so it never flashes in the
+    # transcript before the re-issued clean answer lands (secondary fix; the final
+    # message is already clean via the ainvoke re-issue + sanitize).
+    leak_filter = make_stream_leak_filter()
     try:
         async for mode, data in graph().astream(
             initial_state, config=config, stream_mode=["messages", "updates"]
@@ -461,7 +465,9 @@ async def stream_turn(
                     continue
                 text = _chunk_text(chunk)
                 if text:
-                    yield {"type": "token", "content": text}
+                    visible = leak_filter(text)
+                    if visible:
+                        yield {"type": "token", "content": visible}
             elif mode == "updates":
                 # Surface tool calls as the agent decides them (THINKING state).
                 for node, upd in (data or {}).items():
@@ -605,8 +611,9 @@ def _approval_speech(
 async def _speak_text(text: str) -> dict[str, Any] | None:
     """Synthesize one spoken line → an audio event (None if TTS yields nothing).
     Module-level twin of voice_turn's inner _speak, for the voice resolver path.
-    Strips markdown so the audio + caption (same string) speak as clean words."""
-    text = strip_markdown_for_speech(text)
+    Strips the <function…> leak + markdown so the audio + caption (same string)
+    speak clean words — a leaked chunk → "" → nothing spoken or captioned."""
+    text = strip_markdown_for_speech(strip_function_leak(text))
     if not text:
         return None
     audio = await synthesize(text)
@@ -728,15 +735,22 @@ async def voice_turn(
     error_exc: BaseException | None = None
 
     async def _speak(sentence: str, *, filler: bool = False):
-        # Strip markdown on the SAME string that feeds both TTS + the caption, so
-        # the spoken audio and the on-screen caption stay clean AND in lockstep.
-        sentence = strip_markdown_for_speech(sentence)
+        # Strip the <function…> tool-call leak (open-weights), THEN markdown, on the
+        # SAME string that feeds both TTS + the caption. A leaked chunk → "" → not
+        # synthesized, no caption — so Jarvis never SPEAKS the function syntax that
+        # streamed before the ainvoke-level re-issue; only the clean answer is
+        # voiced. Audio + caption stay clean AND in lockstep.
+        sentence = strip_markdown_for_speech(strip_function_leak(sentence))
         if not sentence:
             return None
         audio = await synthesize(sentence)
         if audio:
             return _audio_event(sentence, audio, filler=filler)
         return None
+
+    # Drop a <function…> leak from the live token stream (the visual transcript) —
+    # the spoken path is handled by _speak above; this is the secondary visual fix.
+    leak_filter = make_stream_leak_filter()
 
     try:
         while True:
@@ -770,7 +784,9 @@ async def voice_turn(
                             ms=int((time.monotonic() - started_ms) * 1000),
                         )
                     first_token = True
-                    yield {"type": "token", "content": text}
+                    visible = leak_filter(text)
+                    if visible:
+                        yield {"type": "token", "content": visible}
                     for sentence in chunker.push(text):
                         ev = await _speak(sentence)
                         if ev:

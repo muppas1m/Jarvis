@@ -7,9 +7,14 @@ and that NORMAL paths + a plain mention of "function" are untouched.
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableLambda
 
+import app.agent.runner as runner_mod
 from app.agent.nodes import _depoison_for_llm
 from app.llm.fallback_llm import FallbackChatLLM, _is_function_leak
-from app.llm.leak_sanitize import looks_like_function_leak, strip_function_leak
+from app.llm.leak_sanitize import (
+    looks_like_function_leak,
+    make_stream_leak_filter,
+    strip_function_leak,
+)
 
 LEAK = '<function>calendar_read{"days_ahead": 7, "max_results": 20}</function>'
 # the user message the master literally sent — must NEVER be touched
@@ -84,3 +89,53 @@ def test_depoison_strips_assistant_leak_leaves_user_alone():
     assert out[2].content == USER_ASKING                # user's "function" msg untouched
     # original objects not mutated (copies)
     assert history[1].content == LEAK
+
+
+# --- STREAMED paths: never SPEAK the leak (layer 1) -------------------------
+async def test_speak_text_never_voices_the_leak(monkeypatch):
+    seen = {}
+
+    async def fake_synth(t):
+        seen["tts"] = t
+        return b"AUDIO"
+
+    monkeypatch.setattr(runner_mod, "synthesize", fake_synth)
+
+    # a pure leak chunk → nothing synthesized, no audio event (no caption)
+    seen.clear()
+    assert await runner_mod._speak_text(LEAK) is None
+    assert "tts" not in seen  # synthesize was NOT called
+
+    # a clean chunk → spoken, caption clean
+    ev = await runner_mod._speak_text("You have 3 meetings tomorrow.")
+    assert ev is not None and "<function" not in ev["content"]["text"]
+
+    # leak + clean text → only the clean part voiced; caption == TTS source (lockstep)
+    seen.clear()
+    ev = await runner_mod._speak_text(f"{LEAK} You have 3 meetings.")
+    assert ev is not None
+    assert "<function" not in ev["content"]["text"]
+    assert ev["content"]["text"] == seen["tts"]
+
+
+# --- STREAMED paths: suppress the live visual flash (layer 2) ----------------
+def test_stream_filter_suppresses_leak_then_streams_clean():
+    f = make_stream_leak_filter()
+    leak_out = "".join(f(t) for t in ["<function>cal", "endar_read{", '"x":7}', "</function>"])
+    assert leak_out == ""  # the leak never renders
+    clean_out = "".join(f(t) for t in ["You have ", "3 meetings", " tomorrow."])
+    assert clean_out == "You have 3 meetings tomorrow."  # re-issued answer flows through
+
+
+def test_stream_filter_passthrough_no_regression():
+    f = make_stream_leak_filter()
+    toks = ["You ", "have ", "3 ", "meetings ", "tomorrow."]
+    assert "".join(f(t) for t in toks) == "You have 3 meetings tomorrow."  # unchanged
+
+
+def test_stream_filter_split_tag_no_partial_flash():
+    f = make_stream_leak_filter()
+    parts = ["Sure! ", "<func", "tion>calendar_read{}", "</function>", " Done."]
+    out = "".join(f(t) for t in parts)
+    assert "<func" not in out  # not even a partial tag flashes
+    assert "Sure!" in out and "Done." in out  # clean text around the leak survives
