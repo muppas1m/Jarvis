@@ -28,8 +28,9 @@ import asyncio
 import base64
 import contextlib
 import time
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -45,6 +46,7 @@ from app.agent.decision_resolver import resolve_decision
 from app.agent.graph import build_graph
 from app.agent.nodes import count_message_tokens
 from app.config import settings
+from app.llm.leak_sanitize import strip_function_leak
 from app.llm.observability import langfuse_callback_handler
 from app.llm.stream_mode import stream_tokens, voice_mode
 from app.utils import runtime_stats
@@ -226,7 +228,7 @@ async def run_turn(
         "platform": platform,
         "channel_user_id": channel_user_id,
         "user_message": user_message,
-        "turn_started_at": datetime.now(timezone.utc).isoformat(),
+        "turn_started_at": datetime.now(UTC).isoformat(),
     }
 
     started_ms = time.monotonic()
@@ -443,7 +445,7 @@ async def stream_turn(
         "platform": platform,
         "channel_user_id": channel_user_id,
         "user_message": user_message,
-        "turn_started_at": datetime.now(timezone.utc).isoformat(),
+        "turn_started_at": datetime.now(UTC).isoformat(),
     }
 
     started_ms = time.monotonic()
@@ -697,7 +699,7 @@ async def voice_turn(
         "platform": platform,
         "channel_user_id": channel_user_id,
         "user_message": user_message,
-        "turn_started_at": datetime.now(timezone.utc).isoformat(),
+        "turn_started_at": datetime.now(UTC).isoformat(),
     }
 
     chunker = SentenceChunker()
@@ -741,7 +743,7 @@ async def voice_turn(
             try:
                 timeout = filler_budget if (not first_token and not filler_sent) else None
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # No first token within the budget — mask the wait with a filler.
                 filler_sent = True
                 ev = await _speak(_filler_line(0), filler=True)
@@ -1066,8 +1068,12 @@ def _extract_last_assistant_text(state_dict: dict) -> str:
     (e.g. the graph's last step was a tool call rather than a text reply)."""
     msgs = state_dict.get("messages") or []
     for m in reversed(msgs):
-        if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-            return m.content
+        if isinstance(m, AIMessage) and isinstance(m.content, str):
+            # Strip any <function…> leak so an already-poisoned message never
+            # surfaces as the answer; skip if nothing real is left.
+            clean = strip_function_leak(m.content)
+            if clean.strip():
+                return clean
     return ""
 
 
@@ -1081,9 +1087,11 @@ def _serialize_message(m: BaseMessage) -> dict[str, Any]:
     tool_call_id for transparency; drops bulky internals (response_metadata,
     usage_metadata — usage is aggregated separately)."""
     if isinstance(m, AIMessage):
+        # Strip any <function…> leak on the way to the screen — covers OLD poison
+        # already stored in a thread (reload) as well as anything live.
         out: dict[str, Any] = {
             "role": "ai",
-            "content": m.content if isinstance(m.content, str) else str(m.content),
+            "content": strip_function_leak(m.content) if isinstance(m.content, str) else str(m.content),
         }
         if m.tool_calls:
             out["tool_calls"] = [
@@ -1145,17 +1153,15 @@ def _aggregate_usage(new_messages: list[BaseMessage], duration_ms: int) -> dict[
                 or ""
             )
             if model_name:
-                try:
+                # Pricing not in litellm's table for this model — skip; the /costs
+                # endpoint reconciles from LLMUsageLog rows once the persistence
+                # callback has flushed.
+                with contextlib.suppress(Exception):
                     cost_usd += float(completion_cost(
                         model=model_name,
                         prompt_tokens=in_t,
                         completion_tokens=out_t,
                     ) or 0.0)
-                except Exception:  # noqa: BLE001
-                    # Pricing not in litellm's table for this model — skip,
-                    # the /costs endpoint reconciles from LLMUsageLog rows
-                    # once the persistence callback has flushed.
-                    pass
 
     return {
         "input_tokens": input_tokens,

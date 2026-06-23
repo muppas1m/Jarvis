@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (99 modules)
+## `app/` — the system (100 modules)
 
 ```
 app/
@@ -74,6 +74,7 @@ app/
 │   ├── eval_mode.py — Eval-mode flag — isolates eval runs from the PRODUCTION cost-cap and Mem0.
 │   ├── fallback_llm.py — FallbackChatLLM — agent_node resilience wrapper for primary → fallback dispatch.
 │   ├── gateway.py — LLM gateway — every model call in the codebase goes through here.
+│   ├── leak_sanitize.py — Detect + strip the Llama-native tool-call format leaking as assistant TEXT.
 │   ├── models.py — Model registry — single source of truth for which LLMs we route to.
 │   ├── observability.py — Langfuse hooks.
 │   └── stream_mode.py — Token-stream flag — turns on internal LLM streaming for the agent's chat

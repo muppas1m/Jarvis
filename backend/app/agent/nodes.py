@@ -34,7 +34,7 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from langchain_core.messages import (
     AIMessage,
@@ -57,6 +57,7 @@ from app.agent.state import AgentState
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import AuditTrail, PendingApproval, ToolResult
+from app.llm.leak_sanitize import strip_function_leak
 from app.memory.manager import get_memory
 from app.utils.exceptions import (
     ApprovalExpiredError,
@@ -140,6 +141,21 @@ def _build_chat_model(tools: list, primary_model: str | None = None):
     return FallbackChatLLM(primary=primary, fallback=fallback)
 
 
+def _depoison_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Return the history with any `<function…>` leak stripped from prior ASSISTANT
+    messages — copies only, so state (the stored thread) is never mutated. Human +
+    tool messages pass through untouched, so a user message that merely says the
+    word 'function' is left alone."""
+    out: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m, AIMessage) and isinstance(m.content, str):
+            clean = strip_function_leak(m.content)
+            if clean != m.content:
+                m = m.model_copy(update={"content": clean})
+        out.append(m)
+    return out
+
+
 async def agent_node(state: AgentState) -> dict:
     """Reasoning step. Builds the system prompt, calls the LLM with bound
     tools, appends the LLM's response to messages."""
@@ -194,7 +210,7 @@ async def agent_node(state: AgentState) -> dict:
         on_demand_profile=state.get("user_profile_on_demand", []),
         memories=state.get("relevant_memories", []),
         platform=state["platform"],
-        current_datetime=datetime.now(timezone.utc).isoformat(),
+        current_datetime=datetime.now(UTC).isoformat(),
         voice=is_voice,
     )
 
@@ -209,7 +225,11 @@ async def agent_node(state: AgentState) -> dict:
             "[Earlier conversation summary — older turns were compacted to save "
             "context; specific facts live in long-term memory above]\n" + running_summary
         )))
-    msgs.extend(state["messages"])
+    # De-poison (open-weights leak): strip any `<function…>` tool-call leak the
+    # model emitted as TEXT in a PRIOR assistant turn from the history it now sees,
+    # so it can't anchor on its own past format and re-emit it (in-context
+    # poisoning). Copies only — the stored thread is untouched (no checkpoint clear).
+    msgs.extend(_depoison_for_llm(state["messages"]))
 
     # Defense-in-depth: an orphaned tool_call (an AIMessage tool_call with no
     # answering ToolMessage — e.g. a pending approval interrupt that a free-text
@@ -234,6 +254,16 @@ async def agent_node(state: AgentState) -> dict:
         "node_timing", node="agent_llm", model=primary_model,
         ms=int((time.monotonic() - _t_llm) * 1000),
     )
+
+    # Safety net (open-weights leak): if a `<function…>` leak slipped past the
+    # FallbackChatLLM re-issue (e.g. the fallback model also leaked), strip it
+    # before the response is persisted to the thread OR shown — it must never reach
+    # the stored history. (Normal answers have no `<function` tag → no-op.)
+    if isinstance(response, AIMessage) and isinstance(response.content, str):
+        cleaned = strip_function_leak(response.content)
+        if cleaned != response.content:
+            logger.warning("agent_response_function_leak_stripped")
+            response = response.model_copy(update={"content": cleaned})
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
     update: dict = {"messages": [response]}
@@ -790,7 +820,7 @@ async def _discard_pending_approval(thread_id: str, interrupt_id: str) -> None:
             )
             .values(
                 status="discarded",
-                resolved_at=datetime.now(timezone.utc),
+                resolved_at=datetime.now(UTC),
                 resolved_via="web",
             )
         )
@@ -812,7 +842,7 @@ async def _create_pending_approval(
             description=_describe_action(tool_name, tool_args),
             payload={"tool_name": tool_name, "tool_args": tool_args},
             expires_at=(
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
                 + timedelta(hours=settings.APPROVAL_EXPIRY_HOURS)
             ),
         )

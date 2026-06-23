@@ -32,15 +32,36 @@ worth a re-check if Groq updates their error message shape.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import litellm
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from app.llm.leak_sanitize import looks_like_function_leak
 from app.utils.llm_health import record_llm_result
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _result_text(result: Any) -> str:
+    """Best-effort text of a chat result's content (str, or joined list blocks)."""
+    content = getattr(result, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return str(content or "")
+
+
+def _is_function_leak(result: Any) -> bool:
+    """A primary result that put a tool call in TEXT (`<function…>`) instead of a
+    structured tool_calls array — Groq accepts it, so no exception fires, but the
+    tool never runs. Re-issue on the fallback (gpt-4o-mini does structured calls)."""
+    if getattr(result, "tool_calls", None):
+        return False  # has real tool_calls → not a leak
+    return looks_like_function_leak(_result_text(result))
 
 
 def _default_retry_predicate(exc: BaseException) -> bool:
@@ -73,16 +94,14 @@ def _default_retry_predicate(exc: BaseException) -> bool:
     # for document_search or any other tool. See
     # project_open_weights_tool_schema_and_conversation_poisoning.
     msg = str(exc).lower()
-    if (
+    # Everything NOT matched here — AuthenticationError, model-not-found /
+    # genuinely-bad-input BadRequestError, RecursionError, etc. — propagates (False)
+    # so we still notice it.
+    return (
         "tool_use_failed" in msg
         or "failed to call a function" in msg
         or "midstreamfallbackerror" in msg
-    ):
-        return True
-
-    # Everything else — AuthenticationError, model-not-found / genuinely-bad-input
-    # BadRequestError, RecursionError, etc. — propagates so we still notice it.
-    return False
+    )
 
 
 class FallbackChatLLM(Runnable):
@@ -101,47 +120,71 @@ class FallbackChatLLM(Runnable):
         self,
         primary: Runnable,
         fallback: Runnable,
-        retry_predicate: Optional[Callable[[BaseException], bool]] = None,
+        retry_predicate: Callable[[BaseException], bool] | None = None,
     ) -> None:
         self.primary = primary
         self.fallback = fallback
         self.retry_predicate = retry_predicate or _default_retry_predicate
 
-    def invoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
+    def invoke(self, input: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
         try:
             result = self.primary.invoke(input, config=config, **kwargs)
-            record_llm_result(True, via_fallback=False)  # primary answered
-            return result
         except Exception as exc:  # noqa: BLE001 — predicate decides which propagate
             if not self.retry_predicate(exc):
                 record_llm_result(False)  # not retryable → no answer (4.C.3-fix)
                 raise
             self._log_fallback(exc)
-            try:
-                result = self.fallback.invoke(input, config=config, **kwargs)
-            except Exception:
-                record_llm_result(False)  # both paths failed → genuinely no answer
-                raise
-            record_llm_result(True, via_fallback=True)  # fallback answered → green + subtle hint
-            return result
+            return self._reissue_invoke(input, config, kwargs)
+        # Primary returned WITHOUT raising — but did it leak a tool call as text?
+        if _is_function_leak(result):
+            self._log_leak(result)
+            return self._reissue_invoke(input, config, kwargs)
+        record_llm_result(True, via_fallback=False)  # primary answered cleanly
+        return result
 
-    async def ainvoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
+    async def ainvoke(self, input: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
         try:
             result = await self.primary.ainvoke(input, config=config, **kwargs)
-            record_llm_result(True, via_fallback=False)  # primary answered
-            return result
         except Exception as exc:  # noqa: BLE001
             if not self.retry_predicate(exc):
                 record_llm_result(False)  # not retryable → no answer (4.C.3-fix)
                 raise
             self._log_fallback(exc)
-            try:
-                result = await self.fallback.ainvoke(input, config=config, **kwargs)
-            except Exception:
-                record_llm_result(False)  # both paths failed → genuinely no answer
-                raise
-            record_llm_result(True, via_fallback=True)  # fallback answered → green + subtle hint
-            return result
+            return await self._reissue_ainvoke(input, config, kwargs)
+        if _is_function_leak(result):
+            self._log_leak(result)
+            return await self._reissue_ainvoke(input, config, kwargs)
+        record_llm_result(True, via_fallback=False)  # primary answered cleanly
+        return result
+
+    def _reissue_invoke(self, input: Any, config: RunnableConfig | None, kwargs: dict) -> Any:
+        """Re-issue the same call on the fallback — shared by the exception path and
+        the `<function…>` leak path. Health: a recovered answer is via_fallback
+        (primary degraded); both-paths-fail is a genuine no-answer."""
+        try:
+            result = self.fallback.invoke(input, config=config, **kwargs)
+        except Exception:
+            record_llm_result(False)
+            raise
+        record_llm_result(True, via_fallback=True)
+        return result
+
+    async def _reissue_ainvoke(self, input: Any, config: RunnableConfig | None, kwargs: dict) -> Any:
+        try:
+            result = await self.fallback.ainvoke(input, config=config, **kwargs)
+        except Exception:
+            record_llm_result(False)
+            raise
+        record_llm_result(True, via_fallback=True)
+        return result
+
+    def _log_leak(self, result: Any) -> None:
+        """The primary emitted a `<function…>` tool call as TEXT (no exception,
+        no structured tool_calls). Logged distinctly from the error fall-over."""
+        logger.warning(
+            "agent_llm_function_leak_fallback",
+            preview=_result_text(result)[:200],
+        )
 
     def _log_fallback(self, exc: BaseException) -> None:
         """Structured log event for every fall-over. Production monitoring
