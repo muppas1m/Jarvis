@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (104 modules)
+## `app/` — the system (105 modules)
 
 ```
 app/
@@ -64,7 +64,8 @@ app/
 │   ├── provider/
 │   │   ├── __init__.py — Provider-agnostic email layer. Import the contract + ``get_email_provider``
 │   │   ├── base.py — Provider-agnostic email interface.
-│   │   └── gmail.py — Gmail adapter for the EmailProvider interface.
+│   │   ├── gmail.py — Gmail adapter for the EmailProvider interface.
+│   │   └── outlook.py — Outlook / Microsoft Graph adapter — SKELETON.
 │   ├── __init__.py — Email integration — Gmail watch + Pub/Sub handler + classifier (Phase 2).
 │   ├── approval_handler.py — Channel-origin approval handler for inbound-email approvals (any provider).
 │   ├── classifier.py — Multi-dimensional email triage (Turn 17.8).

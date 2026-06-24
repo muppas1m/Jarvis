@@ -8,19 +8,23 @@ from app.email.provider.base import (
     SendResult,
 )
 from app.email.provider.gmail import GmailProvider
+from app.email.provider.outlook import OutlookProvider
 
 __all__ = [
     "EmailProvider",
+    "GmailProvider",
     "InboundMessage",
+    "OutlookProvider",
     "ReplyRef",
     "SendResult",
     "get_email_provider",
 ]
 
 # Registry of adapters by config name. A new provider is one entry + its module
-# (e.g. "outlook": OutlookProvider) — no caller changes.
+# — no caller changes anywhere in the agent/approval/send/inbound layers.
 _REGISTRY: dict[str, type[EmailProvider]] = {
     "gmail": GmailProvider,
+    "outlook": OutlookProvider,  # skeleton (Graph-mapped) — proves the seam is real
 }
 
 # Adapters are stateless across calls (each builds a fresh underlying client), so

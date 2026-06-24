@@ -50,6 +50,7 @@ erDiagram
     }
     email_logs {
         UUID id PK
+        String provider
         String gmail_message_id
         String subject
         String sender
