@@ -5,7 +5,7 @@ mocking only at the Google-API + Telegram boundaries (item #5), so the test
 exercises the actual plumbing:
   - the 16.5 INSERT-as-gate (EmailLog claims the msg_id before side effects),
   - PendingApproval creation,
-  - the 17.5 approve → _resolve_gmail_approval → gmail_send dispatch,
+  - the 17.5 approve → gmail_approval_handler.dispatch_gmail_approval → gmail_send,
   - the real MIME / In-Reply-To threading built by gmail_send,
   - the EmailLog.auto_sent flip + the gmail_send AuditTrail row.
 

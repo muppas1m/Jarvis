@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (100 modules)
+## `app/` — the system (101 modules)
 
 ```
 app/
@@ -64,6 +64,7 @@ app/
 │   ├── __init__.py — Email integration — Gmail watch + Pub/Sub handler + classifier (Phase 2).
 │   ├── classifier.py — Multi-dimensional email triage (Turn 17.8).
 │   ├── digest.py — Daily email digest — accumulates FYI emails and delivers at 8am.
+│   ├── gmail_approval_handler.py — Channel-origin approval handler for Gmail-originated approvals.
 │   ├── gmail_pubsub.py — Handle incoming Gmail Pub/Sub push notifications.
 │   ├── gmail_watch.py — Gmail watch setup and renewal.
 │   └── responder.py — —
