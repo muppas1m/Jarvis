@@ -32,15 +32,15 @@ celery_app.conf.beat_schedule = {
     # If you find yourself wondering "why not just trust Pub/Sub?" — read
     # project_gmail_approval_duplicate_race.md context + the Turn 17 Q1
     # discussion. Defense-in-depth is the load-bearing rationale.
-    "gmail-check": {
-        "task": "app.scheduler.tasks.gmail_check.check_gmail_inbox",
+    "email-check": {
+        "task": "app.scheduler.tasks.email_check.check_inbox",
         "schedule": crontab(minute="*/15"),
     },
-    # Gmail watch renewal twice weekly at 3am Sun + Sat (7-day Gmail-side
+    # Provider watch renewal twice weekly at 3am Sun + Sat (Gmail's 7-day
     # expiry; renewing on a wall-clock cadence keeps the watch alive with
-    # ~3-4 day slack, predictable for alerting). gmail_renew runs a catch-up
+    # ~3-4 day slack, predictable for alerting). email_renew runs a catch-up
     # sweep after re-registering — closes the short seam where the new
-    # watch's first historyId is published before the old subscription's
+    # watch's first cursor is published before the old subscription's
     # last events are fully drained.
     #
     # Cron note: `day_of_week="0,6"` selects Sun (0) AND Sat (6). The earlier
@@ -49,8 +49,8 @@ celery_app.conf.beat_schedule = {
     # accident. Twice-weekly is fine operationally (more conservative than
     # "every 6 days" against the 7-day expiry); the explicit `"0,6"` form
     # documents the actual cadence.
-    "gmail-watch-renew": {
-        "task": "app.scheduler.tasks.gmail_renew.renew_gmail_watch",
+    "email-watch-renew": {
+        "task": "app.scheduler.tasks.email_renew.renew_watch",
         "schedule": crontab(hour=3, minute=0, day_of_week="0,6"),
     },
     # Hourly approval expiry sweeper — auto-expires approvals past expires_at.
@@ -60,7 +60,7 @@ celery_app.conf.beat_schedule = {
     },
     # Hourly inbound-email health canary — alerts (in plain language) when no
     # Gmail poll has succeeded within INBOUND_HEALTH_MAX_STALE_HOURS. Closes the
-    # silent-outage gap the Jun-11 manual test surfaced (gmail_check failing on
+    # silent-outage gap the Jun-11 manual test surfaced (email_check failing on
     # an expired token for ~2 weeks with no symptom-named alert).
     "inbound-health-check": {
         "task": "app.scheduler.tasks.inbound_health.check_inbound_health",

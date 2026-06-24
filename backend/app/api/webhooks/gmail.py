@@ -43,7 +43,7 @@ from googleapiclient.errors import HttpError as GoogleAPIError
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.config import settings
-from app.email.gmail_pubsub import handle_gmail_push
+from app.email.inbound import handle_push
 from app.security.webhook_verify import verify_gmail_webhook
 from app.utils.logging import get_logger
 
@@ -98,7 +98,10 @@ async def gmail_webhook(request: Request) -> dict:
         return {"ok": True, "ignored": True}
 
     try:
-        await handle_gmail_push(message)
+        # This endpoint IS the Gmail push receiver (Pub/Sub-specific auth +
+        # payload), so it names its provider explicitly; the adapter parses the
+        # cursor. An Outlook push would be a sibling /webhooks/outlook endpoint.
+        await handle_push("gmail", message)
         return {"ok": True}
     except Exception as exc:
         if _is_retry_worthy(exc):

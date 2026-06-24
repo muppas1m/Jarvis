@@ -38,7 +38,7 @@ async def reset_async_state_for_task() -> None:
         logger.debug("engine_dispose_failed_swallowed", error=str(exc))
 
     # redis.asyncio pools bind to the loop that first touched them, same as the
-    # engine. The Celery email path (gmail_check → classifier/responder →
+    # engine. The Celery email path (email_check → classifier/responder →
     # gateway → cost_tracker) touches both pools below, so a second task on a
     # fresh asyncio.run loop would hit "Event loop is closed" without this
     # rebind. aclose disconnects; the next command reconnects on the current

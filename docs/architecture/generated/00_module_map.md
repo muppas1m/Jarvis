@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (105 modules)
+## `app/` — the system (104 modules)
 
 ```
 app/
@@ -69,8 +69,7 @@ app/
 │   ├── approval_handler.py — Channel-origin approval handler for inbound-email approvals (any provider).
 │   ├── classifier.py — Multi-dimensional email triage (Turn 17.8).
 │   ├── digest.py — Daily email digest — accumulates FYI emails and delivers at 8am.
-│   ├── gmail_pubsub.py — Handle incoming Gmail Pub/Sub push notifications.
-│   ├── gmail_watch.py — Gmail watch setup and renewal.
+│   ├── inbound.py — Provider-agnostic inbound email pipeline.
 │   ├── responder.py — —
 │   └── send.py — Provider-neutral email send — the single outbound path.
 ├── llm/
@@ -103,8 +102,8 @@ app/
 │   ├── tasks/
 │   │   ├── __init__.py — Scheduled Celery tasks — autodiscovered by app.scheduler.celery_app.
 │   │   ├── approval_expiry.py — Hourly sweeper — auto-rejects approvals whose expires_at has passed.
-│   │   ├── gmail_check.py — 15-min Gmail safety-net poll.
-│   │   ├── gmail_renew.py — Renew the Gmail Pub/Sub watch twice weekly + sweep the recent inbox.
+│   │   ├── email_check.py — 15-min inbox safety-net poll (provider-agnostic).
+│   │   ├── email_renew.py — Renew the provider's push subscription twice weekly + sweep recent inbox.
 │   │   ├── inbound_health.py — Inbound-email health canary.
 │   │   └── morning_brief.py — 8am daily morning brief — email digest + (future) news section.
 │   ├── __init__.py — Celery scheduler package — Celery app, beat schedule, periodic tasks.

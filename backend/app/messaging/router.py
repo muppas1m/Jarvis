@@ -114,7 +114,7 @@ async def route_approval_decision(
     action directly without going through LangGraph resume.
 
     Channel-originated approvals don't have a real LangGraph thread to resume
-    (they were created by app.email.gmail_pubsub._queue_email_approval, not by
+    (they were created by app.email.inbound._queue_email_approval, not by
     a tool_executor_node interrupt). Trying to resume_turn() against
     `gmail:<msg_id>` fails with a "no checkpoint" error, which used to surface
     as a "Resume failed" noise alert on every Gmail approval (see

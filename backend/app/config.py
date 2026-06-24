@@ -187,7 +187,7 @@ class Settings(BaseSettings):
     GMAIL_WEBHOOK_ENFORCE: bool = False
 
     # --- Inbound-email health canary (P2) ------------------------------------
-    # gmail_check writes a heartbeat on every clean poll; the canary alerts the
+    # email_check writes a heartbeat on every clean poll; the canary alerts the
     # master in plain language when no poll has succeeded within MAX_STALE_HOURS
     # (the Jun-11 outage was silent ~2 weeks). REALERT_HOURS bounds re-pinging
     # during a sustained outage; recovery clears the alert flag immediately.

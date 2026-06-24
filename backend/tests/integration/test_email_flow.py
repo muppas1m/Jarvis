@@ -55,9 +55,10 @@ def _make_gmail_service(email_dict: dict) -> tuple[MagicMock, list]:
 
 @pytest.mark.asyncio
 async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
-    from app.email.gmail_pubsub import _process_single_email
-    from app.messaging.router import route_approval_decision
     from app.api.approvals import resolve_approval
+    from app.email.inbound import _process_message
+    from app.email.provider import GmailProvider
+    from app.messaging.router import route_approval_decision
 
     msg_id = f"vtest-{uuid.uuid4().hex[:12]}"
     rfc822_id = f"<orig-{uuid.uuid4().hex[:8]}@example.com>"
@@ -87,17 +88,21 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
     )
 
     try:
-        with patch("app.email.gmail_pubsub.classify_email", AsyncMock(return_value=triage)), \
-             patch("app.email.gmail_pubsub.generate_draft",
+        with patch("app.email.inbound.classify_email", AsyncMock(return_value=triage)), \
+             patch("app.email.inbound.generate_draft",
                    AsyncMock(return_value={"complexity": "simple", "response": draft_body})), \
-             patch("app.email.gmail_pubsub.send_approval_request_to_master", AsyncMock()) as mock_req, \
-             patch("app.email.gmail_pubsub.send_system_alert", AsyncMock()) as mock_sys_alert, \
+             patch("app.email.inbound.send_approval_request_to_master", AsyncMock()) as mock_req, \
+             patch("app.email.inbound.send_system_alert", AsyncMock()) as mock_sys_alert, \
              patch("app.email.provider.gmail.GmailProvider._service", return_value=service), \
              patch("app.messaging.router.channel_registry.get",
                    return_value=MagicMock(send_alert=AsyncMock())):
 
-            # ---- inbound: classify (mocked) → draft (mocked) → EmailLog gate → queue approval ----
-            await _process_single_email(service, {"id": msg_id})
+            # ---- inbound: provider fetch → classify (mocked) → draft (mocked) →
+            #      EmailLog gate → queue approval. Drives the REAL pipeline through
+            #      the provider interface (fetch_message maps the Gmail payload). ----
+            provider = GmailProvider()
+            msg = await provider.fetch_message(msg_id)
+            await _process_message(provider, msg)
 
             async with async_session() as s:
                 log = (await s.execute(
@@ -110,17 +115,19 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
 
             async with async_session() as s:
                 approval = (await s.execute(
-                    select(PendingApproval).where(PendingApproval.thread_id == f"gmail:{msg_id}")
+                    select(PendingApproval).where(PendingApproval.thread_id == f"email:gmail:{msg_id}")
                 )).scalar_one_or_none()
             assert approval is not None, "PendingApproval not created for the action email"
             assert approval.status == "pending"
+            assert approval.action_type == "email_reply"  # provider-tagged shape
+            assert approval.payload["provider"] == "gmail"
             assert mock_req.await_count == 1, "master should have been asked to approve exactly once"
             assert mock_sys_alert.await_count == 0, "simple-draft path must NOT emit a system alert"
 
-            # ---- master approves → dispatch → real gmail_send → mocked Google send() ----
+            # ---- master approves → dispatch → send_email → provider → mocked send() ----
             tid = await resolve_approval(str(approval.id), "approve", "test")
-            assert tid == f"gmail:{msg_id}"
-            await route_approval_decision(f"gmail:{msg_id}", "telegram", {"approved": True})
+            assert tid == f"email:gmail:{msg_id}"
+            await route_approval_decision(f"email:gmail:{msg_id}", "telegram", {"approved": True})
 
         # ---- assert the mocked Google client got the correct MIME / threading ----
         assert len(sent_payloads) == 1, f"expected exactly one send, got {len(sent_payloads)}"
@@ -147,6 +154,6 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
     finally:
         async with async_session() as s:
             await s.execute(delete(AuditTrail).where(AuditTrail.thread_id == f"email:gmail:{msg_id}"))
-            await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == f"gmail:{msg_id}"))
+            await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == f"email:gmail:{msg_id}"))
             await s.execute(delete(EmailLog).where(EmailLog.gmail_message_id == msg_id))
             await s.commit()

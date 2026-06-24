@@ -1,6 +1,6 @@
 """Email history search — query email_logs + pending_approvals for recall.
 
-Phase 2's triage system (gmail_pubsub.handle_gmail_push + classify_email +
+Phase 2's triage system (inbound.handle_push + classify_email +
 generate_draft) creates a structured record of every email that arrives:
 classification, draft response, approval status, expiry, sent-or-not. That
 data lives in `email_logs` and `pending_approvals` tables but had no agent-

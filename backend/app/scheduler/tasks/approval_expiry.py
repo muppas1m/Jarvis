@@ -5,7 +5,7 @@ Wrapped in @critical_task because a silently-failing sweep leaves interrupted
 turns stuck mid-graph (paused on the original interrupt) AND lets stale
 approvals accumulate without bound. Both are the exact 3-day-silent-regression
 risk that `feedback_verify_before_claiming.md` originated on this surface to
-prevent. Sibling discipline to gmail_check / gmail_renew / morning_brief
+prevent. Sibling discipline to email_check / email_renew / morning_brief
 wrappers — every belt-and-braces scheduled task should be fail-loud."""
 import asyncio
 from datetime import datetime, timezone

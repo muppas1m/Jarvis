@@ -1,12 +1,12 @@
 """Inbound-email health canary.
 
-The Jun-11 outage was silent for ~2 weeks: `gmail_check` failed every cycle on
+The Jun-11 outage was silent for ~2 weeks: `email_check` failed every cycle on
 an expired Google token, but the only signal was a cryptic `@critical_task`
 "task failed" alert that never said "you are missing email." This canary closes
 that gap with a plain, symptom-named alert.
 
 Design — heartbeat-on-successful-poll, not raw email_logs freshness:
-  `gmail_check` calls `mark_inbound_poll_success()` after every poll that
+  `email_check` calls `mark_inbound_poll_success()` after every poll that
   completes without error. This task reads that heartbeat and alerts when it's
   older than ``INBOUND_HEALTH_MAX_STALE_HOURS``. Keying on poll *success* (not
   on "a new email arrived") means a genuinely quiet inbox — which still polls
@@ -16,7 +16,7 @@ Design — heartbeat-on-successful-poll, not raw email_logs freshness:
 
 Only a *stale* heartbeat (one that exists but has aged out) alerts — a missing
 heartbeat (cold start / never-succeeded) does not, since that fires on every
-restart before the first poll and is already covered by gmail_check's
+restart before the first poll and is already covered by email_check's
 ``@critical_task`` failure alert.
 
 Debounce: alert at most once per ``INBOUND_HEALTH_REALERT_HOURS`` during a
@@ -45,7 +45,7 @@ _ALERTED_KEY = "jarvis:inbound:health_alerted"
 def mark_inbound_poll_success() -> None:
     """Record a successful inbound poll + clear any standing outage alert.
 
-    Called by `gmail_check` after a clean sweep. Best-effort: a Redis hiccup
+    Called by `email_check` after a clean sweep. Best-effort: a Redis hiccup
     here must never fail the poll itself, so failures are swallowed (logged)."""
     try:
         _redis.set(HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat())
@@ -79,7 +79,7 @@ async def _check() -> None:
         # No heartbeat yet — cold start / fresh deploy / never-succeeded. We do
         # NOT alert here: alerting on "never" fires on every restart before the
         # first poll writes its heartbeat (and a worker that has genuinely never
-        # polled is already covered by gmail_check's @critical_task failure
+        # polled is already covered by email_check's @critical_task failure
         # alert). The canary's job is to catch a pipeline that WAS healthy and
         # went stale — which is exactly the Jun-11 token-expiry shape.
         logger.info("inbound_health_no_heartbeat_yet")

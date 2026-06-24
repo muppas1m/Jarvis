@@ -9,7 +9,7 @@ Plan-gap fill: Task 2.7's verbatim celery_app.py only creates the Celery
 instance and autodiscovers tasks. Without explicit per-worker initialization,
 half the scheduled tasks fail at runtime — approval_expiry needs the DB engine
 for async_session, @critical_task's failure alerts need the channel registry,
-gmail_renew + gmail_check need the Gmail service which is fine but anything
+email_renew + email_check need the provider which is fine but anything
 calling resume_turn needs the checkpointer.
 
 The `worker_process_init` Celery signal fires once per worker process at
@@ -32,8 +32,8 @@ celery_app = Celery(
     # which isn't our layout. Listing each task module here is unambiguous.
     include=[
         "app.scheduler.task_wrapper",   # @critical_task uses celery_app.task at import time
-        "app.scheduler.tasks.gmail_renew",
-        "app.scheduler.tasks.gmail_check",
+        "app.scheduler.tasks.email_renew",
+        "app.scheduler.tasks.email_check",
         "app.scheduler.tasks.inbound_health",
         "app.scheduler.tasks.morning_brief",
         "app.scheduler.tasks.approval_expiry",
