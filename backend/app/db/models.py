@@ -144,6 +144,11 @@ class EmailLog(Base):
     __tablename__ = "email_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Which EmailProvider this record came through ("gmail" | "outlook" | …) —
+    # makes the email record multi-provider-aware (migration 006). The
+    # `gmail_message_id` column name is historical: it stores the OPAQUE provider
+    # message id regardless of provider (a physical rename is a deferred cosmetic).
+    provider = Column(String(20), nullable=False, server_default="gmail")
     gmail_message_id = Column(String(255), unique=True, nullable=False, index=True)
     subject = Column(String(500), nullable=True)
     sender = Column(String(255), nullable=True, index=True)

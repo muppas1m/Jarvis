@@ -92,6 +92,7 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
     # message id (a rename is a deferred cosmetic — see commits.md).
     async with async_session() as session:
         log = EmailLog(
+            provider=provider.name,
             gmail_message_id=msg.message_id,
             subject=msg.subject,
             sender=msg.sender,
