@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     TUNNEL_PUBLIC_URL: str = ""
     CLOUDFLARE_TUNNEL_ID: str = ""
 
+    # --- Email provider selection --------------------------------------------
+    # Which EmailProvider adapter Jarvis uses for ALL email (send / receive /
+    # search / watch). "gmail" today; "outlook" plugs in as a second adapter with
+    # no agent/approval/safety changes. Switching providers is THIS config value.
+    EMAIL_PROVIDER: str = "gmail"
+
     # --- Google (Phase 2) ----------------------------------------------------
     GOOGLE_PROJECT_ID: str = ""
     GOOGLE_CLIENT_ID: str = ""
