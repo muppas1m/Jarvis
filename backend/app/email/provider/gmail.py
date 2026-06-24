@@ -23,6 +23,7 @@ from typing import Any, TypeVar
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from app.config import settings
 from app.email.provider.base import EmailProvider, InboundMessage, ReplyRef, SendResult
@@ -31,6 +32,23 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _T = TypeVar("_T")
+
+# Send retry policy — the ONLY HTTP statuses safe to retry. Both are a status-code
+# RESPONSE from Gmail, i.e. Gmail received the request, decided, and rejected it
+# at the gateway BEFORE the send handler ran → the message was provably NOT
+# delivered, so re-sending cannot duplicate. Everything else (timeouts,
+# connection drops, 500, other 4xx) is surfaced, never blind-retried: a
+# read-timeout may mean Gmail ACCEPTED the request and we just didn't see the
+# response, and there is no idempotency key — retrying could send a DUPLICATE.
+_RETRYABLE_SEND_STATUS = frozenset({429, 503})
+
+
+def _http_status(exc: HttpError) -> int:
+    """The HTTP status of a googleapiclient HttpError (0 if unreadable)."""
+    try:
+        return int(exc.resp.status)
+    except (AttributeError, ValueError, TypeError):
+        return 0
 
 
 class GmailProvider(EmailProvider):
@@ -77,49 +95,89 @@ class GmailProvider(EmailProvider):
         reply_to: ReplyRef | None = None,
     ) -> SendResult:
         """Send plain text; thread the reply when ``reply_to`` is given. Every
-        Gmail round-trip runs off-loop + bounded via ``_blocking``."""
+        Gmail round-trip runs off-loop + bounded via ``_blocking``; the send
+        itself retries definitely-didn't-send failures (see ``_send_with_retry``)
+        without ever risking a duplicate."""
+        irt = (reply_to.rfc822_message_id or "").strip() if reply_to else ""
+        gmid = (reply_to.message_id or "").strip() if reply_to else ""
+
+        # Threading context from the source message (idempotent read, off-loop):
+        # threadId (groups the reply into the conversation) + its References chain.
+        thread_id_gmail = ""
+        references = irt  # default: just the immediate parent
+        if gmid:
+            thread_id_gmail, parent_refs = await self._fetch_reply_context(gmid)
+            if parent_refs and irt:
+                # Proper RFC 5322 References: the parent's chain + the parent's
+                # Message-ID, so the whole thread links — not just the last hop.
+                references = f"{parent_refs} {irt}"
+
         mime = MIMEText(body, "plain", "utf-8")
         mime["To"] = to
         mime["Subject"] = subject
-        irt = (reply_to.rfc822_message_id or "").strip() if reply_to else ""
         if irt:
             mime["In-Reply-To"] = irt
-            mime["References"] = irt
+            mime["References"] = references
 
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
         request_body: dict[str, Any] = {"raw": raw}
+        if thread_id_gmail:
+            request_body["threadId"] = thread_id_gmail
 
-        # Belt-and-braces threading: set threadId from the source message so Gmail
-        # groups the reply into the same conversation. Idempotent read, off-loop.
-        gmid = (reply_to.message_id or "").strip() if reply_to else ""
-        if gmid:
-            thread_id_gmail = await self._lookup_thread_id(gmid)
-            if thread_id_gmail:
-                request_body["threadId"] = thread_id_gmail
-
-        result = await self._blocking(
-            lambda: self._service().users().messages().send(userId="me", body=request_body).execute()
-        )
+        result = await self._send_with_retry(request_body)
         return SendResult(
             provider=self.name,
             sent_message_id=result.get("id", "(no-id)"),
             raw=result,
         )
 
-    async def _lookup_thread_id(self, gmid: str) -> str:
-        """The source message's threadId (best-effort, off-loop + bounded). A
-        failure just means the In-Reply-To header alone threads it in most
-        clients, so we log + return ""."""
+    async def _send_with_retry(self, request_body: dict[str, Any]) -> dict[str, Any]:
+        """The actual send, retried ONLY on definitely-didn't-send failures (HTTP
+        429/503 — see ``_RETRYABLE_SEND_STATUS``). The B1 approval claim already
+        guarantees ONE dispatch per approval; this guarantees that dispatch
+        delivers AT MOST once — a retry only fires when the prior attempt provably
+        didn't send. Timeouts / connection drops / 5xx / other 4xx propagate
+        UN-retried so the caller surfaces them (no blind re-send, no duplicate)."""
+        attempts = settings.EMAIL_SEND_RETRIES + 1
+        for attempt in range(attempts):
+            try:
+                return await self._blocking(
+                    lambda: self._service().users().messages().send(
+                        userId="me", body=request_body
+                    ).execute()
+                )
+            except HttpError as exc:
+                status = _http_status(exc)
+                if status in _RETRYABLE_SEND_STATUS and attempt < attempts - 1:
+                    delay = settings.EMAIL_SEND_RETRY_BASE_S * (2 ** attempt)
+                    logger.warning(
+                        "gmail_send_retrying", status=status, attempt=attempt + 1, delay_s=delay
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise  # non-retryable status, or out of attempts
+            # NOTE: asyncio.TimeoutError (hung call) / ConnectionError / any other
+            # exception is NOT caught here → it propagates un-retried (maybe the
+            # message already went out; we must not risk a duplicate).
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def _fetch_reply_context(self, gmid: str) -> tuple[str, str]:
+        """The source message's (threadId, References-header) for threading a
+        reply — best-effort, off-loop + bounded. A failure just means the
+        In-Reply-To header alone threads it in most clients, so we log + return
+        ("", "")."""
         try:
             original = await self._blocking(
                 lambda: self._service().users().messages().get(
-                    userId="me", id=gmid, format="metadata"
+                    userId="me", id=gmid, format="metadata",
+                    metadataHeaders=["References"],
                 ).execute()
             )
-            return original.get("threadId") or ""
+            headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
+            return original.get("threadId") or "", headers.get("References", "")
         except Exception as exc:  # noqa: BLE001
             logger.warning("gmail_send_thread_lookup_failed", message_id=gmid, error=str(exc))
-            return ""
+            return "", ""
 
     # --- read / fetch ------------------------------------------------------
     async def fetch_message(self, message_id: str) -> InboundMessage:
