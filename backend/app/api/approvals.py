@@ -28,16 +28,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.agent.runner import resume_turn
 from app.db.engine import async_session
 from app.db.models import PendingApproval
-from app.email.gmail_approval_handler import (
-    GMAIL_THREAD_PREFIX,
-    GmailApprovalOutcome,
-    dispatch_gmail_approval,
-    is_gmail_approval,
+from app.email.approval_handler import (
+    EMAIL_THREAD_PREFIXES,
+    EmailApprovalOutcome,
+    dispatch_email_approval,
+    is_email_approval,
 )
 from app.utils.logging import get_logger
 
@@ -193,12 +193,16 @@ async def next_inbound_approval() -> InboundNextResponse:
     inbound approvals one at a time. Conversation approvals (web:/telegram:) are
     deliberately excluded; they already surface in the turn stream / history."""
     now = datetime.now(UTC)
+    # Match any inbound-email origin prefix ("email:<provider>:" + legacy "gmail:").
+    origin_match = or_(
+        *[PendingApproval.thread_id.startswith(p) for p in EMAIL_THREAD_PREFIXES]
+    )
     async with async_session() as session:
         result = await session.execute(
             select(PendingApproval)
             .where(PendingApproval.status == "pending")
             .where(PendingApproval.expires_at > now)
-            .where(PendingApproval.thread_id.startswith(GMAIL_THREAD_PREFIX))
+            .where(origin_match)
             .order_by(PendingApproval.created_at.asc())
             .limit(1)
         )
@@ -270,11 +274,11 @@ async def decide_approval(
     """Record the master's decision, then resolve it — by origin.
 
     A conversation approval (web:/telegram:) is a real LangGraph interrupt →
-    resume the paused graph. A channel-origin approval (gmail:<msg_id>) has no
-    graph to resume → dispatch the action directly (send the drafted reply). The
-    dashboard previously called resume_turn unconditionally, which fails for a
-    gmail: thread (no checkpoint) — the same origin-dispatch the Telegram button
-    already does, now shared via gmail_approval_handler.
+    resume the paused graph. An inbound-email approval (email:<provider>:<id>)
+    has no graph to resume → dispatch the action directly (send the drafted
+    reply). The dashboard previously called resume_turn unconditionally, which
+    fails for such a thread (no checkpoint) — the same origin-dispatch the
+    Telegram button already does, now shared via email.approval_handler.
 
     Returns the same TurnEnvelope shape /api/chat returns. status="complete"
     means the chain finished cleanly (or the reply sent). status="interrupted"
@@ -300,18 +304,18 @@ async def decide_approval(
     if not body.approved and body.reason:
         decision["reason"] = body.reason
 
-    if is_gmail_approval(thread_id):
-        outcome = await dispatch_gmail_approval(thread_id, decision)
-        return _gmail_decide_envelope(thread_id, outcome)
+    if is_email_approval(thread_id):
+        outcome = await dispatch_email_approval(thread_id, decision)
+        return _email_decide_envelope(thread_id, outcome)
 
     return await resume_turn(thread_id=thread_id, decision=decision)
 
 
-def _gmail_decide_envelope(thread_id: str, outcome: GmailApprovalOutcome) -> dict[str, Any]:
-    """Render a gmail-approval outcome into the minimal TurnEnvelope fields the
-    dashboard's decide handler reads (status + response; no chained interrupt).
-    Distinct wording from the Telegram alert by design — same resolution core,
-    per-transport presentation."""
+def _email_decide_envelope(thread_id: str, outcome: EmailApprovalOutcome) -> dict[str, Any]:
+    """Render an inbound-email-approval outcome into the minimal TurnEnvelope
+    fields the dashboard's decide handler reads (status + response; no chained
+    interrupt). Distinct wording from the Telegram alert by design — same
+    resolution core, per-transport presentation."""
     if outcome.status == "sent":
         return _decide_envelope(thread_id, "complete", f"✅ Reply sent to {outcome.recipient}.")
     if outcome.status == "rejected":

@@ -14,5 +14,5 @@
 | `calendar_update` | APPROVE |  | `app.agent.tools.calendar_tool` | Update / reschedule an existing calendar event — change its title, time, description, or l… |
 | `document_search` | SAFE |  | `app.agent.tools.document_search` | Search the master's ingested documents (PDFs, Word/Excel files, notes, markdown) for passa… |
 | `email_history_search` | SAFE |  | `app.agent.tools.email_history` | Search the master's email history — what messages came in, who sent them, were they replie… |
-| `gmail_send` | APPROVE |  | `app.agent.tools.gmail_send` | Send an email via the master's Gmail account |
+| `email_send` | APPROVE |  | `app.agent.tools.email_send` | Send an email via the master's account |
 | `memory_search` | SAFE | yes | `app.agent.tools.builtin_memory` | Search the master's persistent conversation memory — facts they've told you, preferences, … |

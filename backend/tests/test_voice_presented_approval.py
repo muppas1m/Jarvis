@@ -9,7 +9,7 @@ and leaves the card pending.
 """
 import app.agent.runner as runner
 from app.agent.decision_resolver import DecisionResolution
-from app.email.gmail_approval_handler import GmailApprovalOutcome
+from app.email.approval_handler import EmailApprovalOutcome
 
 
 class _Row:
@@ -35,7 +35,7 @@ def _wire(monkeypatch, *, row, intent, outcome=None, change=""):
 
     async def fake_dispatch(thread_id, decision):
         rec["dispatch"] = (thread_id, decision)
-        return outcome or GmailApprovalOutcome(status="sent", recipient="p@x.com")
+        return outcome or EmailApprovalOutcome(status="sent", recipient="p@x.com")
 
     async def fake_resolve_row(approval_id, action):
         rec["resolved"] = (approval_id, action)
@@ -49,7 +49,7 @@ def _wire(monkeypatch, *, row, intent, outcome=None, change=""):
     monkeypatch.setattr(runner, "_resolve_presented_row", fake_resolve_row)
     monkeypatch.setattr(runner, "synthesize", fake_synth)
     monkeypatch.setattr(
-        "app.email.gmail_approval_handler.dispatch_gmail_approval", fake_dispatch
+        "app.email.approval_handler.dispatch_email_approval", fake_dispatch
     )
     return rec
 
@@ -81,7 +81,7 @@ async def test_approve_dispatches_and_flips_card(monkeypatch):
 async def test_approve_with_send_failure_still_flips_but_says_failed(monkeypatch):
     rec = _wire(
         monkeypatch, row=_Row(), intent="approve",
-        outcome=GmailApprovalOutcome(status="send_failed", detail="token expired"),
+        outcome=EmailApprovalOutcome(status="send_failed", detail="token expired"),
     )
     events = await _collect(runner._resolve_presented_approval_voice("uuid-1", "send it"))
     assert "dispatch" in rec

@@ -5,7 +5,7 @@ mocking only at the Google-API + Telegram boundaries (item #5), so the test
 exercises the actual plumbing:
   - the 16.5 INSERT-as-gate (EmailLog claims the msg_id before side effects),
   - PendingApproval creation,
-  - the 17.5 approve → gmail_approval_handler.dispatch_gmail_approval → gmail_send,
+  - approve → approval_handler.dispatch_email_approval → send_email → provider,
   - the real MIME / In-Reply-To threading built by gmail_send,
   - the EmailLog.auto_sent flip + the gmail_send AuditTrail row.
 
@@ -92,7 +92,7 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
                    AsyncMock(return_value={"complexity": "simple", "response": draft_body})), \
              patch("app.email.gmail_pubsub.send_approval_request_to_master", AsyncMock()) as mock_req, \
              patch("app.email.gmail_pubsub.send_system_alert", AsyncMock()) as mock_sys_alert, \
-             patch("app.agent.tools.gmail_send.get_gmail_service", return_value=service), \
+             patch("app.email.provider.gmail.GmailProvider._service", return_value=service), \
              patch("app.messaging.router.channel_registry.get",
                    return_value=MagicMock(send_alert=AsyncMock())):
 
@@ -138,15 +138,15 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
                 select(EmailLog).where(EmailLog.gmail_message_id == msg_id)
             )).scalar_one()
             audit = (await s.execute(
-                select(AuditTrail).where(AuditTrail.thread_id == f"gmail:{msg_id}")
+                select(AuditTrail).where(AuditTrail.thread_id == f"email:gmail:{msg_id}")
             )).scalars().all()
         assert log.auto_sent is True, "EmailLog.auto_sent must flip True after a successful send"
-        send_rows = [a for a in audit if a.tool_name == "gmail_send" and a.success]
-        assert send_rows, "a successful gmail_send AuditTrail row should exist"
-        assert send_rows[0].latency_ms is not None, "gmail_send audit should carry latency_ms (17.9)"
+        send_rows = [a for a in audit if a.tool_name == "email_send" and a.success]
+        assert send_rows, "a successful email_send AuditTrail row should exist"
+        assert send_rows[0].latency_ms is not None, "email_send audit should carry latency_ms (17.9)"
     finally:
         async with async_session() as s:
-            await s.execute(delete(AuditTrail).where(AuditTrail.thread_id == f"gmail:{msg_id}"))
+            await s.execute(delete(AuditTrail).where(AuditTrail.thread_id == f"email:gmail:{msg_id}"))
             await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == f"gmail:{msg_id}"))
             await s.execute(delete(EmailLog).where(EmailLog.gmail_message_id == msg_id))
             await s.commit()

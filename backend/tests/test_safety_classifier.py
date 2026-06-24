@@ -31,11 +31,11 @@ def classifier() -> SafetyClassifier:
         ("memory_search",   SafetyLevel.SAFE),
         ("web_research",    SafetyLevel.SAFE),
         # NOTIFY
-        ("gmail_archive",   SafetyLevel.NOTIFY),
-        ("gmail_label",     SafetyLevel.NOTIFY),
+        ("email_archive",   SafetyLevel.NOTIFY),
+        ("email_label",     SafetyLevel.NOTIFY),
         # APPROVE
-        ("gmail_send",          SafetyLevel.APPROVE),
-        ("gmail_reply",         SafetyLevel.APPROVE),
+        ("email_send",          SafetyLevel.APPROVE),
+        ("email_reply",         SafetyLevel.APPROVE),
         ("whatsapp_send",       SafetyLevel.APPROVE),
         ("calendar_create",     SafetyLevel.APPROVE),
         ("calendar_update",     SafetyLevel.APPROVE),
@@ -183,9 +183,9 @@ def test_args_overrides_never_downgrade(
     monkeypatch.setattr(
         "app.config.settings.TELEGRAM_MASTER_CHAT_ID", "12345"
     )
-    # gmail_send is APPROVE — can't go to NOTIFY by passing chat_id.
+    # email_send is APPROVE — can't go to NOTIFY by passing chat_id.
     assert (
-        classifier.classify("gmail_send", {"chat_id": "12345"})
+        classifier.classify("email_send", {"chat_id": "12345"})
         is SafetyLevel.APPROVE
     )
     # web_research is SAFE — passing chat_id="999" must not escalate either
@@ -218,5 +218,5 @@ def test_malformed_args_do_not_raise(
     )
     # Any value is acceptable as long as the classifier returns SOME SafetyLevel.
     assert isinstance(classifier.classify("telegram_send", args), SafetyLevel)
-    assert isinstance(classifier.classify("gmail_send", args), SafetyLevel)
+    assert isinstance(classifier.classify("email_send", args), SafetyLevel)
     assert isinstance(classifier.classify("unknown_tool", args), SafetyLevel)

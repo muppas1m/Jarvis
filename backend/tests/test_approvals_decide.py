@@ -2,7 +2,7 @@
 
 A gmail: approval has no graph to resume; the old endpoint called resume_turn
 unconditionally → it failed for inbound email approvals. Now it branches:
-gmail: → dispatch_gmail_approval (send the reply), else → resume_turn. These
+gmail: → dispatch_email_approval (send the reply), else → resume_turn. These
 tests assert the BRANCH + the rendered envelope, mocking resolve_approval /
 dispatch / resume so no DB or Gmail is touched (axis b: verify invocation).
 """
@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 import app.api.approvals as ap
-from app.email.gmail_approval_handler import GmailApprovalOutcome
+from app.email.approval_handler import EmailApprovalOutcome
 
 
 def _patch(monkeypatch, *, thread_id, dispatch=None, resume=None):
@@ -19,7 +19,7 @@ def _patch(monkeypatch, *, thread_id, dispatch=None, resume=None):
 
     monkeypatch.setattr(ap, "resolve_approval", fake_resolve)
     if dispatch is not None:
-        monkeypatch.setattr(ap, "dispatch_gmail_approval", dispatch)
+        monkeypatch.setattr(ap, "dispatch_email_approval", dispatch)
     if resume is not None:
         monkeypatch.setattr(ap, "resume_turn", resume)
 
@@ -29,7 +29,7 @@ async def test_gmail_approval_dispatches_send_not_resume(monkeypatch):
 
     async def fake_dispatch(thread_id, decision):
         captured["dispatch"] = (thread_id, decision)
-        return GmailApprovalOutcome(
+        return EmailApprovalOutcome(
             status="sent", recipient="priya@example.com", subject="Re: Hi", detail="id=1"
         )
 
@@ -51,7 +51,7 @@ async def test_gmail_approval_dispatches_send_not_resume(monkeypatch):
 async def test_gmail_reject_renders_discarded(monkeypatch):
     async def fake_dispatch(thread_id, decision):
         assert decision["approved"] is False  # reject flows through as not-approved
-        return GmailApprovalOutcome(status="rejected")
+        return EmailApprovalOutcome(status="rejected")
 
     _patch(monkeypatch, thread_id="gmail:msg-2", dispatch=fake_dispatch)
     env = await ap.decide_approval(ap.DecideRequest(approved=False, reason="no thanks"), "u2")
@@ -61,7 +61,7 @@ async def test_gmail_reject_renders_discarded(monkeypatch):
 
 async def test_gmail_send_failure_renders_error(monkeypatch):
     async def fake_dispatch(thread_id, decision):
-        return GmailApprovalOutcome(status="send_failed", detail="token expired")
+        return EmailApprovalOutcome(status="send_failed", detail="token expired")
 
     _patch(monkeypatch, thread_id="gmail:msg-3", dispatch=fake_dispatch)
     env = await ap.decide_approval(ap.DecideRequest(approved=True), "u3")
@@ -74,7 +74,7 @@ async def test_conversation_approval_still_resumes(monkeypatch):
 
     async def fake_dispatch(thread_id, decision):
         captured["dispatched"] = True
-        return GmailApprovalOutcome(status="sent")
+        return EmailApprovalOutcome(status="sent")
 
     async def fake_resume(thread_id, decision):
         captured["resume"] = (thread_id, decision)

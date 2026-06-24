@@ -588,7 +588,7 @@ def _approval_speech(
     h = settings.MASTER_HONORIFIC
     tool = (interrupt or {}).get("tool_name", "an action")
     args = (interrupt or {}).get("tool_args") or {}
-    if tool == "gmail_send":
+    if tool == "email_send":
         to = args.get("to") or "someone"
         subj = args.get("subject")
         detail = f"an email to {to}" + (f", subject '{subj}'" if subj else "")
@@ -694,17 +694,17 @@ async def _load_approval_by_id(approval_id: str):
         return result.scalar_one_or_none()
 
 
-def _gmail_outcome_speech(outcome: Any) -> str:
-    """Spoken line for a gmail send outcome — voice presentation of the SAME
-    `dispatch_gmail_approval` core the buttons use (not duplicated logic)."""
+def _email_outcome_speech(outcome: Any) -> str:
+    """Spoken line for an inbound-email send outcome — voice presentation of the
+    SAME `dispatch_email_approval` core the buttons use (not duplicated logic)."""
     h = settings.MASTER_HONORIFIC
     if outcome.status == "sent":
         return f"Sent to {outcome.recipient}, {h}."
-    # Approved, but the send didn't go through (e.g. expired OAuth). Honest: the
-    # card still shows approved (the master DID decide), the voice says it failed.
+    # Approved, but the send didn't go through. Honest: the card still shows
+    # approved (the master DID decide), the voice says it failed.
     return (
         f"I approved it, {h}, but the reply couldn't be sent — "
-        f"you may need to handle that one in Gmail."
+        f"you may need to handle that one in your inbox."
     )
 
 
@@ -712,22 +712,23 @@ async def _resolve_presented_approval_voice(
     approval_id: str, transcript: str
 ) -> AsyncIterator[dict[str, Any]]:
     """Resolve a CROSS-THREAD presented approval (an inbound auto-drafted email
-    reply, surfaced in the HUD from its own `gmail:<msg_id>` thread) by voice.
+    reply, surfaced in the HUD from its own `email:<provider>:<id>` thread) by
+    voice.
 
     The conversation thread isn't paused at an interrupt — this card lives on a
     different thread — so the normal `_resolve_pending_voice` path can't see it.
     Mirrors that path's contract (decision_resolved → spoken reply → done) but
-    judges intent against the PRESENTED card and dispatches via the shared gmail
+    judges intent against the PRESENTED card and dispatches via the shared email
     core. Same conservative `resolve_decision` (ambient / ambiguous → unrelated →
     nudge, NEVER approve) is the gate: room noise leaves the card pending."""
-    from app.email.gmail_approval_handler import dispatch_gmail_approval, is_gmail_approval
+    from app.email.approval_handler import dispatch_email_approval, is_email_approval
 
     h = settings.MASTER_HONORIFIC
     row = await _load_approval_by_id(approval_id)
 
     # Stale / already-resolved / not a channel-origin card → don't act; the
     # frontend's next poll drops it. Speak a brief acknowledgement and end.
-    if row is None or row.status != "pending" or not is_gmail_approval(row.thread_id):
+    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
         ev = await _speak_text(f"That one's already taken care of, {h}.")
         if ev:
             yield ev
@@ -748,13 +749,13 @@ async def _resolve_presented_approval_voice(
 
     if res.intent == "approve":
         await _resolve_presented_row(approval_id, "approve")
-        outcome = await dispatch_gmail_approval(thread_id, {"approved": True})
+        outcome = await dispatch_email_approval(thread_id, {"approved": True})
         yield _decision_resolved_event(thread_id, approval_id, "approved")
-        ev = await _speak_text(_gmail_outcome_speech(outcome))
+        ev = await _speak_text(_email_outcome_speech(outcome))
         if ev:
             yield ev
         yield {"type": "done", "content": _terminal_payload(
-            {"thread_id": thread_id, "status": "complete", "response": _gmail_outcome_speech(outcome)}
+            {"thread_id": thread_id, "status": "complete", "response": _email_outcome_speech(outcome)}
         )}
         return
 

@@ -53,12 +53,12 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
 
     # --- low-risk writes -----------------------------------------------------
     "telegram_send":    SafetyLevel.NOTIFY,
-    "gmail_archive":    SafetyLevel.NOTIFY,
-    "gmail_label":      SafetyLevel.NOTIFY,
+    "email_archive":    SafetyLevel.NOTIFY,
+    "email_label":      SafetyLevel.NOTIFY,
 
     # --- high-risk writes (master must explicitly approve) -------------------
-    "gmail_send":           SafetyLevel.APPROVE,
-    "gmail_reply":          SafetyLevel.APPROVE,
+    "email_send":           SafetyLevel.APPROVE,
+    "email_reply":          SafetyLevel.APPROVE,
     "whatsapp_send":        SafetyLevel.APPROVE,
     "calendar_create":      SafetyLevel.APPROVE,
     "calendar_update":      SafetyLevel.APPROVE,

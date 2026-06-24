@@ -4,7 +4,7 @@ Per-turn / per-conversation rate limiting for the agent loop.
 Two layered limits:
   - MAX_TOOL_CALLS_PER_TURN: ceiling across ALL tools within one user turn.
   - TOOL_SPECIFIC_LIMITS_PER_TURN: tighter per-tool caps for things that are
-    expensive (web_research, firecrawl_crawl) or risky (gmail_send,
+    expensive (web_research, firecrawl_crawl) or risky (email_send,
     browser_form_submit).
   - MAX_AGENT_TURNS_PER_HOUR: per-thread sliding window of total turns.
 
@@ -17,7 +17,7 @@ gets its own counter — no cross-turn contamination if the agent is in a
 fast back-and-forth.
 
 NOT to be confused with `app/security/rate_limiter.py` (Phase 4 Task 4.17).
-That one enforces real-world side-effect caps (max N gmail_sends per hour
+That one enforces real-world side-effect caps (max N email_sends per hour
 across ALL turns); this one is the agent-loop hygiene layer that prevents a
 single-turn runaway.
 """
@@ -38,7 +38,7 @@ TOOL_SPECIFIC_LIMITS_PER_TURN: dict[str, int] = {
     "web_research":         3,
     "tavily_search":        3,
     "firecrawl_crawl":      3,
-    "gmail_send":           5,
+    "email_send":           5,
     "browser_form_submit":  2,
     # Cap the expensive RAG re-hunt: each call reranks the whole corpus. Two
     # tries is plenty; the prompt tells the agent to stop after an empty result.

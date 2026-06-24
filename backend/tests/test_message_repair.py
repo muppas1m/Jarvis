@@ -26,7 +26,7 @@ from app.agent.message_repair import (
 from app.agent.runner import run_turn
 
 
-def _ai_with_tool_call(tc_id: str, name: str = "gmail_send") -> AIMessage:
+def _ai_with_tool_call(tc_id: str, name: str = "email_send") -> AIMessage:
     return AIMessage(
         content="",
         tool_calls=[{"name": name, "args": {"to": "x@y.com"}, "id": tc_id}],

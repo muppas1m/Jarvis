@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (104 modules)
+## `app/` — the system (105 modules)
 
 ```
 app/
@@ -17,7 +17,7 @@ app/
 │   │   ├── calendar_tool.py — Google Calendar tool — read, create, update, delete events (+ conflict check).
 │   │   ├── document_search.py — document_search — agent-facing RAG tool over ingested documents.
 │   │   ├── email_history.py — Email history search — query email_logs + pending_approvals for recall.
-│   │   ├── gmail_send.py — Gmail send tool — outbound email via the OAuth-authenticated Gmail account.
+│   │   ├── email_send.py — Email send tool — provider-agnostic outbound email for the agent.
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
@@ -66,12 +66,13 @@ app/
 │   │   ├── base.py — Provider-agnostic email interface.
 │   │   └── gmail.py — Gmail adapter for the EmailProvider interface.
 │   ├── __init__.py — Email integration — Gmail watch + Pub/Sub handler + classifier (Phase 2).
+│   ├── approval_handler.py — Channel-origin approval handler for inbound-email approvals (any provider).
 │   ├── classifier.py — Multi-dimensional email triage (Turn 17.8).
 │   ├── digest.py — Daily email digest — accumulates FYI emails and delivers at 8am.
-│   ├── gmail_approval_handler.py — Channel-origin approval handler for Gmail-originated approvals.
 │   ├── gmail_pubsub.py — Handle incoming Gmail Pub/Sub push notifications.
 │   ├── gmail_watch.py — Gmail watch setup and renewal.
-│   └── responder.py — —
+│   ├── responder.py — —
+│   └── send.py — Provider-neutral email send — the single outbound path.
 ├── llm/
 │   ├── __init__.py — —
 │   ├── bootstrap.py — LiteLLM provider wiring — idempotent.

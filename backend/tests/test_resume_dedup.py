@@ -16,7 +16,7 @@ This test proves that defense works:
      persist), real AsyncPostgresSaver checkpointer.
   2. A FakeMessagesListChatModel injects a canned AIMessage carrying TWO
      tool calls in one response: A=SAFE (memory_search), B=APPROVE
-     (gmail_send). Then a second canned AIMessage with no tool calls so
+     (email_send). Then a second canned AIMessage with no tool calls so
      the agent terminates after the resume.
   3. tool_registry.execute is patched to INCR per-tool Redis counters
      instead of running the real tools.
@@ -108,7 +108,7 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
     call_b_id = f"call_B_{uuid.uuid4().hex[:6]}"
 
     counter_a_key = _counter_key(thread_id, "memory_search")
-    counter_b_key = _counter_key(thread_id, "gmail_send")
+    counter_b_key = _counter_key(thread_id, "email_send")
 
     # Make sure counters are clean before we start.
     await redis_client.delete(counter_a_key, counter_b_key)
@@ -127,7 +127,7 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
                 "id": call_a_id,
             },
             {
-                "name": "gmail_send",
+                "name": "email_send",
                 "args": {"to": "test@example.com", "body": "test"},
                 "id": call_b_id,
             },
@@ -150,9 +150,9 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
         if name == "memory_search":
             await redis_client.incr(counter_a_key)
             return "fake memory_search result"
-        if name == "gmail_send":
+        if name == "email_send":
             await redis_client.incr(counter_b_key)
-            return "fake gmail_send result"
+            return "fake email_send result"
         raise ValueError(f"Unexpected tool name in test: {name!r}")
 
     # --- the no-op approval request ---------------------------------------
@@ -183,7 +183,7 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
             f"tool); got status={result['status']!r}, response={result['response']!r}"
         )
         assert result["interrupt"] is not None, "interrupt payload missing"
-        assert result["interrupt"].get("tool_name") == "gmail_send", (
+        assert result["interrupt"].get("tool_name") == "email_send", (
             f"Wrong tool paused for approval: {result['interrupt']!r}"
         )
 
@@ -225,7 +225,7 @@ async def test_resume_does_not_re_execute_safe_tool_from_earlier_iteration(
             f"{approval_row.thread_id!r}, turn was {thread_id!r}"
         )
         assert approval_row.interrupt_id == call_b_id, (
-            f"PendingApproval.interrupt_id should be the gmail_send tool_call_id "
+            f"PendingApproval.interrupt_id should be the email_send tool_call_id "
             f"({call_b_id!r}), got {approval_row.interrupt_id!r}"
         )
         assert approval_row.status == "pending", (
@@ -311,7 +311,7 @@ async def test_resume_does_not_duplicate_pending_approval_or_prompt(
     initial_response = AIMessage(
         content="",
         tool_calls=[{
-            "name": "gmail_send",
+            "name": "email_send",
             "args": {"to": "test@example.com", "body": "test"},
             "id": call_id,
         }],
@@ -323,7 +323,7 @@ async def test_resume_does_not_duplicate_pending_approval_or_prompt(
         return fake_llm
 
     async def fake_execute(name: str, args: dict) -> str:  # noqa: ARG001
-        return "fake gmail_send result"
+        return "fake email_send result"
 
     async def count_pending() -> int:
         async with async_session() as session:

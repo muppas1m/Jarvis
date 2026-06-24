@@ -286,7 +286,7 @@ async def tool_executor_node(state: AgentState) -> dict:
     NOT commit the function's partial return value — it just snapshots state
     and exits. So if we processed multiple tool calls in a loop and hit
     interrupt() halfway, on resume the loop would restart and earlier tool
-    calls would re-execute (gmail_send sends twice — catastrophic). Doing one
+    calls would re-execute (email_send sends twice — catastrophic). Doing one
     call per invocation makes each invocation atomically idempotent: state
     is committed BETWEEN invocations, not within one.
 

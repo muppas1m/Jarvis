@@ -23,8 +23,8 @@ about channels.
 from typing import Any
 
 from app.agent.runner import resume_turn, run_turn
-from app.email.gmail_approval_handler import GMAIL_THREAD_PREFIX
-from app.email.gmail_approval_handler import resolve as resolve_gmail
+from app.email.approval_handler import EMAIL_THREAD_PREFIXES
+from app.email.approval_handler import resolve as resolve_email
 from app.memory.session import SessionManager
 from app.messaging.channel import NormalizedMessage
 from app.messaging.channel_registry import channel_registry
@@ -40,7 +40,7 @@ session_mgr = SessionManager()
 # module (see project_gmail_handler_decoupling_deferral). The router stays a thin
 # dispatcher — no domain logic lives here.
 CHANNEL_ORIGIN_HANDLERS = {
-    GMAIL_THREAD_PREFIX: resolve_gmail,
+    prefix: resolve_email for prefix in EMAIL_THREAD_PREFIXES
 }
 
 

@@ -95,12 +95,12 @@ class AnnounceApprovalResponse(BaseModel):
     mime: str
 
 
-async def _load_pending_gmail_approval(approval_id: str):
+async def _load_pending_email_approval(approval_id: str):
     """The PendingApproval row for `approval_id` IFF it's a still-pending
     channel-origin (gmail:) approval — else None (gone / resolved / wrong type)."""
     from app.db.engine import async_session
     from app.db.models import PendingApproval
-    from app.email.gmail_approval_handler import is_gmail_approval
+    from app.email.approval_handler import is_email_approval
 
     try:
         aid = uuid.UUID(approval_id)
@@ -110,7 +110,7 @@ async def _load_pending_gmail_approval(approval_id: str):
         row = (
             await session.execute(select(PendingApproval).where(PendingApproval.id == aid))
         ).scalar_one_or_none()
-    if row is None or row.status != "pending" or not is_gmail_approval(row.thread_id):
+    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
         return None
     return row
 
@@ -140,7 +140,7 @@ async def announce_approval(
     the master then resolves by voice (→ /voice/stream with presented_approval_id)
     or by button. Returns the spoken text + its audio, in the same shape the
     stream's `audio` events carry, so the client plays it through the same path."""
-    row = await _load_pending_gmail_approval(payload.approval_id)
+    row = await _load_pending_email_approval(payload.approval_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

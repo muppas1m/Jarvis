@@ -34,8 +34,8 @@ def register_all_tools() -> None:
     from app.agent.tools.calendar_tool import register as register_calendar
     register_calendar()
 
-    from app.agent.tools.gmail_send import register as register_gmail_send
-    register_gmail_send()
+    from app.agent.tools.email_send import register as register_email_send
+    register_email_send()
 
     from app.agent.tools.email_history import register as register_email_history
     register_email_history()
@@ -47,8 +47,6 @@ def register_all_tools() -> None:
     # tool module ships. Keep them commented until their underlying module
     # exists, so this function never raises ImportError on a fresh build.
     #
-    # from app.agent.tools.gmail_tool import register as register_gmail
-    # register_gmail()
     # from app.agent.tools.browser_tool import register as register_browser
     # register_browser()
     # from app.agent.tools.search_tool import register as register_search

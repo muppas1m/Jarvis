@@ -30,7 +30,8 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 # tool_name → (glyph, friendly phrase). None = internal noise, omit from the feed
 # (memory_search fires every turn; it's not something the master cares to see).
 _TOOL_MAP: dict[str, tuple[str, str] | None] = {
-    "gmail_send": ("✉", "Sent an email"),
+    "email_send": ("✉", "Sent an email"),
+    "gmail_send": ("✉", "Sent an email"),  # legacy audit rows (pre-provider-rename)
     "calendar_create": ("📅", "Added an event to your calendar"),
     "calendar_update": ("📅", "Updated a calendar event"),
     "calendar_delete": ("📅", "Removed a calendar event"),
@@ -49,7 +50,7 @@ def _friendly_tool(tool_name: str, input_summary: str | None) -> tuple[str, str]
         # the raw tool name into a master-facing feed).
         return None
     glyph, phrase = entry
-    if tool_name == "gmail_send" and input_summary:
+    if tool_name in ("email_send", "gmail_send") and input_summary:
         m = _EMAIL_RE.search(input_summary)
         if m:
             phrase = f"Sent an email to {m.group(0)}"

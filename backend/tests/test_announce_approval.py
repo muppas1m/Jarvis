@@ -42,7 +42,7 @@ async def test_endpoint_synthesizes_and_maps(monkeypatch):
     async def fake_synth(text):
         return {"text": text, "audio": "QURJTw==", "mime": "audio/wav", "filler": False}
 
-    monkeypatch.setattr(voice, "_load_pending_gmail_approval", fake_load)
+    monkeypatch.setattr(voice, "_load_pending_email_approval", fake_load)
     monkeypatch.setattr(voice, "synth_line", fake_synth)
 
     resp = await voice.announce_approval(
@@ -57,7 +57,7 @@ async def test_endpoint_404_on_missing(monkeypatch):
     async def fake_load(_id):
         return None
 
-    monkeypatch.setattr(voice, "_load_pending_gmail_approval", fake_load)
+    monkeypatch.setattr(voice, "_load_pending_email_approval", fake_load)
     with pytest.raises(HTTPException) as ei:
         await voice.announce_approval(
             voice.AnnounceApprovalRequest(approval_id="gone"), user=None
@@ -72,7 +72,7 @@ async def test_endpoint_returns_text_when_tts_empty(monkeypatch):
     async def fake_synth(text):
         return None  # TTS yielded nothing
 
-    monkeypatch.setattr(voice, "_load_pending_gmail_approval", fake_load)
+    monkeypatch.setattr(voice, "_load_pending_email_approval", fake_load)
     monkeypatch.setattr(voice, "synth_line", fake_synth)
     resp = await voice.announce_approval(
         voice.AnnounceApprovalRequest(approval_id="uuid-1"), user=None
