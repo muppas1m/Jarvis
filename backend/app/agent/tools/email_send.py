@@ -17,7 +17,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.agent.tools.registry import tool_registry
-from app.email.provider import ReplyRef
+from app.config import settings
+from app.email.provider import EmailSendUncertain, ReplyRef
 from app.email.send import send_email
 
 
@@ -55,7 +56,14 @@ async def email_send(
     in_reply_to_message_id: str = "",
     source_message_id: str = "",
 ) -> str:
-    """Send an email via the master's configured provider. Returns a status string."""
+    """Send an email via the master's configured provider. Returns a status string.
+
+    Maybe-delivered (``EmailSendUncertain`` — a timeout / 5xx where the send may
+    already have gone out) is caught and returned as the SAME honest, deterministic
+    wording the approval transports use — so the master gets that signal on this
+    agent-direct surface too, not a generic "failed". A DEFINITE failure is left
+    to propagate → tool_executor's standard ``[ERROR]`` path (``success=False``),
+    consistent with every other tool — it really did fail and should read so."""
     irt = in_reply_to_message_id.strip()
     smid = source_message_id.strip()
     reply_to = (
@@ -63,7 +71,14 @@ async def email_send(
         if (irt or smid)
         else None
     )
-    result = await send_email(to, subject, body, reply_to=reply_to, source_message_id=smid)
+    try:
+        result = await send_email(to, subject, body, reply_to=reply_to, source_message_id=smid)
+    except EmailSendUncertain:
+        h = settings.MASTER_HONORIFIC
+        return (
+            f"I couldn't confirm the email to {to} sent, {h} — it may have gone out. "
+            f"Worth checking your Sent folder."
+        )
     return f"Email sent to {to} (id: {result.sent_message_id})"
 
 
