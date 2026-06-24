@@ -34,6 +34,7 @@ from app.agent.runner import resume_turn
 from app.db.engine import async_session
 from app.db.models import PendingApproval
 from app.email.gmail_approval_handler import (
+    GMAIL_THREAD_PREFIX,
     GmailApprovalOutcome,
     dispatch_gmail_approval,
     is_gmail_approval,
@@ -155,6 +156,75 @@ class DecideRequest(BaseModel):
         default=None,
         max_length=500,
         description="Optional rejection reason; surfaced in the audit trail.",
+    )
+
+
+class InboundApprovalCard(BaseModel):
+    """A channel-origin (inbound-email) approval shaped to render with the SAME
+    in-chat ApprovalCard the conversation cards use — the structured action shown
+    field-by-field, never an LLM re-summary."""
+
+    approval_id: str
+    thread_id: str
+    action_type: str
+    tool_name: str
+    tool_args: dict
+    description: str
+    status: str
+    created_at: str
+
+
+class InboundNextResponse(BaseModel):
+    """The ONE next inbound approval to present, or null. The server returns at
+    most one so the HUD never floods the chat — the next surfaces only after this
+    one is resolved (the 'one at a time' primitive)."""
+
+    approval: InboundApprovalCard | None = None
+
+
+@router.get("/inbound/next", response_model=InboundNextResponse)
+async def next_inbound_approval() -> InboundNextResponse:
+    """The single oldest pending CHANNEL-ORIGIN (gmail:) approval, as a card — or
+    null. This is the surface for inbound auto-drafted email replies, which live
+    on their own `gmail:<msg_id>` threads (not the conversation thread) so the
+    conversation history query never sees them.
+
+    Returns at most one (oldest first, expired filtered) — the dashboard presents
+    inbound approvals one at a time. Conversation approvals (web:/telegram:) are
+    deliberately excluded; they already surface in the turn stream / history."""
+    now = datetime.now(UTC)
+    async with async_session() as session:
+        result = await session.execute(
+            select(PendingApproval)
+            .where(PendingApproval.status == "pending")
+            .where(PendingApproval.expires_at > now)
+            .where(PendingApproval.thread_id.startswith(GMAIL_THREAD_PREFIX))
+            .order_by(PendingApproval.created_at.asc())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+
+    if row is None:
+        return InboundNextResponse(approval=None)
+
+    payload = row.payload or {}
+    return InboundNextResponse(
+        approval=InboundApprovalCard(
+            approval_id=str(row.id),
+            thread_id=row.thread_id,
+            action_type=row.action_type,
+            # The action_type IS the tool identity for a synthetic approval;
+            # the card renders the recipient / subject / draft from the payload.
+            tool_name=row.action_type,
+            tool_args={
+                "to": payload.get("sender", ""),
+                "subject": payload.get("subject", ""),
+                "body": payload.get("draft", ""),
+            },
+            description=row.description,
+            status=row.status,
+            created_at=row.created_at.isoformat() if row.created_at else "",
+        )
     )
 
 

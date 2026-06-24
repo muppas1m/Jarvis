@@ -4,12 +4,13 @@
 
 # API Routes
 
-20 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`), enumerated via the OpenAPI schema. Auth is derived structurally — public routers are health + webhooks; every other route is under the `get_current_user`-gated protected sub-router.
+21 routes from the live FastAPI app (`app/main.py` → `app/api/router.py`), enumerated via the OpenAPI schema. Auth is derived structurally — public routers are health + webhooks; every other route is under the `get_current_user`-gated protected sub-router.
 
 | Method | Path | Auth | Tags |
 |---|---|---|---|
 | `GET` | `/api/_auth/whoami` | 🔒 auth | auth |
 | `GET` | `/api/activity` | 🔒 auth | activity |
+| `GET` | `/api/approvals/inbound/next` | 🔒 auth | approvals |
 | `GET` | `/api/approvals/pending` | 🔒 auth | approvals |
 | `POST` | `/api/approvals/{approval_id}/decide` | 🔒 auth | approvals |
 | `POST` | `/api/chat` | 🔒 auth | chat |
