@@ -31,7 +31,8 @@ with provider-reported cost. The per-turn number here is a fast-path
 hint for client UIs; production accounting belongs on `/costs`.
 """
 import json
-from typing import Any, AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -81,10 +82,14 @@ def _conversation_items(
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
-    thread_id: Optional[str] = Field(
+    thread_id: str | None = Field(
         default=None,
         description="Override the conversation thread (debugging). If omitted, the master's canonical server-side thread is used.",
     )
+    # When a cross-thread inbound-email card is presented in the HUD, the client
+    # sends its id so a typed "send it" resolves THAT card (B2) — same gated
+    # cross-thread resolution the voice path uses. None for a normal turn.
+    presented_approval_id: str | None = Field(default=None)
 
 
 @router.post("", response_model=None)
@@ -103,7 +108,7 @@ async def chat(
 
 @router.get("/history", response_model=None)
 async def chat_history(
-    thread_id: Optional[str] = None,
+    thread_id: str | None = None,
     user: UserContext = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Replay the master's persisted conversation for the dashboard on reload.
@@ -146,6 +151,7 @@ async def chat_stream(
             thread_id=thread_id,
             platform="web",
             channel_user_id=user.user_id,
+            presented_approval_id=payload.presented_approval_id,
         ):
             yield f"data: {json.dumps(event)}\n\n"
 

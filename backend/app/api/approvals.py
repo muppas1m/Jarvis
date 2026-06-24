@@ -28,7 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from app.agent.runner import resume_turn
 from app.db.engine import async_session
@@ -51,16 +51,24 @@ async def resolve_approval(
     action: str,
     resolved_via: str,
 ) -> str | None:
-    """Mark an approval as approved/rejected and return its thread_id.
+    """Atomically CLAIM + mark an approval, returning its thread_id ONLY to the
+    call that transitions it out of ``pending``.
 
-    Returns None if the approval row doesn't exist (already cleaned up,
-    expired, or a stale callback). Returning None signals to the caller
-    that there's nothing to resume.
+    Idempotency gate (Part B1): the resolve→side-effect (send a reply / resume a
+    graph) must fire AT MOST ONCE per approval — a button+voice race or a retry
+    must NOT send a duplicate email. The single conditional UPDATE
+    (``WHERE id AND status='pending' RETURNING thread_id``) is the claim: under
+    Postgres row locking, exactly one concurrent caller matches the still-pending
+    row and gets the thread_id back; every other caller (already resolved, or
+    lost the race) gets None and MUST NOT dispatch.
+
+    Returns None for: a malformed id, a missing row, an already-resolved row, OR
+    a lost claim race. The caller treats None as "nothing to do here."
 
     Args:
         approval_id: PendingApproval.id (UUID as string).
         action: "approve" or "reject".
-        resolved_via: which channel completed the action ("telegram", "web", ...).
+        resolved_via: which channel completed the action ("telegram", "web", "voice").
     """
     if action not in ("approve", "reject"):
         raise ValueError(f"action must be 'approve' or 'reject', got {action!r}")
@@ -71,37 +79,26 @@ async def resolve_approval(
         logger.warning("resolve_approval_bad_uuid", approval_id=approval_id)
         return None
 
+    new_status = "approved" if action == "approve" else "rejected"
     async with async_session() as session:
         result = await session.execute(
-            select(PendingApproval).where(PendingApproval.id == approval_uuid)
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_uuid, PendingApproval.status == "pending")
+            .values(status=new_status, resolved_at=datetime.now(UTC), resolved_via=resolved_via)
+            .returning(PendingApproval.thread_id)
         )
-        approval = result.scalar_one_or_none()
-        if approval is None:
-            logger.warning("resolve_approval_not_found", approval_id=approval_id)
-            return None
-
-        if approval.status != "pending":
-            # Idempotent — a duplicate Approve click won't error, but we
-            # don't re-write the resolution metadata either.
-            logger.info(
-                "resolve_approval_already_resolved",
-                approval_id=approval_id,
-                current_status=approval.status,
-            )
-            return approval.thread_id
-
-        approval.status = "approved" if action == "approve" else "rejected"
-        approval.resolved_at = datetime.now(UTC)
-        approval.resolved_via = resolved_via
+        row = result.first()
         await session.commit()
-        logger.info(
-            "approval_resolved",
-            approval_id=approval_id,
-            action=action,
-            resolved_via=resolved_via,
-            thread_id=approval.thread_id,
-        )
-        return approval.thread_id
+
+    if row is None:
+        # Missing OR already-resolved OR lost the claim race — do NOT dispatch.
+        logger.info("resolve_approval_not_claimed", approval_id=approval_id, action=action)
+        return None
+    logger.info(
+        "approval_resolved",
+        approval_id=approval_id, action=action, resolved_via=resolved_via, thread_id=row[0],
+    )
+    return row[0]
 
 
 async def get_thread_decisions(thread_id: str) -> list[dict[str, Any]]:

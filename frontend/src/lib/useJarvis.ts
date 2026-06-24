@@ -324,16 +324,14 @@ export function useJarvis() {
       abortRef.current = ac;
       let acc = "";
 
-      // If a decision card is pending and this is a VOICE turn, tag it so the
-      // backend judges this utterance against THAT card (it resolves a
+      // If a decision card is pending, tag the turn (voice OR typed, B2) so the
+      // backend judges this utterance against THAT card — it resolves a
       // cross-thread inbound card; an in-thread conversation interrupt is
-      // detected server-side and takes priority, so this is ignored there).
-      const presented = voice
-        ? itemsRef.current.find(
-            (x): x is Extract<StreamItem, { type: "decision" }> =>
-              x.type === "decision" && x.approval.status === "pending",
-          )
-        : undefined;
+      // detected server-side and takes priority, so this is ignored there.
+      const presented = itemsRef.current.find(
+        (x): x is Extract<StreamItem, { type: "decision" }> =>
+          x.type === "decision" && x.approval.status === "pending",
+      );
       const presentedId = presented?.approval.approval_id;
 
       try {
@@ -670,6 +668,17 @@ export function useJarvis() {
     const t = setInterval(() => void surfaceInbound(), 8000);
     return () => clearInterval(t);
   }, [surfaceInbound]);
+
+  // B3 — surface the NEXT inbound card PROMPTLY when the current one resolves
+  // (by button, voice, or typed reply), instead of waiting for the ~8s poll.
+  // Fires only on the pending→none transition; surfacing a card flips this back
+  // to true, so there's no loop.
+  const hasPendingDecision = items.some(
+    (it) => it.type === "decision" && it.approval.status === "pending",
+  );
+  useEffect(() => {
+    if (!hasPendingDecision) void surfaceInbound();
+  }, [hasPendingDecision, surfaceInbound]);
 
   return {
     items,

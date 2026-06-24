@@ -400,6 +400,7 @@ async def stream_turn(
     thread_id: str,
     platform: str,
     channel_user_id: str,
+    presented_approval_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Token-streaming variant of run_turn over the SAME agent graph.
 
@@ -434,6 +435,20 @@ async def stream_turn(
     if await _is_awaiting_approval(thread_id):
         logger.info("stream_turn_resolving_pending_interrupt", thread_id=thread_id)
         async for ev in _resolve_pending_stream(thread_id, user_message):
+            yield ev
+        return
+
+    if presented_approval_id:
+        # A CROSS-THREAD inbound card is presented and the master TYPED a reply
+        # ("send it"). Resolve it against the presented card by natural language —
+        # the same gated resolver the voice path uses (B2), minus the audio. The
+        # conversation interrupt above takes priority (one-at-a-time → only one
+        # card is ever active).
+        logger.info(
+            "stream_turn_resolving_presented_approval",
+            thread_id=thread_id, approval_id=presented_approval_id,
+        )
+        async for ev in _resolve_presented_approval_stream(presented_approval_id, user_message):
             yield ev
         return
 
@@ -748,7 +763,17 @@ async def _resolve_presented_approval_voice(
     logger.info("presented_approval_routed", approval_id=approval_id, intent=res.intent)
 
     if res.intent == "approve":
-        await _resolve_presented_row(approval_id, "approve")
+        # B1 idempotency: only the call that CLAIMS the pending→approved
+        # transition sends. A concurrent button-decide that already claimed it
+        # → claim is None → we acknowledge, NOT double-send.
+        if not await _resolve_presented_row(approval_id, "approve"):
+            ev = await _speak_text(f"That one's already taken care of, {h}.")
+            if ev:
+                yield ev
+            yield {"type": "done", "content": _terminal_payload(
+                {"thread_id": thread_id, "status": "complete", "response": ""}
+            )}
+            return
         outcome = await dispatch_email_approval(thread_id, {"approved": True})
         yield _decision_resolved_event(thread_id, approval_id, "approved")
         ev = await _speak_text(_email_outcome_speech(outcome))
@@ -760,7 +785,14 @@ async def _resolve_presented_approval_voice(
         return
 
     if res.intent == "reject":
-        await _resolve_presented_row(approval_id, "reject")
+        if not await _resolve_presented_row(approval_id, "reject"):
+            ev = await _speak_text(f"That one's already taken care of, {h}.")
+            if ev:
+                yield ev
+            yield {"type": "done", "content": _terminal_payload(
+                {"thread_id": thread_id, "status": "complete", "response": ""}
+            )}
+            return
         spoken = f"Discarded, {h} — I'll leave it in your inbox."
         yield _decision_resolved_event(thread_id, approval_id, "rejected")
         ev = await _speak_text(spoken)
@@ -785,6 +817,63 @@ async def _resolve_presented_approval_voice(
     )}
 
 
+async def _resolve_presented_approval_stream(
+    approval_id: str, message: str
+) -> AsyncIterator[dict[str, Any]]:
+    """TEXT (typed) variant of the cross-thread presented-approval resolver (B2):
+    the SAME gated `resolve_decision` + idempotent claim + shared email dispatch
+    as the voice path, but yielding text events (decision_resolved → done) with
+    no audio. So a typed "send it" resolves a presented inbound card just like
+    the button and voice do — gated to the card, never firing on a normal turn."""
+    from app.email.approval_handler import dispatch_email_approval, is_email_approval
+
+    h = settings.MASTER_HONORIFIC
+    row = await _load_approval_by_id(approval_id)
+
+    def _done(thread_id: str, response: str) -> dict[str, Any]:
+        return {"type": "done", "content": _terminal_payload(
+            {"thread_id": thread_id, "status": "complete", "response": response}
+        )}
+
+    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+        yield _done(row.thread_id if row else "", f"That one's already taken care of, {h}.")
+        return
+
+    thread_id = row.thread_id
+    payload = row.payload or {}
+    tool_args = {
+        "to": payload.get("sender", ""),
+        "subject": payload.get("subject", ""),
+        "body": payload.get("draft", ""),
+    }
+    res = await resolve_decision(row.action_type, tool_args, row.description, message)
+    logger.info("presented_approval_routed_text", approval_id=approval_id, intent=res.intent)
+
+    if res.intent == "approve":
+        if not await _resolve_presented_row(approval_id, "approve"):  # B1 claim
+            yield _done(thread_id, f"That one's already taken care of, {h}.")
+            return
+        outcome = await dispatch_email_approval(thread_id, {"approved": True})
+        yield _decision_resolved_event(thread_id, approval_id, "approved")
+        yield _done(thread_id, _email_outcome_speech(outcome))
+        return
+
+    if res.intent == "reject":
+        if not await _resolve_presented_row(approval_id, "reject"):
+            yield _done(thread_id, f"That one's already taken care of, {h}.")
+            return
+        yield _decision_resolved_event(thread_id, approval_id, "rejected")
+        yield _done(thread_id, f"Discarded, {h} — I'll leave it in your inbox.")
+        return
+
+    # edit (unsupported this slice) / unrelated / ambient → card stays pending.
+    if res.intent == "edit":
+        nudge = f"I can only send or discard this reply for now, {h}. Shall I send it?"
+    else:
+        nudge = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
+    yield _done(thread_id, nudge)
+
+
 def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> dict[str, Any]:
     """The card-flip signal the frontend matches by approval_id (thread_id is
     informational — the inbound card lives on a different thread than the turn)."""
@@ -795,10 +884,13 @@ def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> d
     }
 
 
-async def _resolve_presented_row(approval_id: str, action: str) -> None:
+async def _resolve_presented_row(approval_id: str, action: str) -> str | None:
+    """Claim the approval for the voice transport. Returns the thread_id ONLY if
+    this call won the pending→resolved transition (None → already resolved; the
+    caller must not dispatch)."""
     from app.api.approvals import resolve_approval  # lazy — avoid import cycle
 
-    await resolve_approval(approval_id, action, resolved_via="voice")
+    return await resolve_approval(approval_id, action, resolved_via="voice")
 
 
 async def voice_turn(

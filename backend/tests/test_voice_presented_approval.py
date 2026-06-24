@@ -22,8 +22,10 @@ class _Row:
         self.payload = {"sender": "Priya <p@x.com>", "subject": "Q3", "draft": "On it."}
 
 
-def _wire(monkeypatch, *, row, intent, outcome=None, change=""):
-    """Patch the resolver's collaborators. Records dispatch + resolve calls."""
+def _wire(monkeypatch, *, row, intent, outcome=None, change="", claimed=True):
+    """Patch the resolver's collaborators. Records dispatch + resolve calls.
+    ``claimed`` simulates whether _resolve_presented_row won the idempotency
+    claim (None → a concurrent transport already resolved it)."""
     rec: dict = {}
 
     async def fake_load(_id):
@@ -39,6 +41,7 @@ def _wire(monkeypatch, *, row, intent, outcome=None, change=""):
 
     async def fake_resolve_row(approval_id, action):
         rec["resolved"] = (approval_id, action)
+        return (row.thread_id if (row and claimed) else None)  # the claim result
 
     async def fake_synth(text):
         rec.setdefault("spoken", []).append(text)
@@ -134,4 +137,14 @@ async def test_missing_row_acknowledges_and_ends(monkeypatch):
     rec = _wire(monkeypatch, row=None, intent="approve")
     events = await _collect(runner._resolve_presented_approval_voice("gone", "send it"))
     assert "dispatch" not in rec
+    assert events[-1]["type"] == "done"
+
+
+async def test_voice_approve_lost_claim_does_not_double_send(monkeypatch):
+    """B1: a button-decide already claimed + sent this card; the voice approve
+    that follows must NOT send again (claim returns None)."""
+    rec = _wire(monkeypatch, row=_Row(), intent="approve", claimed=False)
+    events = await _collect(runner._resolve_presented_approval_voice("uuid-1", "send it"))
+    assert "dispatch" not in rec  # claim lost → NO second send
+    assert _resolved_status(events) is None  # no card flip from this path
     assert events[-1]["type"] == "done"
