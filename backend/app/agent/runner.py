@@ -660,11 +660,143 @@ async def _resolve_pending_voice(
         yield {"type": "done", "content": _terminal_payload(env)}
 
 
+# --------------------------------------------------------------------------- #
+# Hands-free resolution of a CROSS-THREAD presented approval (inbound email)   #
+# --------------------------------------------------------------------------- #
+
+
+async def _load_approval_by_id(approval_id: str):
+    """The PendingApproval row for `approval_id`, or None (bad id / gone)."""
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+
+    try:
+        aid = uuid.UUID(approval_id)
+    except ValueError:
+        return None
+    async with async_session() as session:
+        result = await session.execute(
+            select(PendingApproval).where(PendingApproval.id == aid)
+        )
+        return result.scalar_one_or_none()
+
+
+def _gmail_outcome_speech(outcome: Any) -> str:
+    """Spoken line for a gmail send outcome — voice presentation of the SAME
+    `dispatch_gmail_approval` core the buttons use (not duplicated logic)."""
+    h = settings.MASTER_HONORIFIC
+    if outcome.status == "sent":
+        return f"Sent to {outcome.recipient}, {h}."
+    # Approved, but the send didn't go through (e.g. expired OAuth). Honest: the
+    # card still shows approved (the master DID decide), the voice says it failed.
+    return (
+        f"I approved it, {h}, but the reply couldn't be sent — "
+        f"you may need to handle that one in Gmail."
+    )
+
+
+async def _resolve_presented_approval_voice(
+    approval_id: str, transcript: str
+) -> AsyncIterator[dict[str, Any]]:
+    """Resolve a CROSS-THREAD presented approval (an inbound auto-drafted email
+    reply, surfaced in the HUD from its own `gmail:<msg_id>` thread) by voice.
+
+    The conversation thread isn't paused at an interrupt — this card lives on a
+    different thread — so the normal `_resolve_pending_voice` path can't see it.
+    Mirrors that path's contract (decision_resolved → spoken reply → done) but
+    judges intent against the PRESENTED card and dispatches via the shared gmail
+    core. Same conservative `resolve_decision` (ambient / ambiguous → unrelated →
+    nudge, NEVER approve) is the gate: room noise leaves the card pending."""
+    from app.email.gmail_approval_handler import dispatch_gmail_approval, is_gmail_approval
+
+    h = settings.MASTER_HONORIFIC
+    row = await _load_approval_by_id(approval_id)
+
+    # Stale / already-resolved / not a channel-origin card → don't act; the
+    # frontend's next poll drops it. Speak a brief acknowledgement and end.
+    if row is None or row.status != "pending" or not is_gmail_approval(row.thread_id):
+        ev = await _speak_text(f"That one's already taken care of, {h}.")
+        if ev:
+            yield ev
+        yield {"type": "done", "content": _terminal_payload(
+            {"thread_id": (row.thread_id if row else ""), "status": "complete", "response": ""}
+        )}
+        return
+
+    thread_id = row.thread_id
+    payload = row.payload or {}
+    tool_args = {
+        "to": payload.get("sender", ""),
+        "subject": payload.get("subject", ""),
+        "body": payload.get("draft", ""),
+    }
+    res = await resolve_decision(row.action_type, tool_args, row.description, transcript)
+    logger.info("presented_approval_routed", approval_id=approval_id, intent=res.intent)
+
+    if res.intent == "approve":
+        await _resolve_presented_row(approval_id, "approve")
+        outcome = await dispatch_gmail_approval(thread_id, {"approved": True})
+        yield _decision_resolved_event(thread_id, approval_id, "approved")
+        ev = await _speak_text(_gmail_outcome_speech(outcome))
+        if ev:
+            yield ev
+        yield {"type": "done", "content": _terminal_payload(
+            {"thread_id": thread_id, "status": "complete", "response": _gmail_outcome_speech(outcome)}
+        )}
+        return
+
+    if res.intent == "reject":
+        await _resolve_presented_row(approval_id, "reject")
+        spoken = f"Discarded, {h} — I'll leave it in your inbox."
+        yield _decision_resolved_event(thread_id, approval_id, "rejected")
+        ev = await _speak_text(spoken)
+        if ev:
+            yield ev
+        yield {"type": "done", "content": _terminal_payload(
+            {"thread_id": thread_id, "status": "complete", "response": spoken}
+        )}
+        return
+
+    # edit (not supported for an inbound reply this slice) or unrelated / ambient
+    # → leave the card PENDING (no decision_resolved) and nudge.
+    if res.intent == "edit":
+        spoken = f"I can only send or discard this reply for now, {h}. Shall I send it?"
+    else:
+        spoken = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
+    ev = await _speak_text(spoken)
+    if ev:
+        yield ev
+    yield {"type": "done", "content": _terminal_payload(
+        {"thread_id": thread_id, "status": "complete", "response": spoken}
+    )}
+
+
+def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> dict[str, Any]:
+    """The card-flip signal the frontend matches by approval_id (thread_id is
+    informational — the inbound card lives on a different thread than the turn)."""
+    return {
+        "type": "decision_resolved",
+        "thread_id": thread_id,
+        "content": {"approval_id": approval_id, "status": status},
+    }
+
+
+async def _resolve_presented_row(approval_id: str, action: str) -> None:
+    from app.api.approvals import resolve_approval  # lazy — avoid import cycle
+
+    await resolve_approval(approval_id, action, resolved_via="voice")
+
+
 async def voice_turn(
     user_message: str,
     thread_id: str,
     platform: str,
     channel_user_id: str,
+    presented_approval_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Voice-OUT turn over the SAME graph as run_turn — but speed-tuned and spoken.
 
@@ -695,6 +827,22 @@ async def voice_turn(
         # speech. A2 Piece 3. (The wake transport / barge-in is untouched.)
         logger.info("voice_turn_resolving_pending_interrupt", thread_id=thread_id)
         async for ev in _resolve_pending_voice(thread_id, user_message):
+            yield ev
+        return
+
+    if presented_approval_id:
+        # A CROSS-THREAD inbound card (an auto-drafted email reply) is presented in
+        # the HUD and the master spoke. It lives on its OWN gmail:<msg_id> thread,
+        # so the conversation thread isn't "awaiting" (the check above is False) —
+        # resolve it against the presented card, gated by the same conservative
+        # resolver. Checked AFTER the conversation interrupt so a live in-thread
+        # approval always wins (and one-at-a-time means only one is ever active).
+        logger.info(
+            "voice_turn_resolving_presented_approval",
+            thread_id=thread_id,
+            approval_id=presented_approval_id,
+        )
+        async for ev in _resolve_presented_approval_voice(presented_approval_id, user_message):
             yield ev
         return
 

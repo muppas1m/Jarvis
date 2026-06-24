@@ -12,7 +12,7 @@ pulses to Jarvis's voice. Auth is the standard protected-router dependency
 """
 import asyncio
 import json
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
 
 import numpy as np
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -46,7 +46,13 @@ ws_router = APIRouter(prefix="/voice", tags=["voice"])
 
 class VoiceRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
-    thread_id: Optional[str] = Field(default=None)
+    thread_id: str | None = Field(default=None)
+    # When a cross-thread inbound-email approval card is presented in the HUD,
+    # the client sends its id so this utterance is judged against THAT card
+    # (resolved by sending/discarding) rather than starting a fresh turn. None
+    # for a normal voice turn. The conversation thread's own interrupts are
+    # detected server-side and take priority.
+    presented_approval_id: str | None = Field(default=None)
 
 
 @router.post("/stream", response_model=None)
@@ -62,6 +68,7 @@ async def voice_stream(
             thread_id=thread_id,
             platform="web",
             channel_user_id=user.user_id,
+            presented_approval_id=payload.presented_approval_id,
         ):
             yield f"data: {json.dumps(event)}\n\n"
 
