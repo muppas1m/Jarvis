@@ -12,18 +12,22 @@ pulses to Jarvis's voice. Auth is the standard protected-router dependency
 """
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
+from email.utils import parseaddr
 
 import numpy as np
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
-from app.agent.runner import canonical_thread_id, voice_turn
+from app.agent.runner import canonical_thread_id, synth_line, voice_turn
 from app.config import settings
 from app.security.auth import UserContext, get_current_user
 from app.utils.logging import get_logger
 from app.voice.transcribe import CaptureEndpointer, transcribe_pcm
+from app.voice.tts import audio_mime
 from app.voice.wakeword import VAD_FRAME_SIZE, new_model, new_vad, score_key
 
 # Worklet frame cadence — 1280 samples @ 16 kHz = 80 ms (see wake-worklet.js).
@@ -76,6 +80,78 @@ async def voice_stream(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class AnnounceApprovalRequest(BaseModel):
+    approval_id: str
+    # False → "Here's another I've drafted…" for a 2nd+ card in a sequence.
+    first: bool = True
+
+
+class AnnounceApprovalResponse(BaseModel):
+    text: str  # the caption / spoken words
+    audio: str  # base64 PCM/WAV (empty if TTS yielded nothing)
+    mime: str
+
+
+async def _load_pending_gmail_approval(approval_id: str):
+    """The PendingApproval row for `approval_id` IFF it's a still-pending
+    channel-origin (gmail:) approval — else None (gone / resolved / wrong type)."""
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+    from app.email.gmail_approval_handler import is_gmail_approval
+
+    try:
+        aid = uuid.UUID(approval_id)
+    except ValueError:
+        return None
+    async with async_session() as session:
+        row = (
+            await session.execute(select(PendingApproval).where(PendingApproval.id == aid))
+        ).scalar_one_or_none()
+    if row is None or row.status != "pending" or not is_gmail_approval(row.thread_id):
+        return None
+    return row
+
+
+def _announce_text(row, *, first: bool) -> str:
+    """Concise spoken intro for a freshly-surfaced inbound reply card — names the
+    sender + subject so the master can decide by ear, then asks to send."""
+    h = settings.MASTER_HONORIFIC
+    payload = row.payload or {}
+    name, addr = parseaddr(payload.get("sender", ""))
+    who = name or addr or "someone"
+    subject = payload.get("subject") or "your message"
+    lead = (
+        f"{h}, I've drafted a reply" if first
+        else f"Here's another I've drafted, {h} — a reply"
+    )
+    return f"{lead} to {who}, about '{subject}'. Shall I send it?"
+
+
+@router.post("/announce-approval", response_model=AnnounceApprovalResponse)
+async def announce_approval(
+    payload: AnnounceApprovalRequest,
+    user: UserContext = Depends(get_current_user),
+) -> AnnounceApprovalResponse:
+    """Speak a freshly-surfaced inbound approval card aloud (voice mode). The HUD
+    calls this when it presents an inbound email-reply card so Jarvis reads it;
+    the master then resolves by voice (→ /voice/stream with presented_approval_id)
+    or by button. Returns the spoken text + its audio, in the same shape the
+    stream's `audio` events carry, so the client plays it through the same path."""
+    row = await _load_pending_gmail_approval(payload.approval_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="approval not found, already resolved, or not an inbound approval",
+        )
+    text = _announce_text(row, first=payload.first)
+    content = await synth_line(text)
+    if content is None:  # TTS yielded nothing — still return the caption text.
+        return AnnounceApprovalResponse(text=text, audio="", mime=audio_mime())
+    return AnnounceApprovalResponse(
+        text=content["text"], audio=content["audio"], mime=content["mime"]
     )
 
 

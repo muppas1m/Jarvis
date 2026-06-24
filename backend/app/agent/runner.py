@@ -620,6 +620,15 @@ async def _speak_text(text: str) -> dict[str, Any] | None:
     return _audio_event(text, audio) if audio else None
 
 
+async def synth_line(text: str) -> dict[str, Any] | None:
+    """Synthesize one line → the SSE-audio CONTENT dict ``{text, audio, mime,
+    filler}`` (or None if TTS yields nothing). Public twin of ``_speak_text`` for
+    non-stream callers — e.g. the announce-approval endpoint, which plays Jarvis
+    reading a freshly-surfaced inbound card over the same audio path."""
+    ev = await _speak_text(text)
+    return ev["content"] if ev else None
+
+
 async def _resolve_pending_voice(
     thread_id: str, transcript: str
 ) -> AsyncIterator[dict[str, Any]]:
