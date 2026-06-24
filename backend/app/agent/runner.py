@@ -29,6 +29,7 @@ import base64
 import contextlib
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -439,18 +440,27 @@ async def stream_turn(
         return
 
     if presented_approval_id:
-        # A CROSS-THREAD inbound card is presented and the master TYPED a reply
-        # ("send it"). Resolve it against the presented card by natural language —
-        # the same gated resolver the voice path uses (B2), minus the audio. The
-        # conversation interrupt above takes priority (one-at-a-time → only one
-        # card is ever active).
+        # A CROSS-THREAD inbound card is presented and the master TYPED something.
+        # Part C: judge it against the card. Only an utterance ABOUT this card
+        # (approve / reject / edit) is intercepted + resolved. A DELIBERATE
+        # UNRELATED message ("what's on my calendar?") — or a stale/gone card —
+        # FALLS THROUGH to a normal turn (the question gets answered); the card
+        # stays pending, resolvable later by button/voice/a clearer reply.
+        judged = await _judge_presented(presented_approval_id, user_message)
+        if judged is not None and judged.actionable:
+            logger.info(
+                "stream_turn_resolving_presented_approval",
+                thread_id=thread_id, approval_id=presented_approval_id, intent=judged.intent,
+            )
+            async for ev in _resolve_presented_decision(judged, speak=False):
+                yield ev
+            return
         logger.info(
-            "stream_turn_resolving_presented_approval",
-            thread_id=thread_id, approval_id=presented_approval_id,
+            "stream_turn_presented_card_fallthrough",
+            approval_id=presented_approval_id,
+            intent=(judged.intent if judged else "stale"),
         )
-        async for ev in _resolve_presented_approval_stream(presented_approval_id, user_message):
-            yield ev
-        return
+        # (no return — continue to the normal turn below)
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
@@ -709,6 +719,43 @@ async def _load_approval_by_id(approval_id: str):
         return result.scalar_one_or_none()
 
 
+@dataclass
+class _PresentedJudgment:
+    """The classification of a typed/spoken message against a PRESENTED inbound
+    card. ``actionable`` (approve/reject/edit) means the message is ABOUT this
+    card → resolve or nudge. ``unrelated`` means it is NOT about the card → the
+    caller decides (text falls through to a normal turn; voice nudges)."""
+
+    approval_id: str
+    row: Any
+    intent: str  # approve | reject | edit | unrelated
+    change: str
+
+    @property
+    def actionable(self) -> bool:
+        return self.intent in ("approve", "reject", "edit")
+
+
+async def _judge_presented(approval_id: str, message: str) -> _PresentedJudgment | None:
+    """Load the presented inbound card + classify the message against it via the
+    SAME conservative ``resolve_decision`` (ambiguous → unrelated, NEVER approve).
+    Returns None if the card is stale / gone / not an inbound-email approval — the
+    caller decides what that means for its modality (Part C)."""
+    from app.email.approval_handler import is_email_approval
+
+    row = await _load_approval_by_id(approval_id)
+    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+        return None
+    payload = row.payload or {}
+    tool_args = {
+        "to": payload.get("sender", ""),
+        "subject": payload.get("subject", ""),
+        "body": payload.get("draft", ""),
+    }
+    res = await resolve_decision(row.action_type, tool_args, row.description, message)
+    return _PresentedJudgment(approval_id=approval_id, row=row, intent=res.intent, change=res.change)
+
+
 def _email_outcome_speech(outcome: Any) -> str:
     """Spoken line for an inbound-email send outcome — voice presentation of the
     SAME `dispatch_email_approval` core the buttons use (not duplicated logic)."""
@@ -726,152 +773,88 @@ def _email_outcome_speech(outcome: Any) -> str:
 async def _resolve_presented_approval_voice(
     approval_id: str, transcript: str
 ) -> AsyncIterator[dict[str, Any]]:
-    """Resolve a CROSS-THREAD presented approval (an inbound auto-drafted email
-    reply, surfaced in the HUD from its own `email:<provider>:<id>` thread) by
-    voice.
+    """VOICE resolution of a CROSS-THREAD presented inbound card. Judges the
+    transcript against the card; an actionable intent (approve/reject/edit)
+    resolves it with a spoken reply, an UNRELATED utterance (or a stale card)
+    leaves the card pending and NUDGES.
 
-    The conversation thread isn't paused at an interrupt — this card lives on a
-    different thread — so the normal `_resolve_pending_voice` path can't see it.
-    Mirrors that path's contract (decision_resolved → spoken reply → done) but
-    judges intent against the PRESENTED card and dispatches via the shared email
-    core. Same conservative `resolve_decision` (ambient / ambiguous → unrelated →
-    nudge, NEVER approve) is the gate: room noise leaves the card pending."""
-    from app.email.approval_handler import dispatch_email_approval, is_email_approval
-
+    Part C voice-parity call: voice DELIBERATELY diverges from text on the
+    unrelated case. A spoken utterance that isn't about the card may well be
+    ambient room noise / cross-talk, and starting a full agent turn on that is
+    worse than a gentle nudge — so voice nudges-and-stays. (Text, where every
+    message is a deliberate keystroke, falls through instead.) The gate is
+    unchanged: `resolve_decision` is conservative on approve, so a normal
+    utterance can't mis-send."""
     h = settings.MASTER_HONORIFIC
-    row = await _load_approval_by_id(approval_id)
+    judged = await _judge_presented(approval_id, transcript)
 
-    # Stale / already-resolved / not a channel-origin card → don't act; the
-    # frontend's next poll drops it. Speak a brief acknowledgement and end.
-    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+    if judged is None:
+        # Stale / gone card → acknowledge; do NOT start a turn on ambient noise.
         ev = await _speak_text(f"That one's already taken care of, {h}.")
         if ev:
             yield ev
         yield {"type": "done", "content": _terminal_payload(
-            {"thread_id": (row.thread_id if row else ""), "status": "complete", "response": ""}
+            {"thread_id": "", "status": "complete", "response": ""}
         )}
         return
 
-    thread_id = row.thread_id
-    payload = row.payload or {}
-    tool_args = {
-        "to": payload.get("sender", ""),
-        "subject": payload.get("subject", ""),
-        "body": payload.get("draft", ""),
-    }
-    res = await resolve_decision(row.action_type, tool_args, row.description, transcript)
-    logger.info("presented_approval_routed", approval_id=approval_id, intent=res.intent)
-
-    if res.intent == "approve":
-        # B1 idempotency: only the call that CLAIMS the pending→approved
-        # transition sends. A concurrent button-decide that already claimed it
-        # → claim is None → we acknowledge, NOT double-send.
-        if not await _resolve_presented_row(approval_id, "approve"):
-            ev = await _speak_text(f"That one's already taken care of, {h}.")
-            if ev:
-                yield ev
-            yield {"type": "done", "content": _terminal_payload(
-                {"thread_id": thread_id, "status": "complete", "response": ""}
-            )}
-            return
-        outcome = await dispatch_email_approval(thread_id, {"approved": True})
-        yield _decision_resolved_event(thread_id, approval_id, "approved")
-        ev = await _speak_text(_email_outcome_speech(outcome))
-        if ev:
+    if judged.actionable:
+        async for ev in _resolve_presented_decision(judged, speak=True):
             yield ev
-        yield {"type": "done", "content": _terminal_payload(
-            {"thread_id": thread_id, "status": "complete", "response": _email_outcome_speech(outcome)}
-        )}
         return
 
-    if res.intent == "reject":
-        if not await _resolve_presented_row(approval_id, "reject"):
-            ev = await _speak_text(f"That one's already taken care of, {h}.")
-            if ev:
-                yield ev
-            yield {"type": "done", "content": _terminal_payload(
-                {"thread_id": thread_id, "status": "complete", "response": ""}
-            )}
-            return
-        spoken = f"Discarded, {h} — I'll leave it in your inbox."
-        yield _decision_resolved_event(thread_id, approval_id, "rejected")
-        ev = await _speak_text(spoken)
-        if ev:
-            yield ev
-        yield {"type": "done", "content": _terminal_payload(
-            {"thread_id": thread_id, "status": "complete", "response": spoken}
-        )}
-        return
-
-    # edit (not supported for an inbound reply this slice) or unrelated / ambient
-    # → leave the card PENDING (no decision_resolved) and nudge.
-    if res.intent == "edit":
-        spoken = f"I can only send or discard this reply for now, {h}. Shall I send it?"
-    else:
-        spoken = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
-    ev = await _speak_text(spoken)
+    # Unrelated / ambient → leave the card pending and nudge (voice divergence).
+    nudge = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
+    ev = await _speak_text(nudge)
     if ev:
         yield ev
     yield {"type": "done", "content": _terminal_payload(
-        {"thread_id": thread_id, "status": "complete", "response": spoken}
+        {"thread_id": judged.row.thread_id, "status": "complete", "response": nudge}
     )}
 
 
-async def _resolve_presented_approval_stream(
-    approval_id: str, message: str
+async def _resolve_presented_decision(
+    judged: _PresentedJudgment, *, speak: bool
 ) -> AsyncIterator[dict[str, Any]]:
-    """TEXT (typed) variant of the cross-thread presented-approval resolver (B2):
-    the SAME gated `resolve_decision` + idempotent claim + shared email dispatch
-    as the voice path, but yielding text events (decision_resolved → done) with
-    no audio. So a typed "send it" resolves a presented inbound card just like
-    the button and voice do — gated to the card, never firing on a normal turn."""
-    from app.email.approval_handler import dispatch_email_approval, is_email_approval
+    """Resolve an ACTIONABLE judgment (approve/reject/edit) — shared by text and
+    voice; ``speak`` adds the spoken audio events for the voice path. Yields the
+    decision_resolved (card flip) + a terminal done, with the B1 idempotency
+    claim gating the actual send (a lost claim → acknowledge, never double-send)."""
+    from app.email.approval_handler import dispatch_email_approval
 
     h = settings.MASTER_HONORIFIC
-    row = await _load_approval_by_id(approval_id)
+    thread_id = judged.row.thread_id
+    approval_id = judged.approval_id
 
-    def _done(thread_id: str, response: str) -> dict[str, Any]:
-        return {"type": "done", "content": _terminal_payload(
+    async def _emit(response: str):
+        if speak:
+            ev = await _speak_text(response)
+            if ev:
+                yield ev
+        yield {"type": "done", "content": _terminal_payload(
             {"thread_id": thread_id, "status": "complete", "response": response}
         )}
 
-    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
-        yield _done(row.thread_id if row else "", f"That one's already taken care of, {h}.")
-        return
-
-    thread_id = row.thread_id
-    payload = row.payload or {}
-    tool_args = {
-        "to": payload.get("sender", ""),
-        "subject": payload.get("subject", ""),
-        "body": payload.get("draft", ""),
-    }
-    res = await resolve_decision(row.action_type, tool_args, row.description, message)
-    logger.info("presented_approval_routed_text", approval_id=approval_id, intent=res.intent)
-
-    if res.intent == "approve":
-        if not await _resolve_presented_row(approval_id, "approve"):  # B1 claim
-            yield _done(thread_id, f"That one's already taken care of, {h}.")
+    if judged.intent in ("approve", "reject"):
+        action = "approve" if judged.intent == "approve" else "reject"
+        if not await _resolve_presented_row(approval_id, action):  # B1 claim
+            async for ev in _emit(f"That one's already taken care of, {h}."):
+                yield ev
             return
-        outcome = await dispatch_email_approval(thread_id, {"approved": True})
-        yield _decision_resolved_event(thread_id, approval_id, "approved")
-        yield _done(thread_id, _email_outcome_speech(outcome))
+        if judged.intent == "approve":
+            outcome = await dispatch_email_approval(thread_id, {"approved": True})
+            yield _decision_resolved_event(thread_id, approval_id, "approved")
+            async for ev in _emit(_email_outcome_speech(outcome)):
+                yield ev
+        else:
+            yield _decision_resolved_event(thread_id, approval_id, "rejected")
+            async for ev in _emit(f"Discarded, {h} — I'll leave it in your inbox."):
+                yield ev
         return
 
-    if res.intent == "reject":
-        if not await _resolve_presented_row(approval_id, "reject"):
-            yield _done(thread_id, f"That one's already taken care of, {h}.")
-            return
-        yield _decision_resolved_event(thread_id, approval_id, "rejected")
-        yield _done(thread_id, f"Discarded, {h} — I'll leave it in your inbox.")
-        return
-
-    # edit (unsupported this slice) / unrelated / ambient → card stays pending.
-    if res.intent == "edit":
-        nudge = f"I can only send or discard this reply for now, {h}. Shall I send it?"
-    else:
-        nudge = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
-    yield _done(thread_id, nudge)
+    # edit — not supported for an inbound reply this slice; the card stays pending.
+    async for ev in _emit(f"I can only send or discard this reply for now, {h}. Shall I send it?"):
+        yield ev
 
 
 def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> dict[str, Any]:
