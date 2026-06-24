@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (101 modules)
+## `app/` — the system (103 modules)
 
 ```
 app/
@@ -61,6 +61,9 @@ app/
 │   ├── reranker.py — bge-reranker-v2-m3 cross-encoder reranking — a pure scoring function.
 │   └── search.py — Hybrid document retrieval — vector + BM25 → RRF fusion → cross-encoder rerank.
 ├── email/
+│   ├── provider/
+│   │   ├── __init__.py — Provider-agnostic email layer. Import the contract from here; the concrete
+│   │   └── base.py — Provider-agnostic email interface.
 │   ├── __init__.py — Email integration — Gmail watch + Pub/Sub handler + classifier (Phase 2).
 │   ├── classifier.py — Multi-dimensional email triage (Turn 17.8).
 │   ├── digest.py — Daily email digest — accumulates FYI emails and delivers at 8am.
