@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from email.utils import parseaddr
 from typing import Any, Literal
 
-from app.email.provider import ReplyRef, get_email_provider
+from app.email.provider import EmailSendUncertain, ReplyRef, get_email_provider
 from app.email.send import send_email
 from app.utils.logging import get_logger
 
@@ -39,7 +39,9 @@ def is_email_approval(thread_id: str) -> bool:
     return thread_id.startswith(EMAIL_THREAD_PREFIXES)
 
 
-OutcomeStatus = Literal["sent", "rejected", "row_missing", "payload_incomplete", "send_failed"]
+OutcomeStatus = Literal[
+    "sent", "rejected", "row_missing", "payload_incomplete", "send_failed", "send_uncertain"
+]
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,12 @@ async def dispatch_email_approval(
             source_message_id=message_id,
             provider_name=provider_name,
         )
+    except EmailSendUncertain as exc:
+        # Maybe-delivered (timeout / 5xx) — surface honestly, NOT as a flat fail.
+        logger.warning("email_approval_send_uncertain", thread_id=thread_id, error=str(exc))
+        return EmailApprovalOutcome(
+            status="send_uncertain", recipient=recipient_addr, subject=reply_subject, detail=str(exc)[:500],
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("email_approval_send_failed", thread_id=thread_id, error=str(exc))
         return EmailApprovalOutcome(
@@ -187,6 +195,11 @@ def channel_alert_for(outcome: EmailApprovalOutcome, thread_id: str) -> str | No
         )
     if s == "send_failed":
         return f"❌ Failed to send reply for `{thread_id}`:\n```\n{outcome.detail}\n```"
+    if s == "send_uncertain":
+        return (
+            f"⚠️ Couldn't confirm the reply to {outcome.recipient} sent — it may have "
+            f"gone out. Worth checking your Sent folder."
+        )
     return (
         f"✅ Reply sent to {outcome.recipient}\n"
         f"Subject: {outcome.subject}\n"

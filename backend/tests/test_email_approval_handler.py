@@ -137,11 +137,23 @@ async def test_row_missing_and_payload_incomplete(monkeypatch):
     assert sink == {}  # never sends on incomplete data
 
 
-async def test_send_failure_surfaces(monkeypatch):
+async def test_definite_send_failure_is_send_failed(monkeypatch):
     _patch_row(monkeypatch, _Row(NEW_PAYLOAD))
     _patch_send(monkeypatch, {}, raises=RuntimeError("smtp boom"))
     outcome = await dispatch_email_approval("email:gmail:msg-123", {"approved": True})
     assert outcome.status == "send_failed" and "smtp boom" in outcome.detail
+
+
+async def test_uncertain_send_is_send_uncertain(monkeypatch):
+    """A maybe-delivered send (EmailSendUncertain from the provider) maps to a
+    DISTINCT outcome status, not a flat send_failed."""
+    from app.email.provider import EmailSendUncertain
+
+    _patch_row(monkeypatch, _Row(NEW_PAYLOAD))
+    _patch_send(monkeypatch, {}, raises=EmailSendUncertain("timeout — may have gone out"))
+    outcome = await dispatch_email_approval("email:gmail:msg-123", {"approved": True})
+    assert outcome.status == "send_uncertain"
+    assert "may have gone out" in outcome.detail
 
 
 # --- stale-row: missing subject/rfc822 → fetched from the PROVIDER ------------
@@ -174,6 +186,10 @@ def test_channel_alert_wording_unchanged():
     assert "incomplete" in channel_alert_for(EmailApprovalOutcome(status="payload_incomplete"), "email:gmail:a")
     failed = EmailApprovalOutcome(status="send_failed", detail="boom")
     assert channel_alert_for(failed, "email:gmail:a") == "❌ Failed to send reply for `email:gmail:a`:\n```\nboom\n```"
+    # maybe-delivered reads DISTINCTLY (not the definite ❌) — "couldn't confirm".
+    uncertain = channel_alert_for(EmailApprovalOutcome(status="send_uncertain", recipient="p@x.com"), "x")
+    assert "couldn't confirm" in uncertain.lower() and "sent folder" in uncertain.lower()
+    assert "❌" not in uncertain  # not a flat failure
 
 
 # --- router prefix-dispatch (both email: and legacy gmail:) ------------------

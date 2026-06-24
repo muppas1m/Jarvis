@@ -3,6 +3,7 @@ from here; the concrete adapter is selected by the ``EMAIL_PROVIDER`` setting, s
 switching providers is a config change, not a code change."""
 from app.email.provider.base import (
     EmailProvider,
+    EmailSendUncertain,
     InboundMessage,
     ReplyRef,
     SendResult,
@@ -12,6 +13,7 @@ from app.email.provider.outlook import OutlookProvider
 
 __all__ = [
     "EmailProvider",
+    "EmailSendUncertain",
     "GmailProvider",
     "InboundMessage",
     "OutlookProvider",

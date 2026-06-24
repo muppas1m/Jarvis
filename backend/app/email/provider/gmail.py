@@ -26,7 +26,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.config import settings
-from app.email.provider.base import EmailProvider, InboundMessage, ReplyRef, SendResult
+from app.email.provider.base import (
+    EmailProvider,
+    EmailSendUncertain,
+    InboundMessage,
+    ReplyRef,
+    SendResult,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -136,8 +142,17 @@ class GmailProvider(EmailProvider):
         429/503 — see ``_RETRYABLE_SEND_STATUS``). The B1 approval claim already
         guarantees ONE dispatch per approval; this guarantees that dispatch
         delivers AT MOST once — a retry only fires when the prior attempt provably
-        didn't send. Timeouts / connection drops / 5xx / other 4xx propagate
-        UN-retried so the caller surfaces them (no blind re-send, no duplicate)."""
+        didn't send.
+
+        On final failure, classify so the master gets an HONEST signal (the
+        adapter is where the HTTP semantics are known):
+          • DEFINITE fail (raise the raw error) — any 4xx, including an
+            exhausted-retry 429: the request was rejected at the gateway, it never
+            reached the send handler, nothing was delivered.
+          • MAYBE-delivered (raise ``EmailSendUncertain``) — any 5xx (incl an
+            exhausted-retry 503, or a 500) and timeouts / connection drops: the
+            request may have been ACCEPTED before the error and, with no
+            idempotency key, we cannot confirm it didn't go out."""
         attempts = settings.EMAIL_SEND_RETRIES + 1
         for attempt in range(attempts):
             try:
@@ -155,10 +170,17 @@ class GmailProvider(EmailProvider):
                     )
                     await asyncio.sleep(delay)
                     continue
-                raise  # non-retryable status, or out of attempts
-            # NOTE: asyncio.TimeoutError (hung call) / ConnectionError / any other
-            # exception is NOT caught here → it propagates un-retried (maybe the
-            # message already went out; we must not risk a duplicate).
+                if status >= 500:
+                    raise EmailSendUncertain(
+                        f"Gmail returned {status} — the send may have been processed"
+                    ) from exc
+                raise  # 4xx (incl exhausted 429) → definite fail (never reached send)
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                # A read-timeout / dropped connection can follow a request Gmail
+                # already ACCEPTED → maybe-delivered. Surface, never blind-retry.
+                raise EmailSendUncertain(
+                    f"{type(exc).__name__} during send — the message may have gone out"
+                ) from exc
         raise RuntimeError("unreachable")  # pragma: no cover
 
     async def _fetch_reply_context(self, gmid: str) -> tuple[str, str]:

@@ -69,6 +69,18 @@ async def test_gmail_send_failure_renders_error(monkeypatch):
     assert "token expired" in env["response"]
 
 
+async def test_gmail_send_uncertain_renders_distinctly(monkeypatch):
+    """Maybe-delivered (dashboard transport): NOT a flat error — soft + honest."""
+    async def fake_dispatch(thread_id, decision):
+        return EmailApprovalOutcome(status="send_uncertain", recipient="p@x.com")
+
+    _patch(monkeypatch, thread_id="gmail:msg-4", dispatch=fake_dispatch)
+    env = await ap.decide_approval(ap.DecideRequest(approved=True), "u4")
+    assert env["status"] == "complete"  # not the red "error" of a definite fail
+    assert "couldn't confirm" in env["response"].lower()
+    assert "sent folder" in env["response"].lower()
+
+
 async def test_conversation_approval_still_resumes(monkeypatch):
     captured: dict = {}
 

@@ -1,13 +1,13 @@
-"""Part B: resilient send WITHOUT ever double-sending. The retry classification
-is the safety-critical part, so it's tested adversarially: 429/503 (Gmail rejected
-before sending → safe) retry; a read-timeout (maybe-delivered), 4xx (permanent),
-and 500 (ambiguous) are NEVER retried — they surface. Plus References is chained
-from the parent so the whole thread links.
+"""Part B + polish: resilient send WITHOUT ever double-sending, AND an honest
+definite-vs-maybe-delivered taxonomy on failure. Retry 429/503 (Gmail rejected
+before sending → safe). On final failure: a 4xx (incl. exhausted-429) is a
+DEFINITE fail (raw error); a 5xx (incl. exhausted-503/500) or a timeout is
+MAYBE-delivered (`EmailSendUncertain`) — surfaced, never blind-retried. Plus
+References is chained from the parent so the whole thread links.
 
 `_blocking` is mocked per-attempt so we count exactly how many send attempts fire
 (the no-double-send proof) without real threads/sleeps.
 """
-import asyncio
 import base64
 import email as email_lib
 
@@ -15,7 +15,7 @@ import pytest
 from googleapiclient.errors import HttpError
 
 from app.config import settings
-from app.email.provider import GmailProvider, ReplyRef
+from app.email.provider import EmailSendUncertain, GmailProvider, ReplyRef
 
 
 def _http_error(status: int) -> HttpError:
@@ -62,44 +62,58 @@ async def test_503_retried_then_delivers_once(monkeypatch):
     assert calls["n"] == 2
 
 
-async def test_read_timeout_NOT_retried(monkeypatch):
+async def test_read_timeout_NOT_retried_is_UNCERTAIN(monkeypatch):
     """A timeout may mean Gmail already ACCEPTED the request — retrying could
-    DUPLICATE. So it surfaces after exactly ONE attempt."""
+    DUPLICATE. So it surfaces after ONE attempt, as MAYBE-delivered (uncertain)."""
     p = GmailProvider()
     calls = {"n": 0}
     monkeypatch.setattr(p, "_blocking", _scripted_blocking([TimeoutError()], calls))
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(EmailSendUncertain):
         await p.send("a@b.com", "Hi", "body")
     assert calls["n"] == 1  # NEVER retried — no duplicate risk
 
 
-async def test_4xx_NOT_retried(monkeypatch):
+async def test_4xx_NOT_retried_is_DEFINITE_fail(monkeypatch):
+    """A 4xx never reached the send handler → a clean, definite failure (raw error,
+    NOT 'uncertain' — don't make a definite-fail read as maybe-delivered)."""
     p = GmailProvider()
     calls = {"n": 0}
     monkeypatch.setattr(p, "_blocking", _scripted_blocking([_http_error(403)], calls))
-    with pytest.raises(HttpError):
-        await p.send("a@b.com", "Hi", "body")
-    assert calls["n"] == 1  # permanent → retry can't help
-
-
-async def test_500_NOT_retried(monkeypatch):
-    """500 is ambiguous (may have delivered) → surface, don't blind-retry."""
-    p = GmailProvider()
-    calls = {"n": 0}
-    monkeypatch.setattr(p, "_blocking", _scripted_blocking([_http_error(500)], calls))
-    with pytest.raises(HttpError):
+    with pytest.raises(HttpError):  # definite fail surfaces as the raw error
         await p.send("a@b.com", "Hi", "body")
     assert calls["n"] == 1
 
 
-async def test_persistent_429_exhausts_then_surfaces(monkeypatch):
+async def test_500_NOT_retried_is_UNCERTAIN(monkeypatch):
+    """500 is ambiguous (may have delivered) → surface as uncertain, don't blind-retry."""
+    p = GmailProvider()
+    calls = {"n": 0}
+    monkeypatch.setattr(p, "_blocking", _scripted_blocking([_http_error(500)], calls))
+    with pytest.raises(EmailSendUncertain):
+        await p.send("a@b.com", "Hi", "body")
+    assert calls["n"] == 1
+
+
+async def test_persistent_429_exhausts_then_DEFINITE_fail(monkeypatch):
+    """Exhausted-retry 429: rate-limited every attempt → never sent → DEFINITE fail."""
     monkeypatch.setattr(settings, "EMAIL_SEND_RETRY_BASE_S", 0.001)
     p = GmailProvider()
     calls = {"n": 0}
     monkeypatch.setattr(p, "_blocking", _scripted_blocking([_http_error(429)], calls))
-    with pytest.raises(HttpError):
+    with pytest.raises(HttpError):  # 429 is 4xx → definite, not uncertain
         await p.send("a@b.com", "Hi", "body")
-    # first attempt + EMAIL_SEND_RETRIES retries, then surfaces — bounded, no infinite loop.
+    assert calls["n"] == settings.EMAIL_SEND_RETRIES + 1  # bounded, no infinite loop
+
+
+async def test_persistent_503_exhausts_then_UNCERTAIN(monkeypatch):
+    """Exhausted-retry 503: 5xx carries the residual maybe-delivered possibility →
+    surface as uncertain (still bounded — no infinite retry)."""
+    monkeypatch.setattr(settings, "EMAIL_SEND_RETRY_BASE_S", 0.001)
+    p = GmailProvider()
+    calls = {"n": 0}
+    monkeypatch.setattr(p, "_blocking", _scripted_blocking([_http_error(503)], calls))
+    with pytest.raises(EmailSendUncertain):
+        await p.send("a@b.com", "Hi", "body")
     assert calls["n"] == settings.EMAIL_SEND_RETRIES + 1
 
 

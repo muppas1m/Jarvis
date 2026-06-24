@@ -773,13 +773,20 @@ async def _judge_presented(approval_id: str, message: str) -> _PresentedJudgment
 
 
 def _email_outcome_speech(outcome: Any) -> str:
-    """Spoken line for an inbound-email send outcome — voice presentation of the
-    SAME `dispatch_email_approval` core the buttons use (not duplicated logic)."""
+    """Spoken line for an inbound-email send outcome — voice (and typed) presentation
+    of the SAME `dispatch_email_approval` core the buttons use (not duplicated
+    logic). Distinguishes a DEFINITE fail from a MAYBE-delivered send."""
     h = settings.MASTER_HONORIFIC
     if outcome.status == "sent":
         return f"Sent to {outcome.recipient}, {h}."
-    # Approved, but the send didn't go through. Honest: the card still shows
-    # approved (the master DID decide), the voice says it failed.
+    if outcome.status == "send_uncertain":
+        # Maybe-delivered — don't claim it failed; tell the master to verify.
+        return (
+            f"I couldn't confirm that send, {h} — it may have gone out. "
+            f"Worth checking your Sent folder."
+        )
+    # Approved, but the send DEFINITELY didn't go through. Honest: the card still
+    # shows approved (the master DID decide), the voice says it failed.
     return (
         f"I approved it, {h}, but the reply couldn't be sent — "
         f"you may need to handle that one in your inbox."

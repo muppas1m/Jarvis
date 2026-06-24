@@ -137,3 +137,16 @@ async def test_text_edit_keeps_pending(monkeypatch):
     events = await _collect(runner._resolve_presented_decision(_judgment("edit"), speak=False))
     assert "dispatch" not in rec and _resolved(events) is None  # unsupported → stays pending
     assert events[-1]["type"] == "done"
+
+
+# --- the spoken/typed outcome line (3rd transport) distinguishes the cases ----
+def test_outcome_speech_distinguishes_sent_uncertain_failed():
+    sent = runner._email_outcome_speech(EmailApprovalOutcome(status="sent", recipient="p@x.com"))
+    assert "Sent to p@x.com" in sent
+
+    uncertain = runner._email_outcome_speech(EmailApprovalOutcome(status="send_uncertain"))
+    assert "couldn't confirm" in uncertain.lower() and "sent folder" in uncertain.lower()
+
+    failed = runner._email_outcome_speech(EmailApprovalOutcome(status="send_failed"))
+    assert "couldn't be sent" in failed.lower()  # definite fail stays a clean failure
+    assert "couldn't confirm" not in failed.lower()  # NOT the uncertain wording

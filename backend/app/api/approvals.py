@@ -321,6 +321,12 @@ def _email_decide_envelope(thread_id: str, outcome: EmailApprovalOutcome) -> dic
         return _decide_envelope(
             thread_id, "error", f"❌ I couldn't send that reply: {outcome.detail}"
         )
+    if outcome.status == "send_uncertain":
+        # Maybe-delivered — soft (complete, not a red error) but distinctly honest.
+        return _decide_envelope(
+            thread_id, "complete",
+            "⚠️ I couldn't confirm that send — it may have gone out. Worth checking your Sent folder.",
+        )
     # row_missing / payload_incomplete — the row was just resolved, so this is a
     # data problem worth surfacing rather than a silent success.
     return _decide_envelope(

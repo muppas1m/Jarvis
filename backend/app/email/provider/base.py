@@ -34,6 +34,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class EmailSendUncertain(Exception):
+    """A send failed in a way where we CANNOT be sure the message wasn't already
+    delivered — a read-timeout / connection drop after the request reached the
+    provider, or a 5xx (the request may have been processed before the error).
+    With no idempotency key, this is the honest "maybe-delivered" signal: the
+    adapter raises it (instead of the raw error) so the failure surfaces to the
+    master as "couldn't confirm — check your Sent folder", NOT a flat "couldn't
+    send". A definite failure (4xx — never reached the send handler) raises its
+    own error type and reads as a clean failure."""
+
+
 @dataclass(frozen=True)
 class InboundMessage:
     """A normalized inbound email. Identifiers are OPAQUE — pass them back to the
