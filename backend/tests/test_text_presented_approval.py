@@ -78,6 +78,19 @@ async def test_judge_stale_card_returns_none(monkeypatch):
     assert await runner._judge_presented("uuid-1", "send it") is None  # → text falls through
 
 
+async def test_judge_FAILS_OPEN_to_unrelated_never_approve(monkeypatch):
+    """A DB/LLM judge failure must NOT error the turn and must NEVER read as
+    approve — it fails open to 'unrelated' (text falls through, voice nudges)."""
+    async def boom(_id):
+        raise RuntimeError("db hiccup mid-judge")
+
+    monkeypatch.setattr(runner, "_load_approval_by_id", boom)
+    judged = await runner._judge_presented("uuid-1", "send it")
+    assert judged is not None  # didn't raise — turn won't error
+    assert judged.intent == "unrelated" and judged.actionable is False  # NEVER approve
+    assert judged.row is None  # signals the failure to the voice nudge
+
+
 # --- the text (no-audio) resolution of an actionable judgment ----------------
 def _wire_decision(monkeypatch, *, claimed=True, outcome=None):
     rec: dict = {}

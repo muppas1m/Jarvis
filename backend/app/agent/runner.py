@@ -727,7 +727,7 @@ class _PresentedJudgment:
     caller decides (text falls through to a normal turn; voice nudges)."""
 
     approval_id: str
-    row: Any
+    row: Any  # the PendingApproval row, or None when the judge failed (fail-open)
     intent: str  # approve | reject | edit | unrelated
     change: str
 
@@ -740,20 +740,36 @@ async def _judge_presented(approval_id: str, message: str) -> _PresentedJudgment
     """Load the presented inbound card + classify the message against it via the
     SAME conservative ``resolve_decision`` (ambiguous → unrelated, NEVER approve).
     Returns None if the card is stale / gone / not an inbound-email approval — the
-    caller decides what that means for its modality (Part C)."""
+    caller decides what that means for its modality (Part C).
+
+    FAILS OPEN: the load is a DB call and resolve_decision is an LLM call, either
+    of which can raise. The guard lives HERE (not at each caller) because this is
+    the ONE place the judgment happens — guarding once means neither the text nor
+    the voice caller can forget, and the load-bearing invariant ("an errored or
+    ambiguous judge is NEVER a decision that sends") is enforced in a single
+    auditable spot. A failure returns the ``unrelated`` classification (NOT
+    actionable, NOT ``None``): both callers already map ``unrelated`` to their
+    safe path — text falls through to a normal turn (the question still gets
+    answered), voice nudges. ``row=None`` signals the failure to the voice nudge."""
     from app.email.approval_handler import is_email_approval
 
-    row = await _load_approval_by_id(approval_id)
-    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
-        return None
-    payload = row.payload or {}
-    tool_args = {
-        "to": payload.get("sender", ""),
-        "subject": payload.get("subject", ""),
-        "body": payload.get("draft", ""),
-    }
-    res = await resolve_decision(row.action_type, tool_args, row.description, message)
-    return _PresentedJudgment(approval_id=approval_id, row=row, intent=res.intent, change=res.change)
+    try:
+        row = await _load_approval_by_id(approval_id)
+        if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+            return None
+        payload = row.payload or {}
+        tool_args = {
+            "to": payload.get("sender", ""),
+            "subject": payload.get("subject", ""),
+            "body": payload.get("draft", ""),
+        }
+        res = await resolve_decision(row.action_type, tool_args, row.description, message)
+        return _PresentedJudgment(
+            approval_id=approval_id, row=row, intent=res.intent, change=res.change
+        )
+    except Exception as exc:  # noqa: BLE001 — fail OPEN, never error the turn / approve
+        logger.warning("judge_presented_failed_open", approval_id=approval_id, error=str(exc))
+        return _PresentedJudgment(approval_id=approval_id, row=None, intent="unrelated", change="")
 
 
 def _email_outcome_speech(outcome: Any) -> str:
@@ -803,13 +819,15 @@ async def _resolve_presented_approval_voice(
             yield ev
         return
 
-    # Unrelated / ambient → leave the card pending and nudge (voice divergence).
+    # Unrelated / ambient — or a failed-open judge (row=None) — → leave the card
+    # pending and nudge (voice divergence). NEVER sends.
     nudge = f"I still have that reply drafted, {h}. Shall I send it, or discard it?"
     ev = await _speak_text(nudge)
     if ev:
         yield ev
     yield {"type": "done", "content": _terminal_payload(
-        {"thread_id": judged.row.thread_id, "status": "complete", "response": nudge}
+        {"thread_id": (judged.row.thread_id if judged.row else ""),
+         "status": "complete", "response": nudge}
     )}
 
 

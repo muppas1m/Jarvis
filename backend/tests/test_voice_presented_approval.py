@@ -140,6 +140,22 @@ async def test_missing_row_acknowledges_and_ends(monkeypatch):
     assert events[-1]["type"] == "done"
 
 
+async def test_voice_judge_fails_open_nudges_no_crash(monkeypatch):
+    """A judge failure (DB raise) must fail open: voice nudges, never sends, and
+    the row=None case doesn't crash the nudge path."""
+    rec = _wire(monkeypatch, row=_Row(), intent="approve")
+
+    async def boom(_id):
+        raise RuntimeError("db hiccup")
+
+    monkeypatch.setattr(runner, "_load_approval_by_id", boom)  # judge fails open
+    events = await _collect(runner._resolve_presented_approval_voice("uuid-1", "send it"))
+    assert "dispatch" not in rec  # NEVER sends on a failed-open judge
+    assert _resolved_status(events) is None  # card stays pending (nudge, no flip)
+    assert any(e["type"] == "audio" for e in events)  # nudged
+    assert events[-1]["type"] == "done"
+
+
 async def test_voice_approve_lost_claim_does_not_double_send(monkeypatch):
     """B1: a button-decide already claimed + sent this card; the voice approve
     that follows must NOT send again (claim returns None)."""
