@@ -45,10 +45,6 @@ class OutlookProvider(EmailProvider):
         # → map to InboundMessage (body.content stripped to plain text).
         raise NotImplementedError(_TODO)
 
-    async def search(self, query: str, max_results: int = 20) -> list[InboundMessage]:
-        # Graph: GET /me/messages?$search="{query}"&$top={max_results}
-        raise NotImplementedError(_TODO)
-
     async def list_recent_message_ids(self, cursor: str | None = None) -> list[str]:
         # Graph: GET /me/mailFolders/inbox/messages?$select=id
         #   &$orderby=receivedDateTime desc&$top=N  (cursor = the @odata.deltaLink)

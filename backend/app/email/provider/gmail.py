@@ -188,21 +188,6 @@ class GmailProvider(EmailProvider):
         )
         return self._to_inbound(full)
 
-    async def search(self, query: str, max_results: int = 20) -> list[InboundMessage]:
-        listing = await self._blocking(
-            lambda: self._service().users().messages().list(
-                userId="me", q=query, maxResults=max_results
-            ).execute()
-        )
-        ids = [m["id"] for m in listing.get("messages", [])]
-        out: list[InboundMessage] = []
-        for mid in ids:
-            try:
-                out.append(await self.fetch_message(mid))
-            except Exception as exc:  # noqa: BLE001 — skip a message that vanished mid-search
-                logger.warning("gmail_search_fetch_failed", message_id=mid, error=str(exc))
-        return out
-
     # --- receive / watch ---------------------------------------------------
     async def list_recent_message_ids(self, cursor: str | None = None) -> list[str]:
         """Recent INBOX message ids (bounded). `cursor` (historyId) is accepted

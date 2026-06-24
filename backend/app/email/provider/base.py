@@ -81,8 +81,10 @@ class SendResult:
 
 class EmailProvider(ABC):
     """The seam every Jarvis email layer calls. One adapter per provider,
-    selected by config. Methods cover the four surfaces Jarvis uses: send (with
-    threading), header/message fetch, mailbox search, and the receive/watch seam.
+    selected by config. Methods cover the surfaces Jarvis actually uses: send
+    (with threading), header/message fetch, and the receive/watch seam. (A live
+    mailbox ``search`` was cut — recall is DB-backed, ``email_history_search``;
+    no layer queried the provider, so the interface stays honest to its callers.)
 
     Adapters are constructed once and cached by ``get_email_provider``; they must
     be safe to reuse across requests/loops (build a fresh underlying client per
@@ -112,12 +114,6 @@ class EmailProvider(ABC):
         ``InboundMessage`` (headers + plain-text body). Gmail: messages.get
         format=full; Graph: GET /messages/{id}."""
 
-    @abstractmethod
-    async def search(self, query: str, max_results: int = 20) -> list[InboundMessage]:
-        """Search the live mailbox (NOT Jarvis's DB record — that's
-        email_history_search). Gmail: messages.list q=…; Graph:
-        GET /messages?$search=…."""
-
     # --- receive / watch seam ---------------------------------------------
     @abstractmethod
     async def list_recent_message_ids(self, cursor: str | None = None) -> list[str]:
@@ -143,7 +139,14 @@ class EmailProvider(ABC):
     @abstractmethod
     async def stop_watch(self) -> None:
         """Tear down the push subscription. Gmail: users.stop; Graph: DELETE
-        /subscriptions/{id}."""
+        /subscriptions/{id}.
+
+        KEPT deliberately though it has no caller yet: it's the lifecycle pair of
+        ``setup_watch`` (which IS used by the renew scheduler). Trigger to wire a
+        caller — a "disconnect / switch email provider" flow, which multi-provider
+        makes a concrete near-term need (tear down the old provider's watch before
+        registering the new one). Cutting it would leave the watch lifecycle
+        half-defined; that asymmetry is the cost a 2-line method doesn't justify."""
 
     @abstractmethod
     def parse_push(self, push_payload: dict[str, Any]) -> str | None:
