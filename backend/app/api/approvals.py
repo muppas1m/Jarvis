@@ -23,8 +23,8 @@ carries status="interrupted" with the new approval_id and the dashboard
 loops back to present the next decision.
 """
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
@@ -33,6 +33,11 @@ from sqlalchemy import select
 from app.agent.runner import resume_turn
 from app.db.engine import async_session
 from app.db.models import PendingApproval
+from app.email.gmail_approval_handler import (
+    GmailApprovalOutcome,
+    dispatch_gmail_approval,
+    is_gmail_approval,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -85,7 +90,7 @@ async def resolve_approval(
             return approval.thread_id
 
         approval.status = "approved" if action == "approve" else "rejected"
-        approval.resolved_at = datetime.now(timezone.utc)
+        approval.resolved_at = datetime.now(UTC)
         approval.resolved_via = resolved_via
         await session.commit()
         logger.info(
@@ -146,7 +151,7 @@ class PendingApprovalView(BaseModel):
 
 class DecideRequest(BaseModel):
     approved: bool
-    reason: Optional[str] = Field(
+    reason: str | None = Field(
         default=None,
         max_length=500,
         description="Optional rejection reason; surfaced in the audit trail.",
@@ -163,7 +168,7 @@ async def list_pending_approvals() -> list[PendingApprovalView]:
     3 Celery job sweeps them (and updates status='expired' so audit
     queries still see the trail). Single-master Phase 1 has no per-user
     filter — every pending approval belongs to the master."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     async with async_session() as session:
         result = await session.execute(
             select(PendingApproval)
@@ -192,11 +197,18 @@ async def decide_approval(
     body: DecideRequest,
     approval_id: str = Path(..., description="PendingApproval row UUID"),
 ) -> dict[str, Any]:
-    """Record the master's decision, then resume the paused graph.
+    """Record the master's decision, then resolve it — by origin.
+
+    A conversation approval (web:/telegram:) is a real LangGraph interrupt →
+    resume the paused graph. A channel-origin approval (gmail:<msg_id>) has no
+    graph to resume → dispatch the action directly (send the drafted reply). The
+    dashboard previously called resume_turn unconditionally, which fails for a
+    gmail: thread (no checkpoint) — the same origin-dispatch the Telegram button
+    already does, now shared via gmail_approval_handler.
 
     Returns the same TurnEnvelope shape /api/chat returns. status="complete"
-    means the resumed chain finished cleanly. status="interrupted" means
-    the chain hit ANOTHER interrupt() — the response carries the new
+    means the chain finished cleanly (or the reply sent). status="interrupted"
+    means a resumed chain hit ANOTHER interrupt() — the response carries the new
     approval payload and the dashboard renders the next decision UI."""
     action = "approve" if body.approved else "reject"
     thread_id = await resolve_approval(
@@ -218,4 +230,37 @@ async def decide_approval(
     if not body.approved and body.reason:
         decision["reason"] = body.reason
 
+    if is_gmail_approval(thread_id):
+        outcome = await dispatch_gmail_approval(thread_id, decision)
+        return _gmail_decide_envelope(thread_id, outcome)
+
     return await resume_turn(thread_id=thread_id, decision=decision)
+
+
+def _gmail_decide_envelope(thread_id: str, outcome: GmailApprovalOutcome) -> dict[str, Any]:
+    """Render a gmail-approval outcome into the minimal TurnEnvelope fields the
+    dashboard's decide handler reads (status + response; no chained interrupt).
+    Distinct wording from the Telegram alert by design — same resolution core,
+    per-transport presentation."""
+    if outcome.status == "sent":
+        return _decide_envelope(thread_id, "complete", f"✅ Reply sent to {outcome.recipient}.")
+    if outcome.status == "rejected":
+        return _decide_envelope(thread_id, "complete", "Discarded — I left the email in your inbox.")
+    if outcome.status == "send_failed":
+        return _decide_envelope(
+            thread_id, "error", f"❌ I couldn't send that reply: {outcome.detail}"
+        )
+    # row_missing / payload_incomplete — the row was just resolved, so this is a
+    # data problem worth surfacing rather than a silent success.
+    return _decide_envelope(
+        thread_id, "error", "❌ That reply couldn't be dispatched — its stored draft data is incomplete."
+    )
+
+
+def _decide_envelope(thread_id: str, status_: str, response: str) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "status": status_,
+        "response": response,
+        "interrupt": None,
+    }

@@ -41,6 +41,19 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# The thread_id prefix every Gmail-originated approval carries (minted by
+# gmail_pubsub._queue_email_approval). One source of truth — the router's
+# dispatch dict, the dashboard decide endpoint, and the voice resolver all key
+# off this rather than re-hardcoding the literal.
+GMAIL_THREAD_PREFIX = "gmail:"
+
+
+def is_gmail_approval(thread_id: str) -> bool:
+    """True if this approval is a Gmail-originated one (resolved by sending, not
+    by resuming a graph). Used by every transport to pick the dispatch path."""
+    return thread_id.startswith(GMAIL_THREAD_PREFIX)
+
+
 OutcomeStatus = Literal[
     "sent", "rejected", "row_missing", "payload_incomplete", "send_failed"
 ]
