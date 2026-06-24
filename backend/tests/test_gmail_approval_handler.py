@@ -6,6 +6,15 @@ path depends on) and the router's prefix-dispatch (gmail: → handler, else
 resume). The wording assertions are the regression guard for failure axis (a):
 the working Telegram approve path must stay byte-identical.
 """
+# Force-import gmail_send NOW, at collection time, BEFORE any test patches
+# `app.db.engine.async_session`. gmail_send.py binds `async_session` at MODULE
+# scope (`from app.db.engine import async_session`); if its first import happened
+# inside a test where that name is monkeypatched to a fake, gmail_send would
+# capture the fake permanently — monkeypatch can't restore a binding it never saw
+# — and the fake would leak into a later test's REAL gmail_send (auto_sent flip
+# silently fails). Importing it unpatched here pins the real sessionmaker.
+# (Sibling of the async-state footgun the conftest rebind guards against.)
+import app.agent.tools.gmail_send  # noqa: F401
 import app.messaging.router as router_mod
 from app.email.gmail_approval_handler import (
     GmailApprovalOutcome,
