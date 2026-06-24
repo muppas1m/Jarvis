@@ -35,9 +35,6 @@ class _FakeProvider(EmailProvider):
     async def fetch_message(self, message_id: str):
         raise NotImplementedError
 
-    async def search(self, *a, **k):
-        raise NotImplementedError
-
     async def list_recent_message_ids(self, cursor=None):
         raise NotImplementedError
 
