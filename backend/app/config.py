@@ -168,6 +168,17 @@ class Settings(BaseSettings):
     # no agent/approval/safety changes. Switching providers is THIS config value.
     EMAIL_PROVIDER: str = "gmail"
 
+    # --- Email provider runtime (non-blocking + resilient) -------------------
+    # The Gmail SDK is synchronous; the adapter runs each call OFF the event loop
+    # (asyncio.to_thread) and BOUNDS it (asyncio.wait_for) so a hung round-trip
+    # can't wedge the agent — the same to_thread/wait_for idiom the reranker uses.
+    EMAIL_PROVIDER_TIMEOUT_S: float = 15.0   # per Gmail round-trip
+    # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
+    # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
+    # surfaced, never blind-retried (a read-timeout may have already delivered).
+    EMAIL_SEND_RETRIES: int = 2              # extra attempts beyond the first
+    EMAIL_SEND_RETRY_BASE_S: float = 0.5     # exponential backoff base (×2 per attempt)
+
     # --- Google (Phase 2) ----------------------------------------------------
     GOOGLE_PROJECT_ID: str = ""
     GOOGLE_CLIENT_ID: str = ""
