@@ -48,6 +48,18 @@ interface DecideEnvelope {
   interrupt?: unknown;
 }
 
+/** GET /api/approvals/inbound/next → the next inbound (email-reply) card, or null. */
+interface InboundApprovalCard {
+  approval_id: string;
+  thread_id: string;
+  action_type: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  description?: string;
+  status: string;
+  created_at: string;
+}
+
 function normalizeStatus(s?: string): ApprovalStatus {
   if (s === "approved") return "approved";
   if (s === "rejected") return "rejected";
@@ -120,6 +132,21 @@ export function useJarvis() {
   const [context, setContext] = useState<ContextMeter | null>(null);
   // approval_ids currently being decided — guards against a double-submit.
   const decidingRef = useRef<Set<string>>(new Set());
+
+  // Mirrors of render state read inside the inbound-approval poll interval
+  // (a setInterval closure would otherwise see stale values).
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const voiceEnabledRef = useRef(voiceEnabled);
+  voiceEnabledRef.current = voiceEnabled;
+  const agentStateRef = useRef<AgentState>(agentState);
+  agentStateRef.current = agentState;
+  // Poll only AFTER the initial history hydrate, else a surfaced card would make
+  // the hydrate (which only fills an EMPTY stream) bail and drop the history.
+  const hydratedRef = useRef(false);
+  // Count of inbound cards surfaced this session — drives the lead-in wording
+  // ("I've drafted…" first, then "Here's another…").
+  const inboundSeqRef = useRef(0);
 
   const threadRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -219,6 +246,32 @@ export function useJarvis() {
     [ensureAudio, scheduleChunk],
   );
 
+  // Play Jarvis reading a freshly-surfaced inbound card aloud, then settle to
+  // idle like a turn end — so the voice loop opens a listening window for the
+  // master's spoken decision (no need to re-say "hey jarvis"). Best-effort:
+  // announce failure / no audio just leaves the card for button or voice.
+  const announceInbound = useCallback(
+    async (approvalId: string, first: boolean) => {
+      try {
+        const res = await fetch("/api/voice/announce-approval", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approval_id: approvalId, first }),
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { text?: string; audio?: string };
+        if (!data.audio) return;
+        const ctx = ensureAudio();
+        nextStartRef.current = ctx.currentTime;
+        streamDoneRef.current = true; // no token stream; settle when audio ends
+        void enqueueAudio(data.audio, data.text ?? "");
+      } catch {
+        /* announce is best-effort */
+      }
+    },
+    [ensureAudio, enqueueAudio],
+  );
+
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -271,11 +324,27 @@ export function useJarvis() {
       abortRef.current = ac;
       let acc = "";
 
+      // If a decision card is pending and this is a VOICE turn, tag it so the
+      // backend judges this utterance against THAT card (it resolves a
+      // cross-thread inbound card; an in-thread conversation interrupt is
+      // detected server-side and takes priority, so this is ignored there).
+      const presented = voice
+        ? itemsRef.current.find(
+            (x): x is Extract<StreamItem, { type: "decision" }> =>
+              x.type === "decision" && x.approval.status === "pending",
+          )
+        : undefined;
+      const presentedId = presented?.approval.approval_id;
+
       try {
         const res = await fetch(voice ? "/api/voice/stream" : "/api/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: trimmed, thread_id: threadRef.current }),
+          body: JSON.stringify({
+            message: trimmed,
+            thread_id: threadRef.current,
+            ...(presentedId ? { presented_approval_id: presentedId } : {}),
+          }),
           signal: ac.signal,
         });
         if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
@@ -530,12 +599,77 @@ export function useJarvis() {
         if (hydrated.length) setItems((prev) => (prev.length ? prev : hydrated));
       } catch {
         /* unreachable backend → start fresh */
+      } finally {
+        if (!cancelled) hydratedRef.current = true; // inbound poll may start now
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Surface INBOUND-email approvals (auto-drafted replies on their own gmail:
+  // threads, invisible to the conversation history) as in-chat cards — one at a
+  // time. Poll the backend's "next inbound" primitive; it returns at most one
+  // pending card, and we only present it when the stream is idle with no pending
+  // card already shown (so we never flood, and never collide with a conversation
+  // approval). Resolved cards stay in the timeline; the next surfaces on the
+  // following poll. With voice on, Jarvis reads the card and the master resolves
+  // it by voice (presented_approval_id, below) or by the card's buttons.
+  const surfaceInbound = useCallback(async () => {
+    if (!hydratedRef.current) return;
+    // Don't interrupt an in-flight turn, and enforce one-at-a-time.
+    if (agentStateRef.current !== "idle") return;
+    if (itemsRef.current.some((x) => x.type === "decision" && x.approval.status === "pending"))
+      return;
+    let data: { approval?: InboundApprovalCard | null };
+    try {
+      const res = await fetch("/api/approvals/inbound/next");
+      if (!res.ok) return;
+      data = (await res.json()) as { approval?: InboundApprovalCard | null };
+    } catch {
+      return; // backend unreachable → try again next tick
+    }
+    const a = data.approval;
+    if (!a) return;
+
+    const first = inboundSeqRef.current === 0;
+    let surfaced = false;
+    setItems((m) => {
+      // Re-check under the latest state: a pending card or this exact card may
+      // have appeared since the fetch resolved.
+      if (m.some((x) => x.type === "decision" && x.approval.status === "pending")) return m;
+      if (m.some((x) => x.type === "decision" && x.approval.approval_id === a.approval_id))
+        return m;
+      surfaced = true;
+      const leadIn = first
+        ? "I've drafted a reply for your approval, Sir."
+        : "Here's another I've drafted, Sir…";
+      return [
+        ...m,
+        { type: "message", id: crypto.randomUUID(), role: "assistant", content: leadIn },
+        {
+          type: "decision",
+          id: a.approval_id,
+          approval: {
+            approval_id: a.approval_id,
+            tool_name: a.tool_name,
+            tool_args: a.tool_args,
+            description: a.description,
+            status: "pending",
+          },
+        },
+      ];
+    });
+    if (!surfaced) return;
+    inboundSeqRef.current += 1;
+    if (voiceEnabledRef.current) void announceInbound(a.approval_id, first);
+  }, [announceInbound]);
+
+  useEffect(() => {
+    const t = setInterval(() => void surfaceInbound(), 8000);
+    return () => clearInterval(t);
+  }, [surfaceInbound]);
 
   return {
     items,
