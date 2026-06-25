@@ -19,7 +19,7 @@ import { UptimeWidget } from "@/components/widgets/UptimeWidget";
 import { WeatherWidget } from "@/components/widgets/WeatherWidget";
 import { clearBootPending } from "@/lib/boot";
 import { DASHBOARD_LAYOUT as L, GRID_COLS, GRID_ROWS } from "@/lib/dashboardLayout";
-import type { Activity, GroupedHealth, SystemStats, Weather } from "@/lib/types";
+import type { Activity, BriefingLatest, GroupedHealth, SystemStats, Weather } from "@/lib/types";
 import { usePolledJSON } from "@/lib/usePolledJSON";
 import { useVoiceLoop } from "@/lib/useVoiceLoop";
 
@@ -76,6 +76,10 @@ export default function ChatPage() {
   // Weather changes slowly (20 min); the activity feed is near-live (20 s).
   const weather = usePolledJSON<Weather>("/api/weather", 1_200_000);
   const activity = usePolledJSON<Activity>("/api/activity", 20_000);
+  // The proactive morning brief is Celery-driven (~once/day) → poll slowly. It
+  // surfaces as a card at the top of the conversation (persist-then-poll, survives
+  // reload). null when none is within the freshness window.
+  const briefing = usePolledJSON<BriefingLatest>("/api/briefing/latest", 60_000);
 
   return (
     <main className="relative isolate flex h-screen flex-col overflow-hidden p-3">
@@ -129,6 +133,7 @@ export default function ChatPage() {
         <WidgetCard spec={L.chat}>
           <ChatPanel
             items={items}
+            brief={briefing.data?.brief ?? null}
             ctx={context}
             send={send}
             decideApproval={decideApproval}

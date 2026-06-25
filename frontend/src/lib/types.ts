@@ -152,3 +152,32 @@ export interface Activity {
   summary: ActivitySummaryRow[];
   feed: ActivityItem[];
 }
+
+/** Proactive morning brief surfaced in the HUD (persist-then-poll) — mirrors
+ *  backend app.api.briefing. The SAME structured digest the 7am Telegram push
+ *  sends. title/source/preview are UNTRUSTED email content → render as escaped
+ *  React text (never markdown). `brief` is null when none is within the freshness
+ *  window. */
+export interface BriefItem {
+  title: string;
+  source: string;
+  preview: string;
+  urgency: string; // immediate | today | this_week | none
+  kind: string; // email | news
+  occurred_at: string; // ISO-8601
+}
+export interface BriefDay {
+  day: string; // local-day label (ISO date)
+  items: BriefItem[];
+}
+export interface Brief {
+  created_at: string; // ISO-8601
+  empty: boolean;
+  total: number;
+  timezone: string;
+  error: boolean;
+  days: BriefDay[];
+}
+export interface BriefingLatest {
+  brief: Brief | null;
+}

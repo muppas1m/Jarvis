@@ -2,15 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { ContextMeter, StreamItem } from "@/lib/types";
+import type { Brief, ContextMeter, StreamItem } from "@/lib/types";
 
 import { ApprovalCard } from "./ApprovalCard";
+import { BriefingCard } from "./BriefingCard";
 import { ContextMeterBar } from "./ContextMeterBar";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { UploadChip } from "./UploadChip";
 
 interface ChatPanelProps {
   items: StreamItem[];
+  /** The proactive morning brief, pinned at the top of the conversation
+   *  (persist-then-poll). null when none is within the freshness window. */
+  brief: Brief | null;
   /** Context-meter snapshot (4.B.3) — re-homed to the top of the chat (4.C.2). */
   ctx: ContextMeter | null;
   /** Turn dispatch (typed input). */
@@ -40,6 +44,7 @@ interface ChatPanelProps {
  */
 export function ChatPanel({
   items,
+  brief,
   ctx,
   send,
   decideApproval,
@@ -106,7 +111,11 @@ export function ChatPanel({
       <ContextMeterBar ctx={ctx} />
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        {items.length === 0 && (
+        {/* The proactive morning brief sits at the top of the conversation (the
+            master's "briefing → chat conversation" placement). Persist-then-poll,
+            so it re-appears on reload until it ages out of the freshness window. */}
+        {brief && <BriefingCard brief={brief} />}
+        {items.length === 0 && !brief && (
           <p className="mt-8 text-center text-sm text-ink-dim">
             At your service, Sir. How may I help?
           </p>
