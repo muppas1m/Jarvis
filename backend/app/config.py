@@ -52,16 +52,18 @@ class Settings(BaseSettings):
     # fact → 0 skips/48h while identical facts piled up). Threshold biased HIGH
     # because the cost is asymmetric — wrongly skipping a DISTINCT/updated fact
     # loses information, wrongly keeping a paraphrase is only minor bloat.
-    # Re-measured 2026-06-25 on real bge-m3 cosines:
-    #   exact / near-exact re-write (SHOULD skip):  0.97 – 1.0  (e.g. "allergic to shellfish" ×2 = 0.99)
-    #   same fact, VARIED re-phrasing (cross-turn):  0.60 – 0.90  ← 0.97 does NOT skip these
+    # Re-measured 2026-06-25 on real bge-m3 cosines. "Same fact, restated" spans a
+    # wide band by phrasing distance — only its >=0.97 tail is skipped:
+    #   exact / near-exact re-write (SKIPPED):       0.97 – 1.0   (e.g. "allergic to shellfish" ×2 = 0.99)
+    #   same fact, close paraphrase (NOT skipped):   0.89 – 0.97  (e.g. "shellfish allergy" 0.97; teetotaller variants 0.89–0.95)
+    #   same fact, varied re-phrasing (NOT skipped): 0.60 – 0.89  (e.g. "does not drink" vs "is teetotal")
     #   contradiction ("morning" vs "afternoon"):    up to 0.962  ← must NOT skip
     #   negation ("allergic" vs "not allergic"):     <= 0.878      ← must NOT skip
     #   distinct facts (shellfish vs peanuts):       <= 0.844
-    # The varied-rephrasing and contradiction bands OVERLAP (a 0.962 contradiction
-    # scores higher than a 0.90 re-phrasing) — cosine cannot separate "restate" from
-    # "update", so NO threshold de-dups every restatement without risking a
-    # contradiction. So this gate is a NARROW safety-net, not the bloat fix: the
+    # The close-paraphrase and contradiction bands OVERLAP (a 0.962 contradiction
+    # scores higher than a 0.95 same-fact paraphrase) — cosine cannot separate
+    # "restate" from "update", so NO threshold de-dups every restatement without
+    # risking a contradiction. So this gate is a NARROW safety-net, not the bloat fix: the
     # bloat fix is extraction precision (the owned extractor cut ~6 -> ~0.5
     # facts/turn). 0.97 is the safe floor — above the 0.962 contradiction ceiling
     # (never suppresses an update); it skips only exact/near-exact re-writes (the
