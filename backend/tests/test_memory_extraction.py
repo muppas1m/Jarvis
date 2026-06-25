@@ -47,6 +47,17 @@ REPLAY_SET = [
      "I'd recommend the Italian place on Main St, Sir — great pasta.", False),
     ("pleasantry_nontrivial", "Haha that's a good one, tell me another.",
      "Glad you enjoyed it, Sir.", False),
+    # The two archetypes that actually DOMINATED the wiped 90%-junk corpus —
+    # speech-recognition stress passages + fictional multi-entity ramblings. Neither
+    # carries a durable USER fact; the gate must prove precision on THESE, not just
+    # the clean turns.
+    ("speech_stress", "Interpret this and tell me the result of 83 minus 79: sixty "
+     "slippery seals silently slither past six thistles thoroughly thwarting the third.",
+     "The passage is noted, Sir; 83 minus 79 is 4.", False),
+    ("fictional_ramble", "My neighbor's nephew, who studied entrepreneurship in "
+     "Edinburgh, met a Colonel at a pharmaceutical conference who was fascinated by "
+     "the Aurora Borealis and the etymology of obscure words.",
+     "Quite a story, Sir.", False),
 ]
 
 

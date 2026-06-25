@@ -136,13 +136,17 @@ class Mem0Client:
         Fact-level dedup (the granularity fix): we search the store for THIS fact
         and skip the write if its nearest neighbour scores >= MEM0_DEDUP_THRESHOLD.
         The old path dedup-searched the whole TURN blob against single-fact rows —
-        a granularity mismatch that never fired (0 skips/48h observed) and let
-        identical facts pile up. Searching a fact against facts makes the threshold
-        meaningful. 0.97 sits ABOVE the measured contradiction/negation ceiling
-        (~0.962, re-measured 2026-06-25), so an updated/contradicting fact is never
-        wrongly suppressed; it catches the dominant bloat driver — identical
-        re-extraction (~1.0). Softer-paraphrase merging + true supersession is the
-        deferred consolidation engine's job (it needs truth-guards, not a cosine
+        a granularity mismatch that never fired (0 skips/48h observed). Searching a
+        fact against facts makes the threshold meaningful, but it is a NARROW
+        safety-net, not the bloat fix — the bloat fix is extraction precision (the
+        owned extractor cut ~6 -> ~0.5 facts/turn). 0.97 sits ABOVE the measured
+        contradiction/negation ceiling (~0.962, re-measured 2026-06-25) so an
+        updated/contradicting fact is never wrongly suppressed; in exchange it
+        only skips EXACT / near-exact re-writes — measured: the same fact
+        re-extracted to a near-identical string (e.g. "User is allergic to
+        shellfish" -> ~0.99) IS skipped, but a varied re-phrasing of the SAME fact
+        lands ~0.6-0.9 and is NOT (that cross-turn paraphrase de-duplication is the
+        deferred consolidation engine's job — it needs truth-guards, not a cosine
         threshold). Best-effort: a dedup-check failure never blocks the write."""
         if dedup and settings.MEM0_DEDUP_ENABLED:
             try:

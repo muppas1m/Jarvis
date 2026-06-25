@@ -53,18 +53,22 @@ class Settings(BaseSettings):
     # because the cost is asymmetric — wrongly skipping a DISTINCT/updated fact
     # loses information, wrongly keeping a paraphrase is only minor bloat.
     # Re-measured 2026-06-25 on real bge-m3 cosines:
-    #   true paraphrase (SHOULD skip):           0.89 – 0.97
-    #   contradiction ("morning" vs "afternoon"): up to 0.962  ← must NOT skip
-    #   negation ("allergic" vs "not allergic"):  <= 0.878      ← must NOT skip
-    #   distinct facts (shellfish vs peanuts):    <= 0.844
-    # The paraphrase and contradiction bands OVERLAP (a 0.962 contradiction scores
-    # higher than a 0.947 paraphrase) — cosine cannot separate "restate" from
-    # "update", so NO threshold catches every paraphrase without risking a
-    # contradiction. 0.97 is the safe floor: above the 0.962 contradiction ceiling
-    # (never suppresses an update) while still catching identical re-extraction —
-    # the dominant bloat driver. Softer-paraphrase merging is the deferred
-    # consolidation engine's job (truth-guards, not a threshold). Trivial-turn
-    # gating (manager._is_trivial_turn) still runs upstream.
+    #   exact / near-exact re-write (SHOULD skip):  0.97 – 1.0  (e.g. "allergic to shellfish" ×2 = 0.99)
+    #   same fact, VARIED re-phrasing (cross-turn):  0.60 – 0.90  ← 0.97 does NOT skip these
+    #   contradiction ("morning" vs "afternoon"):    up to 0.962  ← must NOT skip
+    #   negation ("allergic" vs "not allergic"):     <= 0.878      ← must NOT skip
+    #   distinct facts (shellfish vs peanuts):       <= 0.844
+    # The varied-rephrasing and contradiction bands OVERLAP (a 0.962 contradiction
+    # scores higher than a 0.90 re-phrasing) — cosine cannot separate "restate" from
+    # "update", so NO threshold de-dups every restatement without risking a
+    # contradiction. So this gate is a NARROW safety-net, not the bloat fix: the
+    # bloat fix is extraction precision (the owned extractor cut ~6 -> ~0.5
+    # facts/turn). 0.97 is the safe floor — above the 0.962 contradiction ceiling
+    # (never suppresses an update); it skips only exact/near-exact re-writes (the
+    # observed teetotaller pile-up at 0.89–0.95 would NOT be caught here — that
+    # cross-turn paraphrase merging is the deferred consolidation engine's job,
+    # truth-guards not a threshold). Trivial-turn gating (manager._is_trivial_turn)
+    # still runs upstream.
     MEM0_DEDUP_ENABLED: bool = True
     MEM0_DEDUP_THRESHOLD: float = 0.97
 
