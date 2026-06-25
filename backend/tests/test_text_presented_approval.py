@@ -7,6 +7,9 @@ marks only approve/reject/edit as ACTIONABLE; an `unrelated` intent is NOT
 actionable, so stream_turn falls THROUGH to a normal turn (card stays pending).
 The gate stays closed: a normal message can't classify as approve → can't send.
 """
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 import app.agent.runner as runner
 from app.agent.decision_resolver import DecisionResolution
 from app.email.approval_handler import EmailApprovalOutcome
@@ -46,13 +49,37 @@ async def test_judge_marks_card_related_actionable(monkeypatch):
 
     monkeypatch.setattr(runner, "_load_approval_by_id", fake_load)
 
-    for intent in ("approve", "reject", "edit"):
+    for intent in ("approve", "reject", "edit", "skip", "show_others"):
         async def fake_decide(*a, _i=intent, **k):
-            return DecisionResolution(intent=_i, change="")
+            return DecisionResolution(intent=_i, change="x" if _i == "edit" else "")
 
         monkeypatch.setattr(runner, "resolve_decision", fake_decide)
-        judged = await runner._judge_presented("uuid-1", "send it")
+        judged = await runner._judge_presented("uuid-1", "go")
         assert judged is not None and judged.actionable, f"{intent} must be actionable"
+
+
+async def test_judge_now_handles_tool_card_not_just_email(monkeypatch):
+    """Parity: a chat-queued TOOL card (non-email thread) is now JUDGED (was None),
+    so voice/text approve/reject/skip work for tool cards too. Its tool_args come
+    from the row payload's real tool args, not the email-draft shape."""
+    row = _Row()
+    row.action_type, row.thread_id = "calendar_create", "web:master"
+    row.payload = {"tool_name": "calendar_create", "tool_args": {"summary": "Standup"}}
+    seen: dict = {}
+
+    async def fake_load(_id):
+        return row
+
+    async def fake_decide(tool_name, tool_args, description, message):
+        seen["args"] = (tool_name, tool_args)
+        return DecisionResolution(intent="approve", change="")
+
+    monkeypatch.setattr(runner, "_load_approval_by_id", fake_load)
+    monkeypatch.setattr(runner, "resolve_decision", fake_decide)
+    judged = await runner._judge_presented("uuid-1", "yes")
+    assert judged is not None and judged.actionable  # tool card no longer falls through
+    assert judged.is_email_card is False  # and it's recognised as a tool, not email
+    assert seen["args"] == ("calendar_create", {"summary": "Standup"})  # REAL tool args judged
 
 
 async def test_judge_marks_unrelated_NOT_actionable_so_text_falls_through(monkeypatch):
@@ -170,12 +197,49 @@ async def test_text_approve_lost_claim_no_double_send(monkeypatch):
 
 
 async def test_text_edit_without_context_nudges(monkeypatch):
-    # No message/conversation_thread_id (e.g. a caller that can't re-draft) → the
-    # SAFE floor: a nudge, never a claim/send. (The voice path lands here too.)
+    # No message/conversation_thread_id (a caller that can't re-draft) → the SAFE
+    # floor: a nudge, never a claim/send. (With message+thread, edit re-drafts — and
+    # voice now lands in the re-draft path too, see the voice suite.)
     rec = _wire_decision(monkeypatch)
     events = await _collect(runner._resolve_presented_decision(_judgment("edit"), speak=False))
     assert "call" not in rec and _resolved(events) is None
     assert events[-1]["type"] == "done"
+
+
+async def test_text_skip_emits_nav_no_dispatch(monkeypatch):
+    """Text SKIP emits a presented_nav {skip} the client turns into markSkipped —
+    DB-inert, never claims/sends. The done line acks + the next surfaces client-side."""
+    rec = _wire_decision(monkeypatch)
+    events = await _collect(runner._resolve_presented_decision(
+        _judgment("skip"), speak=False, conversation_thread_id="web:master"
+    ))
+    nav = [e for e in events if e["type"] == "presented_nav"]
+    assert len(nav) == 1
+    assert nav[0]["content"] == {"action": "skip", "approval_id": "uuid-1"}
+    assert nav[0]["thread_id"] == "web:master"
+    assert "call" not in rec  # never reached the dispatch gate
+    assert _resolved(events) is None  # not a resolve (no card flip)
+    assert not any(e["type"] == "audio" for e in events)  # TEXT → no audio
+    assert events[-1]["type"] == "done"
+
+
+async def test_text_show_others_summarizes_no_dispatch(monkeypatch):
+    """Text 'what else is pending?' → the queue summary in the done response; the
+    current card stays pending, nothing dispatched."""
+    rec = _wire_decision(monkeypatch)
+
+    async def fake_summary(exclude_approval_id=""):
+        rec["summary_excluded"] = exclude_approval_id
+        return "You have 2 others pending, Sir: a reply to a@x.com; a reply to b@x.com."
+
+    monkeypatch.setattr(runner, "_pending_queue_summary", fake_summary)
+    events = await _collect(runner._resolve_presented_decision(
+        _judgment("show_others"), speak=False, conversation_thread_id="web:master"
+    ))
+    assert rec["summary_excluded"] == "uuid-1"
+    assert "call" not in rec and _resolved(events) is None  # read-only, card stays
+    done = [e for e in events if e["type"] == "done"][-1]
+    assert "2 others pending" in done["content"]["response"]
 
 
 # --- edit (REVISE) — TEXT re-draft: discard-FIRST (claim-gated) + re-queue -----
@@ -262,6 +326,38 @@ async def test_text_edit_failed_redraft_leaves_no_card(monkeypatch):
     assert not any(e["type"] == "approval_required" for e in events)  # NO new card
     assert "persist" not in rec  # didn't persist a half-state
     assert events[-1]["type"] == "done"  # never errors the turn
+
+
+# --- show_others queue summary (pure formatting, DB-independent) --------------
+def _prow(rid, sender="", subject="", *, tool=None):
+    if tool:
+        return SimpleNamespace(
+            id=rid, payload={"tool_name": tool, "tool_args": {}}, action_type=tool,
+            thread_id="web:master", description="", status="pending", created_at=datetime.now(UTC))
+    return SimpleNamespace(
+        id=rid, payload={"sender": sender, "subject": subject, "draft": "b"},
+        action_type="email_reply", thread_id=f"email:gmail:{rid}", description="",
+        status="pending", created_at=datetime.now(UTC))
+
+
+def test_summarize_pending_only_the_presented_one():
+    # exclude the only pending row → the single-card corner case
+    out = runner._summarize_pending([_prow("a", "Al", "X")], "a", "Sir")
+    assert "only one pending" in out
+
+
+def test_summarize_pending_lists_others_excluding_presented():
+    rows = [_prow("a", "Alice <al@x.com>", "Budget"), _prow("b", "Bob <b@x.com>", "Lunch")]
+    out = runner._summarize_pending(rows, "a", "Sir")  # 'a' is the presented card
+    assert "one other pending" in out
+    assert "Bob <b@x.com>" in out and "Lunch" in out  # the OTHER one is described
+    assert "Alice" not in out                          # the presented one is excluded
+
+
+def test_summarize_pending_bounds_to_five_with_overflow():
+    rows = [_prow(str(i), f"s{i}@x.com", f"sub{i}") for i in range(8)]
+    out = runner._summarize_pending(rows, "none-presented", "Sir")  # all 8 are "others"
+    assert "8 others pending" in out and "and 3 more" in out
 
 
 # --- the spoken/typed outcome line (3rd transport) distinguishes the cases ----

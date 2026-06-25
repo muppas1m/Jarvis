@@ -119,14 +119,82 @@ async def test_ambient_unrelated_never_dispatches_or_resolves(monkeypatch):
     assert events[-1]["type"] == "done"
 
 
-async def test_edit_keeps_pending_with_constraint_nudge(monkeypatch):
+async def test_voice_edit_redrafts_and_requeues(monkeypatch):
+    """Voice EDIT now re-drafts (parity with text): discard-first (claim-gated),
+    re-queue a NEW card, and SPEAK a confirmation echoing the change. The re-queued
+    card is re-approved before anything sends — the safety net for a mis-heard edit."""
     rec = _wire(monkeypatch, row=_Row(), intent="edit", change="make it shorter")
-    events = await _collect(
-        runner._resolve_presented_approval_voice("uuid-1", "make it shorter")
-    )
-    assert "resolved" not in rec  # edit never claims/dispatches
-    assert _resolved_status(events) is None  # not supported this slice → stays pending
-    assert any("send or discard" in t for t in rec["spoken"])
+
+    async def fake_claim(approval_id, action, resolved_via):
+        rec["claim"] = (approval_id, action, resolved_via)
+        return "gmail:msg-1"  # won the discard claim
+
+    async def fake_revise(*, subject, sender, draft, change):
+        rec["revise"] = {"draft": draft, "change": change}
+        return "Shorter draft."
+
+    async def fake_requeue(row, revised_draft):
+        rec["requeue"] = revised_draft
+        return {"approval_id": "uuid-NEW", "tool_name": "email_reply",
+                "tool_args": {"to": "p@x.com", "subject": "Q3", "body": revised_draft},
+                "description": "Reply to 'Q3' from Priya"}
+
+    async def fake_persist(thread_id, message):
+        rec["persist"] = (thread_id, message)
+
+    monkeypatch.setattr("app.api.approvals.resolve_approval", fake_claim)
+    monkeypatch.setattr("app.email.responder.revise_draft", fake_revise)
+    monkeypatch.setattr(runner, "_requeue_revised_email", fake_requeue)
+    monkeypatch.setattr(runner, "_persist_edit_to_conversation", fake_persist)
+
+    events = await _collect(runner._resolve_presented_approval_voice(
+        "uuid-1", "make it shorter", conversation_thread_id="web:master"
+    ))
+    assert rec["claim"] == ("uuid-1", "discard", "web")   # discard-first, claim-gated
+    assert _resolved_status(events) == "discarded"         # old card greys
+    assert rec["revise"]["change"] == "make it shorter"    # the dictated change applied
+    assert rec["persist"] == ("web:master", "make it shorter")  # actual words persisted
+    cards = [e for e in events if e["type"] == "approval_required"]
+    assert len(cards) == 1 and cards[0]["content"]["approval_id"] == "uuid-NEW"  # ONE new card
+    assert cards[0]["content"]["tool_args"]["body"] == "Shorter draft."
+    # spoke a confirmation that ECHOES the change (mis-hear is audible)
+    assert any("make it shorter" in t for t in rec["spoken"])
+    assert "resolved" not in rec  # never claims/dispatches a SEND — re-approval does that
+
+
+async def test_voice_skip_emits_nav_and_speaks(monkeypatch):
+    """Voice SKIP signals the client (presented_nav) to grey the card + advance, and
+    speaks an ack. DB-inert — never claims/dispatches."""
+    rec = _wire(monkeypatch, row=_Row(), intent="skip")
+    events = await _collect(runner._resolve_presented_approval_voice(
+        "uuid-1", "skip this one", conversation_thread_id="web:master"
+    ))
+    nav = [e for e in events if e["type"] == "presented_nav"]
+    assert len(nav) == 1
+    assert nav[0]["content"] == {"action": "skip", "approval_id": "uuid-1"}
+    assert "resolved" not in rec  # skip never claims/sends
+    assert _resolved_status(events) is None  # not a resolve — card stays pending (greyed client-side)
+    assert any("skipped" in t.lower() for t in rec["spoken"])  # spoke an ack
+    assert events[-1]["type"] == "done"
+
+
+async def test_voice_show_others_summarizes(monkeypatch):
+    """Voice 'what else is pending?' speaks a queue summary; the current card stays."""
+    rec = _wire(monkeypatch, row=_Row(), intent="show_others")
+
+    async def fake_summary(exclude_approval_id=""):
+        rec["summary_excluded"] = exclude_approval_id
+        return "You have one other pending, Sir: a reply to bob@x.com about 'Lunch'."
+
+    monkeypatch.setattr(runner, "_pending_queue_summary", fake_summary)
+    events = await _collect(runner._resolve_presented_approval_voice(
+        "uuid-1", "what else is pending", conversation_thread_id="web:master"
+    ))
+    assert rec["summary_excluded"] == "uuid-1"  # excludes the presented card
+    assert "resolved" not in rec  # read-only — never claims/sends
+    assert _resolved_status(events) is None  # current card stays pending
+    assert any("one other pending" in t for t in rec["spoken"])
+    assert events[-1]["type"] == "done"
 
 
 async def test_stale_card_acknowledges_and_ends(monkeypatch):

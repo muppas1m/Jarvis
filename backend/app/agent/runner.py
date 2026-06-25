@@ -614,25 +614,42 @@ async def _load_approval_by_id(approval_id: str):
 
 @dataclass
 class _PresentedJudgment:
-    """The classification of a typed/spoken message against a PRESENTED inbound
-    card. ``actionable`` (approve/reject/edit) means the message is ABOUT this
-    card → resolve or nudge. ``unrelated`` means it is NOT about the card → the
+    """The classification of a typed/spoken message against a PRESENTED card.
+    ``actionable`` (anything but ``unrelated``) means the message is ABOUT this card
+    or the queue → resolve / navigate / nudge. ``unrelated`` means it is NOT → the
     caller decides (text falls through to a normal turn; voice nudges)."""
 
     approval_id: str
     row: Any  # the PendingApproval row, or None when the judge failed (fail-open)
-    intent: str  # approve | reject | edit | unrelated
+    intent: str  # approve | reject | edit | skip | show_others | unrelated
     change: str
 
     @property
     def actionable(self) -> bool:
-        return self.intent in ("approve", "reject", "edit")
+        # Every intent but unrelated is intercepted (approve/reject/edit resolve;
+        # skip/show_others navigate). Only unrelated falls through to a normal turn.
+        return self.intent != "unrelated"
+
+    @property
+    def is_email_card(self) -> bool:
+        """True for an inbound-email reply card (re-draftable) vs a chat-queued tool
+        card. Edit (re-draft) is email-only; approve/reject/skip/show_others are
+        kind-agnostic."""
+        from app.email.approval_handler import is_email_approval
+
+        if self.row is None:
+            return False
+        return is_email_approval(self.row.thread_id) or self.row.action_type in (
+            "email_reply", "gmail_reply",
+        )
 
 
 async def _judge_presented(approval_id: str, message: str) -> _PresentedJudgment | None:
-    """Load the presented inbound card + classify the message against it via the
-    SAME conservative ``resolve_decision`` (ambiguous → unrelated, NEVER approve).
-    Returns None if the card is stale / gone / not an inbound-email approval — the
+    """Load the presented card + classify the message against it via the SAME
+    conservative ``resolve_decision`` (ambiguous → unrelated, NEVER approve). Works
+    for BOTH card kinds — an inbound-email reply (tool_args = the draft) and a chat-
+    queued tool call (tool_args = the real args) — so every action has voice/text
+    parity regardless of origin. Returns None if the card is stale / gone — the
     caller decides what that means for its modality (Part C).
 
     FAILS OPEN: the load is a DB call and resolve_decision is an LLM call, either
@@ -648,15 +665,20 @@ async def _judge_presented(approval_id: str, message: str) -> _PresentedJudgment
 
     try:
         row = await _load_approval_by_id(approval_id)
-        if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+        if row is None or row.status != "pending":
             return None
         payload = row.payload or {}
-        tool_args = {
-            "to": payload.get("sender", ""),
-            "subject": payload.get("subject", ""),
-            "body": payload.get("draft", ""),
-        }
-        res = await resolve_decision(row.action_type, tool_args, row.description, message)
+        if is_email_approval(row.thread_id) or row.action_type in ("email_reply", "gmail_reply"):
+            tool_name = row.action_type
+            tool_args = {
+                "to": payload.get("sender", ""),
+                "subject": payload.get("subject", ""),
+                "body": payload.get("draft", ""),
+            }
+        else:  # chat-queued tool card — judge against the REAL tool + args
+            tool_name = payload.get("tool_name") or row.action_type
+            tool_args = payload.get("tool_args") or {}
+        res = await resolve_decision(tool_name, tool_args, row.description, message)
         return _PresentedJudgment(
             approval_id=approval_id, row=row, intent=res.intent, change=res.change
         )
@@ -686,13 +708,67 @@ def _email_outcome_speech(outcome: Any) -> str:
     )
 
 
+def _summarize_pending(rows: list, exclude_approval_id: str, h: str) -> str:
+    """Pure: a spoken/typed summary of the OTHER pending approvals (rows minus the
+    presented card). Kind-agnostic — an email card → "a reply to <sender> about
+    <subject>"; a tool card → the tool, humanized. Bounded to 5 items + "and N more"
+    so the spoken line stays digestible; only-the-presented-one → the single-card
+    line. Pure (rows in, string out) so the formatting is testable without the DB."""
+    from app.api.approvals import _unified_card
+
+    others = [r for r in rows if str(r.id) != exclude_approval_id]
+    if not others:
+        return f"That's the only one pending, {h}."
+
+    descriptions: list[str] = []
+    for r in others[:5]:
+        card = _unified_card(r)
+        if card.kind == "email":
+            to = card.tool_args.get("to") or "someone"
+            subj = card.tool_args.get("subject")
+            descriptions.append(f"a reply to {to}" + (f" about '{subj}'" if subj else ""))
+        else:
+            descriptions.append(card.tool_name.replace("_", " "))
+    n = len(others)
+    more = f", and {n - 5} more" if n > 5 else ""
+    count = "one" if n == 1 else str(n)
+    plural = "" if n == 1 else "s"
+    return f"You have {count} other{plural} pending, {h}: {'; '.join(descriptions)}{more}."
+
+
+async def _pending_queue_summary(exclude_approval_id: str = "") -> str:
+    """The voice/text answer to "what else is pending?" — reads the pending+unexpired
+    queue (oldest-first) and formats it via the pure ``_summarize_pending``. A read
+    failure → a graceful vague line (never errors the turn)."""
+    from sqlalchemy import select
+
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+
+    h = settings.MASTER_HONORIFIC
+    try:
+        async with async_session() as session:
+            rows = list((await session.execute(
+                select(PendingApproval)
+                .where(PendingApproval.status == "pending")
+                .where(PendingApproval.expires_at > datetime.now(UTC))
+                .order_by(PendingApproval.created_at.asc())
+            )).scalars().all())
+    except Exception as exc:  # noqa: BLE001 — a read failure → a graceful, vague line
+        logger.warning("pending_queue_summary_failed", error=str(exc))
+        return f"I couldn't check the rest of the queue just now, {h}."
+    return _summarize_pending(rows, exclude_approval_id, h)
+
+
 async def _resolve_presented_approval_voice(
-    approval_id: str, transcript: str
+    approval_id: str, transcript: str, conversation_thread_id: str = ""
 ) -> AsyncIterator[dict[str, Any]]:
-    """VOICE resolution of a CROSS-THREAD presented inbound card. Judges the
-    transcript against the card; an actionable intent (approve/reject/edit)
-    resolves it with a spoken reply, an UNRELATED utterance (or a stale card)
-    leaves the card pending and NUDGES.
+    """VOICE resolution of a presented card. Judges the transcript against the card;
+    an actionable intent (approve / reject / edit / skip / show_others) resolves or
+    navigates with a spoken reply, an UNRELATED utterance (or a stale card) leaves the
+    card pending and NUDGES. ``conversation_thread_id`` is the master's thread — passed
+    through so a voice EDIT re-drafts (and persists) and a voice SKIP signals the right
+    thread, exactly like text.
 
     Part C voice-parity call: voice DELIBERATELY diverges from text on the
     unrelated case. A spoken utterance that isn't about the card may well be
@@ -715,7 +791,9 @@ async def _resolve_presented_approval_voice(
         return
 
     if judged.actionable:
-        async for ev in _resolve_presented_decision(judged, speak=True):
+        async for ev in _resolve_presented_decision(
+            judged, speak=True, message=transcript, conversation_thread_id=conversation_thread_id
+        ):
             yield ev
         return
 
@@ -735,12 +813,24 @@ async def _resolve_presented_decision(
     judged: _PresentedJudgment, *, speak: bool,
     message: str = "", conversation_thread_id: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
-    """Resolve an ACTIONABLE judgment (approve/reject/edit) for ANY presented card
-    — inbound email OR chat-queued tool call (Phase 3). Approve/reject go through
-    the ONE claim-then-dispatch gate (``resolve_and_dispatch``); a lost claim →
-    acknowledge, never double-execute. Edit (TEXT only) re-drafts. Shared by text
-    and voice (``speak`` adds the audio); ``message``/``conversation_thread_id`` are
-    the text edit's re-draft inputs (the master's actual words + their thread)."""
+    """Resolve an ACTIONABLE judgment for ANY presented card — inbound email OR
+    chat-queued tool call (Phase 3) — with full voice/text parity:
+
+      approve / reject → the ONE claim-then-dispatch gate (``resolve_and_dispatch``);
+                         a lost claim → acknowledge, never double-execute.
+      skip             → a ``presented_nav`` signal the client turns into the SAME
+                         client-side skip the button does (grey + surface next). No
+                         DB change — skip is deliberately session-local + DB-inert.
+      show_others      → speak/type a summary of the OTHER pending approvals (the
+                         current card stays pending).
+      edit             → email cards re-draft (TEXT *and* VOICE now — the re-queued
+                         card is the safety net, so a mis-heard edit is caught at
+                         re-approval before anything sends); non-email / no-context
+                         → a nudge. NEVER errors or sends.
+
+    Shared by text and voice (``speak`` adds the audio). ``message`` /
+    ``conversation_thread_id`` are the edit re-draft inputs (the master's actual
+    words + their thread) and the ``presented_nav`` thread."""
     from app.agent.approval_dispatch import resolve_and_dispatch
 
     h = settings.MASTER_HONORIFIC
@@ -772,11 +862,38 @@ async def _resolve_presented_decision(
             yield ev
         return
 
-    # edit (REVISE) — TEXT re-drafts: discard-first (claim-gated) then re-queue a
-    # NEW card. VOICE stays the safe nudge (audio re-draft of a chat card isn't worth
-    # the turn complexity yet). Edit NEVER errors or sends.
-    if not speak and message and conversation_thread_id:
-        async for ev in _revise_presented_card(judged, message, conversation_thread_id, _emit):
+    # skip ("not now / next") — DB-INERT client nav. Signal the client to grey THIS
+    # card (the SAME markSkipped the button calls) so the next queued card surfaces;
+    # the row stays pending and reappears on reload. NEVER claims, sends, or rejects.
+    if judged.intent == "skip":
+        yield {
+            "type": "presented_nav",
+            "thread_id": conversation_thread_id or thread_id,
+            "content": {"action": "skip", "approval_id": approval_id},
+        }
+        # Just "Skipped" — the NEXT card (if any) surfaces with its own lead-in
+        # ("Here's another…"), so promising "here's the next" here would double-
+        # announce, and be wrong on the last card (the backend can't know the
+        # client's session-local seen-set). Accurate regardless of what's left.
+        async for ev in _emit(f"Skipped, {h}."):
+            yield ev
+        return
+
+    # show_others — summarize what ELSE is pending (kind-agnostic). The current card
+    # stays pending; the master can then approve / skip / "send it" as usual.
+    if judged.intent == "show_others":
+        summary = await _pending_queue_summary(exclude_approval_id=approval_id)
+        async for ev in _emit(summary):
+            yield ev
+        return
+
+    # edit (REVISE) — email cards re-draft (text AND voice); the re-queued card is
+    # re-approved before anything sends, so a mis-heard voice edit is caught there.
+    # A tool card (can't re-draft) or missing context → the safe nudge.
+    if judged.is_email_card and message and conversation_thread_id:
+        async for ev in _revise_presented_card(
+            judged, message, conversation_thread_id, _emit, speak=speak
+        ):
             yield ev
         return
     async for ev in _emit(f"I can only send or discard this for now, {h}. Shall I go ahead?"):
@@ -838,12 +955,18 @@ async def _persist_edit_to_conversation(thread_id: str, message: str) -> None:
 
 
 async def _revise_presented_card(
-    judged: _PresentedJudgment, message: str, conversation_thread_id: str, emit
+    judged: _PresentedJudgment, message: str, conversation_thread_id: str, emit, *, speak: bool = False
 ) -> AsyncIterator[dict[str, Any]]:
-    """TEXT edit re-draft. DISCARD-FIRST (claim-gated, reusing the atomic claim so a
-    concurrent approve can't race it), THEN re-draft + re-queue a NEW email_reply
-    card. A failed re-draft leaves NO card (the old is already discarded; the master
-    re-asks) — never two approvable cards, never a send."""
+    """Edit re-draft (TEXT or VOICE). DISCARD-FIRST (claim-gated, reusing the atomic
+    claim so a concurrent approve can't race it), THEN re-draft + re-queue a NEW
+    email_reply card. A failed re-draft leaves NO card (the old is already discarded;
+    the master re-asks) — never two approvable cards, never a send.
+
+    VOICE parity: a voice-dictated edit re-drafts exactly like text, then SPEAKS a
+    confirmation that ECHOES the requested change before surfacing the new card — so
+    a mis-heard edit is audible, and the re-queued card must still be RE-APPROVED
+    before anything sends (the re-approval is the safety net that makes voice-edit
+    safe)."""
     from app.api.approvals import resolve_approval
     from app.email.responder import revise_draft
 
@@ -857,6 +980,7 @@ async def _revise_presented_card(
     yield _decision_resolved_event(judged.row.thread_id, judged.approval_id, "discarded")
 
     payload = judged.row.payload or {}
+    change = judged.change or message
     # 2. Re-draft + re-queue. On ANY failure → no new card (the old is discarded),
     # so the master is never left with two cards or a silent half-state.
     try:
@@ -864,7 +988,7 @@ async def _revise_presented_card(
             subject=payload.get("subject", ""),
             sender=payload.get("sender", ""),
             draft=payload.get("draft", ""),
-            change=(judged.change or message),
+            change=change,
         )
         if not (revised or "").strip():
             raise ValueError("empty revised draft")
@@ -875,9 +999,18 @@ async def _revise_presented_card(
             yield ev
         return
 
-    # 3. Persist the master's actual words (history fidelity) + surface the NEW card
-    # present-in-moment (the queue poll is the durable fallback for other sessions).
+    # 3. Persist the master's actual words (history fidelity), speak a change-echoing
+    # confirmation (voice), and surface the NEW card present-in-moment (the queue poll
+    # is the durable fallback for other sessions). The new card is RE-APPROVED next.
     await _persist_edit_to_conversation(conversation_thread_id, message)
+    if speak:
+        confirm = (
+            f"Updated, {h} — {change}. Shall I send it?" if change
+            else f"Revised, {h}. Shall I send the new draft?"
+        )
+        ev = await _speak_text(confirm)
+        if ev:
+            yield ev
     yield {"type": "approval_required", "thread_id": conversation_thread_id, "content": card}
     yield {"type": "done", "content": _terminal_payload(
         {"thread_id": conversation_thread_id, "status": "complete", "response": ""}
@@ -958,7 +1091,9 @@ async def voice_turn(
             thread_id=thread_id,
             approval_id=presented_approval_id,
         )
-        async for ev in _resolve_presented_approval_voice(presented_approval_id, user_message):
+        async for ev in _resolve_presented_approval_voice(
+            presented_approval_id, user_message, conversation_thread_id=thread_id
+        ):
             yield ev
         return
 
