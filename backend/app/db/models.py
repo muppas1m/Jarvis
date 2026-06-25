@@ -199,8 +199,10 @@ class MorningBrief(Base):
     is the structured digest (days → items: title/source/preview/urgency + empty/total/
     timezone), rendered natively + XSS-safe in the HUD BriefingCard (untrusted subjects
     as escaped text, never markdown). Telegram delivery is unchanged + independent —
-    this persist is best-effort, mirroring SystemAlert. Ages off the HUD naturally via a
-    freshness window; one row per daily run."""
+    this persist is best-effort, mirroring SystemAlert. Self-limits to ~one row:
+    ``record_morning_brief`` prunes briefs older than the freshness window
+    (BRIEFING_HUD_TTL_HOURS) after each insert, so a stale brief is both un-shown by the
+    endpoint AND removed from the table."""
     __tablename__ = "morning_briefs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

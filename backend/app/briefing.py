@@ -17,12 +17,13 @@ TZ resolution reuses 4.2's resolver (app/agent/tools/calendar_tool._resolve_time
 — the same arg → profile → flagged-default path; no duplicated TZ logic.
 """
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app.agent.tools.calendar_tool import _resolve_timezone
+from app.config import settings
 from app.db.engine import async_session
 from app.db.models import BriefingItem, MorningBrief, UserProfile
 from app.utils.logging import get_logger
@@ -198,13 +199,23 @@ def digest_to_payload(win: DigestWindow) -> dict:
 
 
 async def record_morning_brief(payload: dict) -> None:
-    """Best-effort persist of one morning brief so the HUD can surface it. FULLY
-    wrapped + INDEPENDENT of the Telegram send (mirrors failure_alerter._persist_alert):
-    a DB failure here logs but never raises, so a HUD-persist problem can never break
-    the proactive Telegram brief."""
+    """Best-effort persist of one morning brief so the HUD can surface it, then prune
+    so the table self-limits to ~one row. FULLY wrapped + INDEPENDENT of the Telegram
+    send (mirrors failure_alerter._persist_alert): a DB failure here logs but never
+    raises, so neither a persist nor a prune problem can break the proactive Telegram
+    brief.
+
+    Prune = DELETE briefs older than the freshness window (the SAME TTL the endpoint
+    filters on) — so a stale brief is both un-shown AND removed, not just hidden. It
+    runs AFTER the insert commits, in a separate statement, so a prune failure can
+    never roll back the just-persisted brief (and the outer wrapper keeps it off the
+    brief/Telegram path entirely)."""
     try:
         async with async_session() as session:
             session.add(MorningBrief(payload=payload))
+            await session.commit()
+            cutoff = datetime.now(UTC) - timedelta(hours=settings.BRIEFING_HUD_TTL_HOURS)
+            await session.execute(delete(MorningBrief).where(MorningBrief.created_at < cutoff))
             await session.commit()
     except Exception as exc:  # noqa: BLE001 — best-effort HUD surface; never raise
         logger.error("morning_brief_persist_failed", error=str(exc))

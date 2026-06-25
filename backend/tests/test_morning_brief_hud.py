@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 
 import app.briefing as B
 from app.api.briefing import briefing_latest
@@ -119,6 +119,29 @@ async def test_endpoint_null_when_stale():
             await s.execute(update(MorningBrief).values(created_at=datetime.now(UTC) - timedelta(hours=48)))
             await s.commit()
         assert (await briefing_latest()).brief is None
+    finally:
+        await _wipe_briefs()
+
+
+async def test_record_morning_brief_prunes_stale_rows():
+    # The table self-limits: a stale brief (older than the freshness window) is REMOVED
+    # by the next insert's prune, not just hidden by the endpoint filter.
+    await _wipe_briefs()
+    try:
+        await record_morning_brief({"empty": True, "total": 0, "days": []})
+        async with async_session() as s:  # backdate the existing brief past the window
+            await s.execute(update(MorningBrief).values(created_at=datetime.now(UTC) - timedelta(hours=48)))
+            await s.commit()
+        # a fresh insert prunes the stale row → table holds only the new brief
+        await record_morning_brief({
+            "empty": False, "total": 1, "days": [{"day": "2026-06-25", "items": [{
+                "title": "fresh", "source": "x", "preview": "p", "urgency": "today",
+                "kind": "email", "occurred_at": "2026-06-25T06:00:00+00:00"}]}],
+        })
+        async with async_session() as s:
+            rows = (await s.execute(select(MorningBrief))).scalars().all()
+        assert len(rows) == 1, f"table did not self-limit; got {len(rows)} rows"
+        assert rows[0].payload.get("total") == 1  # the stale row is gone, the fresh one remains
     finally:
         await _wipe_briefs()
 
