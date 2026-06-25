@@ -381,10 +381,14 @@ async def execute_tool_guarded(
 # The result handed back to the agent when an APPROVE-tier tool is QUEUED (Phase
 # 3). It must read as NOT-done so the agent relays "queued for approval", never
 # "sent/done" (no-hallucinated-actions). The card is the durable record either way.
+# The honest tag fronting a queued tool's ToolMessage. The streaming layer
+# (runner._queued_approval_event) matches this prefix to surface the just-queued
+# card in-stream the moment it's queued (3B present-in-moment).
+QUEUED_MARKER_TAG = "[QUEUED]"
 _QUEUED_MARKER = (
-    "[QUEUED] The `{tool}` action is NOT done — it has been QUEUED for the master's "
-    "approval and will run ONLY after they approve it. Tell the master you've queued "
-    "it for their approval; do NOT say it is sent / done / created / scheduled."
+    QUEUED_MARKER_TAG + " The `{tool}` action is NOT done — it has been QUEUED for the "
+    "master's approval and will run ONLY after they approve it. Tell the master you've "
+    "queued it for their approval; do NOT say it is sent / done / created / scheduled."
 )
 
 

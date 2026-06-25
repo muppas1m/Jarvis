@@ -365,13 +365,19 @@ async def stream_turn(
                     if visible:
                         yield {"type": "token", "content": visible}
             elif mode == "updates":
-                # Surface tool calls as the agent decides them (THINKING state).
                 for node, upd in (data or {}).items():
-                    if node != "agent":
-                        continue
                     for m in (upd or {}).get("messages", []) or []:
-                        for tc in getattr(m, "tool_calls", None) or []:
-                            yield {"type": "tool", "content": tc.get("name", "")}
+                        if node == "agent":
+                            # Surface tool calls as the agent decides them (THINKING state).
+                            for tc in getattr(m, "tool_calls", None) or []:
+                                yield {"type": "tool", "content": tc.get("name", "")}
+                        elif node == "tool_executor":
+                            # Present-in-moment (3B): an APPROVE-tier tool just QUEUED →
+                            # surface its card in-stream now (same event + approval_id the
+                            # /approvals/queue poll would, so 3C dedups them to one).
+                            ev = await _queued_approval_event(thread_id, m)
+                            if ev:
+                                yield ev
     except Exception as exc:
         logger.exception("graph_stream_failed", thread_id=thread_id, error=str(exc))
         yield {
@@ -441,6 +447,60 @@ def _terminal_payload(envelope: dict[str, Any]) -> dict[str, Any]:
         "usage": envelope.get("usage"),
         "thread_id": envelope["thread_id"],
         "context": envelope.get("context"),  # 4.B.3 meter (None on synthetic envelopes)
+    }
+
+
+async def _queued_approval_event(thread_id: str, message: Any) -> dict[str, Any] | None:
+    """Present-in-moment (3B). If ``message`` is the ``[QUEUED]`` ToolMessage an
+    APPROVE-tier tool emits when it queues, look up the synthetic PendingApproval row
+    it just created (by interrupt_id == the tool_call_id) and shape it as the SAME
+    ``approval_required`` event the chat path already renders — so the present master
+    sees the card the instant it's queued, without waiting for the /approvals/queue poll.
+
+    The content carries the CANONICAL approval_id (= ``str(row.id)``, exactly what
+    /approvals/queue returns) so the in-stream card and the poll dedup to one, plus a
+    tool-kind payload (tool_name / tool_args / description) so the frontend renders it
+    through the identical path as a polled card. SURFACING ONLY — it reads the row,
+    never claims or dispatches. Best-effort: None on a non-queued message or a missing
+    row (the poll is the durable fallback; this never breaks the turn)."""
+    from app.agent.nodes import QUEUED_MARKER_TAG
+
+    content = getattr(message, "content", "")
+    tool_call_id = getattr(message, "tool_call_id", None)
+    if not (isinstance(message, ToolMessage) and tool_call_id
+            and isinstance(content, str) and content.startswith(QUEUED_MARKER_TAG)):
+        return None
+
+    from sqlalchemy import select
+
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+    try:
+        async with async_session() as session:
+            row = (await session.execute(
+                select(PendingApproval)
+                .where(PendingApproval.thread_id == thread_id)
+                .where(PendingApproval.interrupt_id == tool_call_id)
+                .where(PendingApproval.status == "pending")
+                .order_by(PendingApproval.created_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001 — present-in-moment is best-effort
+        logger.warning("queued_approval_event_lookup_failed", thread_id=thread_id, error=str(exc))
+        return None
+    if row is None:
+        return None
+
+    payload = row.payload or {}
+    return {
+        "type": "approval_required",
+        "thread_id": thread_id,
+        "content": {
+            "approval_id": str(row.id),
+            "tool_name": payload.get("tool_name") or row.action_type,
+            "tool_args": payload.get("tool_args") or {},
+            "description": row.description,
+        },
     }
 
 
@@ -886,11 +946,16 @@ async def voice_turn(
                             yield ev
             elif mode == "updates":
                 for node, upd in (data or {}).items():
-                    if node != "agent":
-                        continue
                     for m in (upd or {}).get("messages", []) or []:
-                        for tc in getattr(m, "tool_calls", None) or []:
-                            yield {"type": "tool", "content": tc.get("name", "")}
+                        if node == "agent":
+                            for tc in getattr(m, "tool_calls", None) or []:
+                                yield {"type": "tool", "content": tc.get("name", "")}
+                        elif node == "tool_executor":
+                            # Present-in-moment (3B): surface the just-queued card in the
+                            # HUD now (same approval_required event the text path emits).
+                            ev = await _queued_approval_event(thread_id, m)
+                            if ev:
+                                yield ev
 
         # Speak any trailing partial sentence.
         tail = chunker.flush()
