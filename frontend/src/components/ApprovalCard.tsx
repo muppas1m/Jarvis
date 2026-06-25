@@ -37,23 +37,41 @@ function renderValue(v: unknown): string {
   return String(v);
 }
 
+/** A tool card may carry empty-string arg sentinels (the open-weights tool schema
+ *  uses "" for "not provided") — hide those rows so the card shows only real
+ *  fields, never a wall of "—". */
+function isEmptyValue(v: unknown): boolean {
+  return v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
+}
+
 export function ApprovalCard({
   approval,
   onDecide,
+  onSkip,
+  queueCount = 0,
 }: {
   approval: ApprovalRequest;
   onDecide: (approved: boolean) => void;
+  onSkip?: () => void;
+  queueCount?: number;
 }) {
   const { tool_name, tool_args, status } = approval;
   const resolving = status === "resolving";
   const discarded = status === "discarded";
-  const resolved = status === "approved" || status === "rejected" || discarded;
-  const entries = Object.entries(tool_args ?? {});
+  const skipped = status === "skipped";
+  const greyed = discarded || skipped; // deferred/superseded — muted, no actions
+  const resolved = status === "approved" || status === "rejected" || greyed;
+  // Render off kind: an email reply reads as "Email reply", a tool as its name.
+  // (kind is carried by queue cards; inferred from tool_name otherwise.)
+  const kind = approval.kind ?? (tool_name === "email_reply" ? "email" : "tool");
+  const actionLabel = kind === "email" ? "Email reply" : tool_name;
+  const entries = Object.entries(tool_args ?? {}).filter(([, v]) => !isEmptyValue(v));
+  const showCount = !resolved && queueCount > 1; // "1 of N" only on the live card
 
   return (
     <div
       className={`rounded-xl border p-4 ${
-        discarded
+        greyed
           ? "border-ink-dim/20 bg-white/[0.02] opacity-60"
           : "border-amber/40 bg-amber/5"
       }`}
@@ -61,14 +79,14 @@ export function ApprovalCard({
       <div className="mb-2.5 flex items-center justify-between gap-2">
         <span
           className={`rounded border px-2 py-0.5 font-mono text-xs uppercase tracking-wider ${
-            discarded
+            greyed
               ? "border-ink-dim/30 bg-white/5 text-ink-dim"
               : "border-amber/40 bg-amber/10 text-amber"
           }`}
         >
-          {discarded ? "•" : "⚠ Approve"} · {tool_name}
+          {greyed ? "•" : "⚠ Approve"} · {actionLabel}
         </span>
-        {resolved && (
+        {resolved ? (
           <span
             className={`font-mono text-xs uppercase tracking-wider ${
               status === "approved"
@@ -82,8 +100,16 @@ export function ApprovalCard({
               ? "Approved ✓"
               : status === "rejected"
                 ? "Rejected ✗"
-                : "Discarded — superseded"}
+                : skipped
+                  ? "Skipped — still awaiting"
+                  : "Discarded — superseded"}
           </span>
+        ) : (
+          showCount && (
+            <span className="font-mono text-xs uppercase tracking-wider text-ink-dim">
+              1 of {queueCount}
+            </span>
+          )
         )}
       </div>
 
@@ -121,6 +147,16 @@ export function ApprovalCard({
             >
               {resolving ? "…" : "Reject"}
             </button>
+            {onSkip && (
+              <button
+                disabled={resolving}
+                onClick={onSkip}
+                title="Not now — keep it pending and show the next"
+                className="ml-auto rounded-lg border border-ink-dim/30 bg-white/5 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-ink-dim transition hover:bg-white/10 disabled:opacity-50"
+              >
+                Skip
+              </button>
+            )}
           </div>
           <p className="mt-2 text-xs text-ink-dim">
             {resolving ? "Working on it…" : "…or just tell me what to change."}

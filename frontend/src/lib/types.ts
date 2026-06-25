@@ -17,7 +17,13 @@ export type ApprovalStatus =
   | "resolving"
   | "approved"
   | "rejected"
-  | "discarded"; // superseded by an edit — kept in the stream, greyed
+  | "discarded" // superseded by an edit — kept in the stream, greyed
+  | "skipped"; // deferred "not now" (session-local, DB-inert) — greyed; reappears on reload
+
+/** Which origin a card came from. "email" = an inbound auto-drafted reply;
+ *  "tool" = a chat-queued APPROVE-tier tool call. The backend's UnifiedApprovalCard
+ *  carries this (the SAME discriminator dispatch uses); the card renders off it. */
+export type ApprovalKind = "email" | "tool";
 
 export interface ApprovalRequest {
   approval_id: string;
@@ -25,6 +31,7 @@ export interface ApprovalRequest {
   tool_args: Record<string, unknown>;
   description?: string;
   status: ApprovalStatus;
+  kind?: ApprovalKind; // present for queue/poll-surfaced cards; inferred otherwise
 }
 
 /** An in-chat document upload (A3), shown live in the timeline. Transient

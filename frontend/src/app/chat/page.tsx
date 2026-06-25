@@ -46,6 +46,8 @@ export default function ChatPage() {
     items,
     caption,
     decideApproval,
+    skipApproval,
+    queueCount,
     uploadDocument,
     voiceEnabled,
     setVoiceEnabled,
@@ -130,6 +132,8 @@ export default function ChatPage() {
             ctx={context}
             send={send}
             decideApproval={decideApproval}
+            skipApproval={skipApproval}
+            queueCount={queueCount}
             uploadDocument={uploadDocument}
             turnError={turnError}
             retry={retry}

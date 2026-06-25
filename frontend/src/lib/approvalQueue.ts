@@ -1,0 +1,100 @@
+import type { ApprovalKind, ApprovalRequest, StreamItem } from "./types";
+
+/**
+ * The unified approval queue (3C) — consuming GET /api/approvals/queue.
+ *
+ * Pure, headless logic so the ONE rule that matters — dedup by approval_id — is
+ * directly testable (node:test). A card surfaced in-stream the instant it was
+ * queued (3B, via the `approval_required` event) and the SAME card returned by a
+ * later queue poll carry an identical approval_id by design (3A + 3B made it so);
+ * `selectNextCard` is what guarantees they present exactly once.
+ */
+
+/** The wire shape of GET /api/approvals/queue rows (backend UnifiedApprovalCard).
+ *  A superset of ApprovalRequest, so a card renders through the same path. */
+export interface UnifiedApprovalCard {
+  approval_id: string;
+  kind: ApprovalKind;
+  thread_id: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  description?: string;
+  status: string;
+  created_at: string;
+}
+
+export interface ApprovalQueueResponse {
+  approvals: UnifiedApprovalCard[];
+  count: number;
+}
+
+/**
+ * THE dedup contract. The queue is oldest-first across BOTH origins; `seenIds` is
+ * every approval_id already on the timeline (a card surfaced in-stream by 3B, or
+ * one resolved earlier — any status). Returns the first queue card NOT already
+ * seen — i.e. the next to surface — or null if every queued card is already shown.
+ *
+ * This is why an in-stream card is never re-surfaced by a subsequent poll: its
+ * approval_id is in `seenIds`, so it's skipped; the poll advances to the next.
+ * One-at-a-time is the CALLER's guard (don't surface while a card is pending);
+ * this function only decides WHICH card is next.
+ */
+export function selectNextCard(
+  queue: UnifiedApprovalCard[],
+  seenIds: Set<string>,
+): UnifiedApprovalCard | null {
+  return queue.find((c) => !seenIds.has(c.approval_id)) ?? null;
+}
+
+/** A queue card → the renderable ApprovalRequest (carrying `kind` so the card
+ *  renders email vs tool with no special-casing). Always surfaced as pending. */
+export function cardToApproval(c: UnifiedApprovalCard): ApprovalRequest {
+  return {
+    approval_id: c.approval_id,
+    tool_name: c.tool_name,
+    tool_args: c.tool_args,
+    description: c.description,
+    status: "pending",
+    kind: c.kind,
+  };
+}
+
+/** Kind-aware lead-in for a POLL-surfaced card — one the master wasn't present for
+ *  (a present-in-moment card arrives via 3B with no lead-in). `first` = the first
+ *  card surfaced this session. */
+export function leadInFor(card: UnifiedApprovalCard, first: boolean): string {
+  if (card.kind === "email") {
+    return first
+      ? "I've drafted a reply for your approval, Sir."
+      : "Here's another I've drafted, Sir…";
+  }
+  return first
+    ? "There's an action awaiting your approval, Sir."
+    : "Here's another action awaiting you, Sir…";
+}
+
+/** Infer a card's kind when the source didn't carry it (a 3B `approval_required`
+ *  event or a hydrated history row): an email reply is always tool_name
+ *  "email_reply"; everything else is a tool. */
+export function inferKind(toolName: string): ApprovalKind {
+  return toolName === "email_reply" ? "email" : "tool";
+}
+
+/**
+ * Skip (3D) = grey the pending card to "skipped" — a PURE, DB-INERT transform.
+ * It returns new timeline items with only the target pending card flipped; the
+ * queue (the DB mirror) is never passed in, so it cannot be touched, and a pure
+ * function makes no network call by construction. The skipped card stays on the
+ * timeline, so its approval_id is already in the poll's "seen" set — `selectNextCard`
+ * skips it and surfaces the next, while the row stays pending and reappears on
+ * reload. "Not now", never dismiss/reject.
+ */
+export function markSkipped(items: StreamItem[], approvalId: string): StreamItem[] {
+  return items.map((x) =>
+    x.type === "decision" &&
+    x.approval.approval_id === approvalId &&
+    x.approval.status === "pending"
+      ? { ...x, approval: { ...x.approval, status: "skipped" as const } }
+      : x,
+  );
+}

@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  cardToApproval,
+  inferKind,
+  leadInFor,
+  markSkipped,
+  selectNextCard,
+  type UnifiedApprovalCard,
+} from "./approvalQueue";
 import type {
   AgentState,
   ApprovalRequest,
@@ -48,18 +56,6 @@ interface DecideEnvelope {
   interrupt?: unknown;
 }
 
-/** GET /api/approvals/inbound/next → the next inbound (email-reply) card, or null. */
-interface InboundApprovalCard {
-  approval_id: string;
-  thread_id: string;
-  action_type: string;
-  tool_name: string;
-  tool_args: Record<string, unknown>;
-  description?: string;
-  status: string;
-  created_at: string;
-}
-
 function normalizeStatus(s?: string): ApprovalStatus {
   if (s === "approved") return "approved";
   if (s === "rejected") return "rejected";
@@ -80,6 +76,7 @@ function itemsFromHistory(raw: BackendItem[]): StreamItem[] {
             tool_args: it.tool_args ?? {},
             description: it.description,
             status: normalizeStatus(it.status),
+            kind: inferKind(it.tool_name ?? "action"),
           },
         }
       : {
@@ -96,15 +93,17 @@ function approvalFromInterrupt(raw: unknown): ApprovalRequest | null {
   if (!raw || typeof raw !== "object") return null;
   const c = raw as Record<string, unknown>;
   if (typeof c.approval_id !== "string") return null;
+  const toolName = typeof c.tool_name === "string" ? c.tool_name : "action";
   return {
     approval_id: c.approval_id,
-    tool_name: typeof c.tool_name === "string" ? c.tool_name : "action",
+    tool_name: toolName,
     tool_args:
       c.tool_args && typeof c.tool_args === "object"
         ? (c.tool_args as Record<string, unknown>)
         : {},
     description: typeof c.description === "string" ? c.description : undefined,
     status: "pending",
+    kind: inferKind(toolName), // a 3B present-in-moment card carries no kind; infer it
   };
 }
 
@@ -130,6 +129,11 @@ export function useJarvis() {
   const [turnError, setTurnError] = useState<string | null>(null);
   // Context-meter snapshot (4.B.3) — token usage vs the compaction threshold.
   const [context, setContext] = useState<ContextMeter | null>(null);
+  // How many approvals are pending in the unified queue (3D) — drives "1 of N".
+  // A REF, not state: the poll refreshes it without a setState-in-effect, and the
+  // hook returns `.current`, re-read fresh on each render (a card surfacing always
+  // triggers a setItems re-render, so the count is current whenever a card shows).
+  const queueCountRef = useRef(0);
   // approval_ids currently being decided — guards against a double-submit.
   const decidingRef = useRef<Set<string>>(new Set());
 
@@ -518,6 +522,16 @@ export function useJarvis() {
     [],
   );
 
+  // Skip a pending card (3D) — "not now". Purely client-side and DB-INERT: it
+  // issues NO backend request and executes nothing. It greys the card to "skipped"
+  // (releasing the one-at-a-time slot), and the next unseen card surfaces via the
+  // pending→none effect / poll — selectNextCard skips it because the greyed card's
+  // approval_id is now in the timeline's "seen" set. The row stays pending and
+  // still comes back from /approvals/queue, so a skipped card reappears on reload.
+  const skipApproval = useCallback((approvalId: string) => {
+    setItems((m) => markSkipped(m, approvalId));
+  }, []);
+
   // Upload a document straight into the chat (A3): validate client-side, append a
   // live status chip to the timeline, stream the multipart to the BFF, then flip
   // the chip to its terminal state (indexed / already-indexed / re-indexed /
@@ -606,30 +620,40 @@ export function useJarvis() {
     };
   }, []);
 
-  // Surface INBOUND-email approvals (auto-drafted replies on their own gmail:
-  // threads, invisible to the conversation history) as in-chat cards — one at a
-  // time. Poll the backend's "next inbound" primitive; it returns at most one
-  // pending card, and we only present it when the stream is idle with no pending
-  // card already shown (so we never flood, and never collide with a conversation
-  // approval). Resolved cards stay in the timeline; the next surfaces on the
-  // following poll. With voice on, Jarvis reads the card and the master resolves
-  // it by voice (presented_approval_id, below) or by the card's buttons.
-  const surfaceInbound = useCallback(async () => {
+  // Surface the unified approval QUEUE (3C) — inbound email replies AND
+  // chat-queued APPROVE-tier tool calls, one at a time. Poll GET /approvals/queue
+  // (oldest-first, both origins), DEDUP by approval_id against everything already
+  // on the timeline — crucially a present-in-moment card 3B already surfaced
+  // in-stream — and present the oldest unseen card, but only when idle with no
+  // pending card shown (never flood, never collide). Resolved cards stay in the
+  // timeline; the next surfaces on the following poll. With voice on, Jarvis reads
+  // the card and the master resolves by voice (presented_approval_id) or button.
+  const surfaceQueued = useCallback(async () => {
     if (!hydratedRef.current) return;
     // Don't interrupt an in-flight turn, and enforce one-at-a-time.
     if (agentStateRef.current !== "idle") return;
     if (itemsRef.current.some((x) => x.type === "decision" && x.approval.status === "pending"))
       return;
-    let data: { approval?: InboundApprovalCard | null };
+    let cards: UnifiedApprovalCard[];
     try {
-      const res = await fetch("/api/approvals/inbound/next");
+      const res = await fetch("/api/approvals/queue");
       if (!res.ok) return;
-      data = (await res.json()) as { approval?: InboundApprovalCard | null };
+      const data = (await res.json()) as { approvals?: UnifiedApprovalCard[] };
+      cards = data.approvals ?? [];
     } catch {
       return; // backend unreachable → try again next tick
     }
-    const a = data.approval;
-    if (!a) return;
+    queueCountRef.current = cards.length; // "1 of N" — all pending rows (incl. skipped)
+    // THE dedup: skip any card whose approval_id is already on the timeline (a 3B
+    // in-stream card, or one resolved earlier) → the in-stream card and the poll
+    // present exactly once. selectNextCard returns the oldest unseen.
+    const seen = new Set(
+      itemsRef.current
+        .filter((x): x is Extract<StreamItem, { type: "decision" }> => x.type === "decision")
+        .map((x) => x.approval.approval_id),
+    );
+    const next = selectNextCard(cards, seen);
+    if (!next) return;
 
     const first = inboundSeqRef.current === 0;
     let surfaced = false;
@@ -637,39 +661,31 @@ export function useJarvis() {
       // Re-check under the latest state: a pending card or this exact card may
       // have appeared since the fetch resolved.
       if (m.some((x) => x.type === "decision" && x.approval.status === "pending")) return m;
-      if (m.some((x) => x.type === "decision" && x.approval.approval_id === a.approval_id))
+      if (m.some((x) => x.type === "decision" && x.approval.approval_id === next.approval_id))
         return m;
       surfaced = true;
-      const leadIn = first
-        ? "I've drafted a reply for your approval, Sir."
-        : "Here's another I've drafted, Sir…";
       return [
         ...m,
-        { type: "message", id: crypto.randomUUID(), role: "assistant", content: leadIn },
         {
-          type: "decision",
-          id: a.approval_id,
-          approval: {
-            approval_id: a.approval_id,
-            tool_name: a.tool_name,
-            tool_args: a.tool_args,
-            description: a.description,
-            status: "pending",
-          },
+          type: "message",
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: leadInFor(next, first),
         },
+        { type: "decision", id: next.approval_id, approval: cardToApproval(next) },
       ];
     });
     if (!surfaced) return;
     inboundSeqRef.current += 1;
-    if (voiceEnabledRef.current) void announceInbound(a.approval_id, first);
+    if (voiceEnabledRef.current) void announceInbound(next.approval_id, first);
   }, [announceInbound]);
 
   useEffect(() => {
-    const t = setInterval(() => void surfaceInbound(), 8000);
+    const t = setInterval(() => void surfaceQueued(), 8000);
     return () => clearInterval(t);
-  }, [surfaceInbound]);
+  }, [surfaceQueued]);
 
-  // B3 — surface the NEXT inbound card PROMPTLY when the current one resolves
+  // B3 — surface the NEXT queued card PROMPTLY when the current one resolves
   // (by button, voice, or typed reply), instead of waiting for the ~8s poll.
   // Fires only on the pending→none transition; surfacing a card flips this back
   // to true, so there's no loop.
@@ -677,8 +693,8 @@ export function useJarvis() {
     (it) => it.type === "decision" && it.approval.status === "pending",
   );
   useEffect(() => {
-    if (!hasPendingDecision) void surfaceInbound();
-  }, [hasPendingDecision, surfaceInbound]);
+    if (!hasPendingDecision) void surfaceQueued();
+  }, [hasPendingDecision, surfaceQueued]);
 
   return {
     items,
@@ -690,6 +706,8 @@ export function useJarvis() {
       (it) => it.type === "decision" && it.approval.status === "pending",
     ),
     decideApproval,
+    skipApproval,
+    queueCount: queueCountRef.current,
     uploadDocument,
     getAmplitude,
     send,

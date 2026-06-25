@@ -16,6 +16,10 @@ interface ChatPanelProps {
   /** Turn dispatch (typed input). */
   send: (text: string) => void;
   decideApproval: (approvalId: string, approved: boolean) => void;
+  /** Defer a pending card "not now" (3D) — client-side, DB-inert. */
+  skipApproval: (approvalId: string) => void;
+  /** How many approvals are pending in the queue — drives "1 of N". */
+  queueCount: number;
   uploadDocument: (file: File) => void;
   turnError: string | null;
   retry: () => void;
@@ -39,6 +43,8 @@ export function ChatPanel({
   ctx,
   send,
   decideApproval,
+  skipApproval,
+  queueCount,
   uploadDocument,
   turnError,
   retry,
@@ -145,6 +151,8 @@ export function ChatPanel({
                 <ApprovalCard
                   approval={it.approval}
                   onDecide={(approved) => decideApproval(it.approval.approval_id, approved)}
+                  onSkip={() => skipApproval(it.approval.approval_id)}
+                  queueCount={queueCount}
                 />
               </div>
             </div>
