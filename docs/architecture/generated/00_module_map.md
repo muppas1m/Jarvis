@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (111 modules)
+## `app/` — the system (112 modules)
 
 ```
 app/
@@ -44,6 +44,7 @@ app/
 │   ├── __init__.py — —
 │   ├── activity.py — Authenticated 24h activity feed (4.C.3) — a dignified, master-facing view of
 │   ├── approvals.py — Approvals API + helpers.
+│   ├── briefing.py — HUD briefing surface — the latest proactive morning brief, for the dashboard.
 │   ├── chat.py — POST /api/chat — synchronous, non-streaming agent turn over HTTP.
 │   ├── costs.py — GET /api/costs — LLM spend snapshot, honestly labelled.
 │   ├── documents.py — Document RAG API — upload + search over the master's ingested corpus.

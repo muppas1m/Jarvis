@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.activity import router as activity_router
 from app.api.approvals import router as approvals_router
+from app.api.briefing import router as briefing_router
 from app.api.chat import router as chat_router
 from app.api.costs import router as costs_router
 from app.api.documents import router as documents_router
@@ -66,5 +67,6 @@ protected_router.include_router(documents_router)
 protected_router.include_router(system_router)
 protected_router.include_router(weather_router)
 protected_router.include_router(activity_router)
+protected_router.include_router(briefing_router)
 
 api_router.include_router(protected_router)

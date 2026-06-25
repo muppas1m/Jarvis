@@ -192,6 +192,24 @@ class BriefingItem(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class MorningBrief(Base):
+    """A persisted proactive morning brief — so the HUD can surface the SAME digest
+    the 7am Telegram push sends (persist-then-poll; the brief is Celery-driven with no
+    active stream, so instant push is a separately-tracked future feature). ``payload``
+    is the structured digest (days → items: title/source/preview/urgency + empty/total/
+    timezone), rendered natively + XSS-safe in the HUD BriefingCard (untrusted subjects
+    as escaped text, never markdown). Telegram delivery is unchanged + independent —
+    this persist is best-effort, mirroring SystemAlert. Ages off the HUD naturally via a
+    freshness window; one row per daily run."""
+    __tablename__ = "morning_briefs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    payload = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Email management (Phase 2)                                                  #
 # --------------------------------------------------------------------------- #

@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 
 from app.agent.tools.calendar_tool import _resolve_timezone
 from app.db.engine import async_session
-from app.db.models import BriefingItem, UserProfile
+from app.db.models import BriefingItem, MorningBrief, UserProfile
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -156,3 +156,55 @@ def render_push(win: DigestWindow) -> str:
             src = f" — {it.source}" if it.source else ""
             lines.append(f"  • {tag}{it.title or '(no subject)'}{src}")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# HUD surface — persist the SAME digest the Telegram push sends, so the HUD can  #
+# poll it (persist-then-poll; the brief is Celery-driven with no active stream). #
+# --------------------------------------------------------------------------- #
+def digest_to_payload(win: DigestWindow) -> dict:
+    """Serialize a DigestWindow into the HUD briefing payload (pure, JSON-safe).
+
+    The HUD BriefingCard renders this STRUCTURALLY — day sections, urgency chips,
+    and untrusted fields (title/source/preview, which carry attacker-influenceable
+    email content) as escaped React text, never markdown — so it shows the SAME
+    content the Telegram render_push does, plus per-item previews, with no raw-HTML/
+    markdown injection surface. ``occurred_at``/``window_*`` are ISO-8601 instants;
+    ``day`` is the local-day label the segmentation already computed."""
+    return {
+        "empty": win.total == 0,
+        "total": win.total,
+        "timezone": win.timezone,
+        "window_start": win.start.isoformat(),
+        "window_end": win.end.isoformat(),
+        "days": [
+            {
+                "day": d.day.isoformat(),
+                "items": [
+                    {
+                        "title": it.title or "",
+                        "source": it.source or "",
+                        "preview": it.preview or "",
+                        "urgency": it.urgency or "none",
+                        "kind": it.kind,
+                        "occurred_at": it.occurred_at.isoformat(),
+                    }
+                    for it in d.items
+                ],
+            }
+            for d in win.days
+        ],
+    }
+
+
+async def record_morning_brief(payload: dict) -> None:
+    """Best-effort persist of one morning brief so the HUD can surface it. FULLY
+    wrapped + INDEPENDENT of the Telegram send (mirrors failure_alerter._persist_alert):
+    a DB failure here logs but never raises, so a HUD-persist problem can never break
+    the proactive Telegram brief."""
+    try:
+        async with async_session() as session:
+            session.add(MorningBrief(payload=payload))
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort HUD surface; never raise
+        logger.error("morning_brief_persist_failed", error=str(exc))

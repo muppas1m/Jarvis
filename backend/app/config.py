@@ -201,6 +201,11 @@ class Settings(BaseSettings):
     # now − this, so an unread HWM can't grow the digest unbounded. The push never
     # advances the HWM (a missed push must still surface under "what's the latest").
     BRIEFING_PUSH_CAP_DAYS: int = 7
+    # The 7am brief is also persisted (morning_briefs) so the HUD can poll + show it
+    # (persist-then-poll). The HUD shows the latest brief created within this freshness
+    # window, then it ages off (the next daily run replaces it). 20h < 24h so the
+    # prior day's brief is gone before the next one lands (no two-brief overlap).
+    BRIEFING_HUD_TTL_HOURS: int = 20
     # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
     # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
     # surfaced, never blind-retried (a read-timeout may have already delivered).
