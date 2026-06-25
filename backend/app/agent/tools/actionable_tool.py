@@ -18,7 +18,6 @@ All four are SAFE tier (recording/listing/closing a task has no external side
 effect) — see app.agent.safety.TOOL_SAFETY_MAP.
 """
 from datetime import UTC, date, datetime
-from typing import Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -27,6 +26,12 @@ from app.agent.tools.registry import tool_registry
 from app.db.engine import async_session
 from app.db.models import ActionableItem
 
+# Flat str args + handler-side validation (NOT Literal/enum): the open-weights
+# fallback model (Groq llama-3.3-70b) can't reliably tool-call enum constraints —
+# see project_open_weights_tool_schema_and_conversation_poisoning. priority stays
+# REQUIRED via the schema + the description/elicitation rule; the VALUE is checked here.
+_PRIORITIES = ("low", "medium", "high")
+_STATUSES = ("open", "done", "dropped")
 _PRIORITY_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
@@ -35,11 +40,15 @@ def _fmt(item: ActionableItem) -> str:
     return f"- [{item.priority}] {item.content}{due}"
 
 
-async def task_add(content: str, priority: Literal["low", "medium", "high"], due_date: str = "") -> str:
+async def task_add(content: str, priority: str, due_date: str = "") -> str:
     """Record a new open task with an elicited priority + optional due date."""
     content = (content or "").strip()
     if not content:
         return "I need the task itself before I can record it, Sir."
+
+    priority = (priority or "").strip().lower()
+    if priority not in _PRIORITIES:
+        return "I need a priority for that, Sir — give me low, medium, or high."
 
     parsed_due: date | None = None
     if due_date.strip():
@@ -59,8 +68,11 @@ async def task_add(content: str, priority: Literal["low", "medium", "high"], due
     return f"Recorded, Sir: {content} ({priority} priority{due_txt})."
 
 
-async def task_list(status: Literal["open", "done", "dropped"] = "open") -> str:
+async def task_list(status: str = "open") -> str:
     """List the master's tasks of a given status (open by default), soonest-due first."""
+    status = (status or "open").strip().lower()
+    if status not in _STATUSES:
+        return "I can list open, done, or dropped tasks, Sir — which would you like?"
     async with async_session() as session:
         rows = (await session.execute(
             select(ActionableItem).where(ActionableItem.status == status)
@@ -169,11 +181,11 @@ def register() -> None:
 
 class _TaskAddArgs(BaseModel):
     content: str = Field(..., description="The task, in the master's own words.")
-    priority: Literal["low", "medium", "high"] = Field(
+    priority: str = Field(
         ...,
         description=(
-            "REQUIRED urgency. If the master's words don't signal it, ASK "
-            "'what's the priority, Sir?' first — do not guess."
+            "REQUIRED urgency — one of: low, medium, high. If the master's words "
+            "don't signal it, ASK 'what's the priority, Sir?' first — do not guess."
         ),
     )
     due_date: str = Field(
@@ -182,8 +194,8 @@ class _TaskAddArgs(BaseModel):
 
 
 class _TaskListArgs(BaseModel):
-    status: Literal["open", "done", "dropped"] = Field(
-        default="open", description="Which tasks to list. Default: open."
+    status: str = Field(
+        default="open", description="Which tasks to list — one of: open, done, dropped. Default: open."
     )
 
 

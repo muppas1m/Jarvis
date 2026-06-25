@@ -115,16 +115,31 @@ async def test_complete_ambiguous_asks_and_changes_nothing():
         await _cleanup(tag)
 
 
-# --- the elicitation contract: priority is a REQUIRED enum -------------------
-def test_priority_is_required_low_medium_high_enum():
-    # missing priority → validation error (the agent must supply it, i.e. ask)
+# --- the elicitation contract: priority REQUIRED (schema) + valid value (handler) ---
+def test_priority_required_at_schema_but_plain_str_no_enum():
+    # priority is REQUIRED — the agent must supply it (i.e. ask first, not omit).
     with pytest.raises(pydantic.ValidationError):
         T._TaskAddArgs(content="x")
-    # an off-enum value is rejected (no "urgent"/"critical" guessing through)
-    with pytest.raises(pydantic.ValidationError):
-        T._TaskAddArgs(content="x", priority="urgent")
-    for p in ("low", "medium", "high"):
-        assert T._TaskAddArgs(content="x", priority=p).priority == p
+    # but it's a PLAIN STRING (no Literal/enum constraint — open-weights-friendly):
+    # any string passes the schema; the VALUE is validated in the handler.
+    assert T._TaskAddArgs(content="x", priority="high").priority == "high"
+    assert T._TaskAddArgs(content="x", priority="urgent").priority == "urgent"  # schema accepts it
+
+
+async def test_off_enum_priority_rejected_in_handler_creates_nothing():
+    tag = uuid.uuid4().hex[:8]
+    try:
+        out = await T.task_add(content=f"thing {tag}", priority="urgent")
+        # rejected at the handler with the helpful low/medium/high message
+        assert all(w in out.lower() for w in ("low", "medium", "high"))
+        assert await _rows(tag) == []  # off-enum priority → no row
+    finally:
+        await _cleanup(tag)
+
+
+async def test_off_enum_status_rejected_in_handler():
+    out = await T.task_list(status="archived")
+    assert all(w in out.lower() for w in ("open", "done", "dropped"))
 
 
 # --- the recall-routing contract (descriptions cross-reference) -------------
