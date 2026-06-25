@@ -82,8 +82,11 @@ _FORBIDDEN_PATTERNS = [
     r"^\s*assistant\b",                                 # assistant-attributed ("Assistant created…")
     r"\bthe assistant\b",                               # "…the assistant confirmed…"
     r"\buser (asked|inquired|approved)\b",              # Q&A / approval mechanics
-    r"\bwants? to (send|create|delete|schedule|verify|check|test)\b",  # tool-action command
-    r"\b(was|were|has been|have been) (sent|delivered|created|deleted|queued|archived|resolved|completed)\b",  # task outcome
+    # tool-action command — an action verb after a request/want (anchored to the
+    # verb so "User wants to lose weight" / "User requested a quiet room" do NOT match)
+    r"\b(wants? to|wanted to|requested to|asked to) (send|create|delete|schedule|verify|check|test|book|order)\b",
+    # task outcome — passive completion, allowing one "-ly" adverb ("was successfully delivered")
+    r"\b(was|were|has been|have been) (\w+ly )?(sent|delivered|created|deleted|queued|archived|resolved|completed)\b",
     r"\b(no (scheduled )?events?|no events? (are|is) scheduled|has no (scheduled )?events?)\b",  # ephemeral calendar state
 ]
 _FORBIDDEN_RE = re.compile("|".join(_FORBIDDEN_PATTERNS), re.IGNORECASE)
