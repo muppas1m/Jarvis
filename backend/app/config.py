@@ -173,6 +173,13 @@ class Settings(BaseSettings):
     # (asyncio.to_thread) and BOUNDS it (asyncio.wait_for) so a hung round-trip
     # can't wedge the agent — the same to_thread/wait_for idiom the reranker uses.
     EMAIL_PROVIDER_TIMEOUT_S: float = 15.0   # per Gmail round-trip
+    # The Google Calendar SDK is synchronous too — the read paths run off-loop +
+    # bounded via the same to_thread/wait_for idiom (calendar_tool._blocking).
+    CALENDAR_TIMEOUT_S: float = 15.0         # per Google Calendar round-trip
+    # Readiness period reads resolve the master's TZ from the profile; this is the
+    # FLAGGED fallback when always_on["timezone"] is unset — never a SILENT UTC
+    # (a wrong TZ lands events in the wrong period). Override per deployment.
+    DEFAULT_TIMEZONE: str = "UTC"
     # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
     # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
     # surfaced, never blind-retried (a read-timeout may have already delivered).

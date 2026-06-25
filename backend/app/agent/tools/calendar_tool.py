@@ -16,16 +16,23 @@ P5b additions:
     Approve/Reject prompt for calendar_create — a soft warning, not a hard block;
     the master decides per-event.
 """
-from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel, Field
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+import structlog
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from pydantic import BaseModel, Field
 
-from app.config import settings
 from app.agent.tools.registry import tool_registry
-import structlog
+from app.config import settings
 
 logger = structlog.get_logger()
+
+_PERIOD_MAX_RESULTS = 250  # Google's page max; a readiness window wants them all
 
 
 # ---------- Args schemas ----------
@@ -78,6 +85,23 @@ def _service():
     return build("calendar", "v3", credentials=_build_credentials(), cache_discovery=False)
 
 
+async def _blocking[T](fn: Callable[[], T], *, timeout: float | None = None) -> T:
+    """Run a SYNCHRONOUS google-api-python-client call OFF the event loop AND
+    bounded. The SDK is sync — a bare ``…execute()`` blocks the whole backend for
+    the round-trip and a hung call would wedge it. Mirrors the Gmail adapter's
+    ``_blocking`` idiom (to_thread + wait_for); ``fn`` builds the service AND
+    executes inside the worker thread, so the OAuth ``build`` (discovery I/O) is
+    off-loop too. The READ paths (calendar_read + calendar_period) route through
+    here — fixing the adjacent sync-on-loop block. The APPROVE-tier write handlers
+    (create/update/delete/conflict) still call .execute() directly; routing them is
+    the same one-line wrap but they mutate the live calendar, so that follow-up is
+    left out of this readiness-focused step."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(fn),
+        timeout=timeout if timeout is not None else settings.CALENDAR_TIMEOUT_S,
+    )
+
+
 def _fmt_time(iso: str, with_day: bool = True) -> str:
     """Compact local time for a warning line; falls back to the raw value.
 
@@ -92,18 +116,19 @@ def _fmt_time(iso: str, with_day: bool = True) -> str:
 # ---------- Handlers ----------
 async def calendar_read(days_ahead: int = 7, max_results: int = 20) -> str:
     """Fetch upcoming events from the master's primary calendar."""
-    service = _service()
+    now = datetime.now(UTC)
 
-    now = datetime.now(timezone.utc)
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=now.isoformat(),
-        timeMax=(now + timedelta(days=days_ahead)).isoformat(),
-        maxResults=max_results,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
+    def _list():
+        return _service().events().list(
+            calendarId="primary",
+            timeMin=now.isoformat(),
+            timeMax=(now + timedelta(days=days_ahead)).isoformat(),
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
 
+    events_result = await _blocking(_list)  # off-loop + bounded
     events = events_result.get("items", [])
     if not events:
         return f"No events scheduled in the next {days_ahead} days."
@@ -253,6 +278,120 @@ async def calendar_conflict_warning(start_iso: str, end_iso: str) -> str | None:
     return "⚠️ Heads up — this overlaps existing events:\n" + "\n".join(
         f"  • {o}" for o in overlaps
     )
+
+
+# ---------- Readiness: internal period read (4.2) — NOT an LLM tool ----------
+@dataclass
+class CalendarEvent:
+    """One normalized calendar event for the readiness aggregator."""
+    title: str
+    start: str                  # ISO in the master's TZ (timed) or YYYY-MM-DD (all-day)
+    end: str
+    all_day: bool
+    location: str
+    attendees: list[str]
+    event_id: str
+
+
+@dataclass
+class CalendarPeriodResult:
+    """Events in a date range + the TZ they were resolved in. ``timezone_fallback``
+    is True when the profile TZ was unset and the configured default was used — so
+    the aggregator can SAY 'using UTC' rather than silently misplace events. ``ok``
+    is False on a calendar failure (fail-soft; events empty, error set)."""
+    events: list[CalendarEvent]
+    timezone: str
+    timezone_fallback: bool
+    ok: bool = True
+    error: str = ""
+
+
+async def _resolve_timezone(tz: str) -> tuple[str, bool]:
+    """Resolve the master's TZ — explicit arg → profile always_on['timezone'] →
+    configured default (FLAGGED). Never silently UTC. Returns (tz_name, fallback)."""
+    candidate = (tz or "").strip()
+    if not candidate:
+        try:
+            from app.memory.manager import get_memory
+            always_on = await get_memory().get_always_on()
+            candidate = (always_on.get("timezone") or "").strip()
+        except Exception as exc:  # noqa: BLE001 — TZ resolution must never raise
+            logger.warning("calendar_tz_profile_read_failed", error=str(exc))
+            candidate = ""
+    fallback = False
+    if not candidate:
+        candidate, fallback = settings.DEFAULT_TIMEZONE, True
+    try:
+        ZoneInfo(candidate)
+    except Exception:  # noqa: BLE001 — an invalid name falls back to the default
+        logger.warning("calendar_tz_invalid", tz=candidate, default=settings.DEFAULT_TIMEZONE)
+        candidate, fallback = settings.DEFAULT_TIMEZONE, True
+        ZoneInfo(candidate)  # the configured default must be valid
+    return candidate, fallback
+
+
+def _to_tz(dt_iso: str, zone: ZoneInfo) -> str:
+    try:
+        return datetime.fromisoformat(dt_iso).astimezone(zone).isoformat()
+    except Exception:  # noqa: BLE001 — leave an unparseable value raw
+        return dt_iso
+
+
+def _normalize_event(ev: dict, zone: ZoneInfo) -> CalendarEvent:
+    s, e = ev.get("start", {}), ev.get("end", {})
+    all_day = "dateTime" not in s  # Google: all-day → "date", timed → "dateTime"
+    if all_day:
+        start, end = s.get("date", ""), e.get("date", "")
+    else:
+        start, end = _to_tz(s.get("dateTime", ""), zone), _to_tz(e.get("dateTime", ""), zone)
+    return CalendarEvent(
+        title=ev.get("summary", "(no title)"),
+        start=start, end=end, all_day=all_day,
+        location=ev.get("location", ""),
+        attendees=[a.get("email", "") for a in ev.get("attendees", [])],
+        event_id=ev.get("id", ""),
+    )
+
+
+async def calendar_period(start: str, end: str, tz: str = "") -> CalendarPeriodResult:
+    """INTERNAL (not an LLM tool) — the calendar input for readiness (4.3). Fetch
+    events in the INCLUSIVE local-date range [start, end] (YYYY-MM-DD), normalized
+    to the master's timezone.
+
+    TZ correctness is the headline: the range boundaries are LOCAL midnight in the
+    master's TZ converted to UTC (DST-safe via ZoneInfo), NOT UTC midnight — so an
+    event late on the last local day lands in the right period. ``tz`` is resolved
+    (arg → profile → flagged default) and returned, so the caller never assumes UTC."""
+    tz_name, fallback = await _resolve_timezone(tz)
+    zone = ZoneInfo(tz_name)
+    try:
+        start_d, end_d = date.fromisoformat(start), date.fromisoformat(end)
+    except ValueError as exc:
+        return CalendarPeriodResult([], tz_name, fallback, ok=False, error=f"bad date range: {exc}")
+
+    # Local-midnight boundaries → UTC. timeMax is EXCLUSIVE, so use local midnight
+    # of the day AFTER end → the whole end day is included.
+    time_min = datetime.combine(start_d, time.min, zone).astimezone(UTC)
+    time_max = datetime.combine(end_d + timedelta(days=1), time.min, zone).astimezone(UTC)
+
+    def _list():
+        return _service().events().list(
+            calendarId="primary",
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=_PERIOD_MAX_RESULTS,
+        ).execute()
+
+    try:
+        raw = await _blocking(_list)
+    except Exception as exc:  # noqa: BLE001 — fail-soft: readiness degrades, never errors
+        logger.warning("calendar_period_failed", start=start, end=end, tz=tz_name, error=str(exc))
+        return CalendarPeriodResult([], tz_name, fallback, ok=False, error=str(exc)[:200])
+
+    events = [_normalize_event(ev, zone) for ev in raw.get("items", [])]
+    return CalendarPeriodResult(events, tz_name, fallback, ok=True)
 
 
 # ---------- Registration ----------
