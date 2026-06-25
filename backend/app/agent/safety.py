@@ -54,6 +54,7 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "document_search":  SafetyLevel.SAFE,
     "web_research":     SafetyLevel.SAFE,
     "task_list":        SafetyLevel.SAFE,
+    "readiness_check":  SafetyLevel.SAFE,
 
     # --- own-task management (no external side effect) -----------------------
     "task_add":         SafetyLevel.SAFE,

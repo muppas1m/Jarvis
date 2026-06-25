@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (108 modules)
+## `app/` — the system (109 modules)
 
 ```
 app/
@@ -19,6 +19,7 @@ app/
 │   │   ├── document_search.py — document_search — agent-facing RAG tool over ingested documents.
 │   │   ├── email_history.py — Email history search — query email_logs + pending_approvals for recall.
 │   │   ├── email_send.py — Email send tool — provider-agnostic outbound email for the agent.
+│   │   ├── readiness_tool.py — Readiness intelligence (Phase 4.3) — "am I all set for [period]?"
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
 │   ├── approval_dispatch.py — Generic execute-on-approve dispatcher (Phase 3 — Step 1).

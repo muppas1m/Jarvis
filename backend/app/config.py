@@ -180,6 +180,13 @@ class Settings(BaseSettings):
     # FLAGGED fallback when always_on["timezone"] is unset — never a SILENT UTC
     # (a wrong TZ lands events in the wrong period). Override per deployment.
     DEFAULT_TIMEZONE: str = "UTC"
+    # Readiness look-ahead (4.3): surface a task due BEYOND the asked period only if
+    # its priority's horizon reaches it — high warns weeks out, low never. Days past
+    # the period end. The priority-scaled bar that keeps a licence-renewal (high) weeks
+    # ahead in view while a weekend errand (low) stays out.
+    READINESS_LOOKAHEAD_HIGH_DAYS: int = 30
+    READINESS_LOOKAHEAD_MEDIUM_DAYS: int = 7
+    READINESS_LOOKAHEAD_LOW_DAYS: int = 0
     # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
     # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
     # surfaced, never blind-retried (a read-timeout may have already delivered).
