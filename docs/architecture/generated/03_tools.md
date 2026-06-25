@@ -4,7 +4,7 @@
 
 # Tools & Safety Tiers
 
-8 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
+12 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
 
 | Tool | Safety tier | Always-loaded | Backing module | Summary |
 |---|---|---|---|---|
@@ -16,3 +16,7 @@
 | `email_history_search` | SAFE |  | `app.agent.tools.email_history` | Search the master's email history — what messages came in, who sent them, were they replie… |
 | `email_send` | APPROVE |  | `app.agent.tools.email_send` | Send an email via the master's account |
 | `memory_search` | SAFE | yes | `app.agent.tools.builtin_memory` | Search the master's persistent conversation memory — facts they've told you, preferences, … |
+| `task_add` | SAFE |  | `app.agent.tools.actionable_tool` | Record a task / to-do the master needs to act on, into their task list |
+| `task_complete` | SAFE |  | `app.agent.tools.actionable_tool` | Mark a task DONE when the master says they've finished it — matches an open task by its wo… |
+| `task_drop` | SAFE |  | `app.agent.tools.actionable_tool` | DROP / cancel a task the master no longer needs to do — abandoned, NOT done |
+| `task_list` | SAFE |  | `app.agent.tools.actionable_tool` | List the master's tasks — their TO-DO list, the source of truth for what they need to act … |

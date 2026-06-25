@@ -19,6 +19,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Index,
@@ -134,6 +135,27 @@ class PendingApproval(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     resolved_via = Column(String(50), nullable=True)           # "telegram", "web", "whatsapp"
+
+
+class ActionableItem(Base):
+    """An open task the master needs to act on — the actionable-memory foundation
+    (Phase 4.1). Distinct from PendingApproval (HITL gates on the agent's actions)
+    and Mem0 (immutable durable facts): this is MUTABLE, queryable task state
+    (status / priority / due) that readiness intelligence (4.3) aggregates over a
+    time period. Single source of truth for tasks — NOT mirrored into Mem0."""
+    __tablename__ = "actionable_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content = Column(Text, nullable=False)                     # the task, in the master's words
+    status = Column(String(20), default="open", nullable=False, index=True)  # open|done|dropped
+    priority = Column(String(10), nullable=False)             # low|medium|high (elicited, never guessed)
+    due_date = Column(Date, nullable=True, index=True)        # day-granular, interpreted in master's local TZ
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)  # set on done/dropped
+    meta = Column(JSONB, nullable=False, default=dict)        # owner_id seam + source thread_id
 
 
 # --------------------------------------------------------------------------- #
@@ -322,4 +344,14 @@ Index(
     "ix_document_chunks_doc_chunk",
     DocumentChunk.document_id,
     DocumentChunk.chunk_index,
+)
+Index(
+    "ix_actionable_items_status_due",   # readiness: open tasks due within a period
+    ActionableItem.status,
+    ActionableItem.due_date,
+)
+Index(
+    "ix_actionable_items_status_priority",  # readiness: open tasks by priority (look-ahead)
+    ActionableItem.status,
+    ActionableItem.priority,
 )

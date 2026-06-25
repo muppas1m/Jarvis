@@ -53,6 +53,12 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "email_history_search": SafetyLevel.SAFE,
     "document_search":  SafetyLevel.SAFE,
     "web_research":     SafetyLevel.SAFE,
+    "task_list":        SafetyLevel.SAFE,
+
+    # --- own-task management (no external side effect) -----------------------
+    "task_add":         SafetyLevel.SAFE,
+    "task_complete":    SafetyLevel.SAFE,
+    "task_drop":        SafetyLevel.SAFE,
 
     # --- low-risk writes -----------------------------------------------------
     "telegram_send":    SafetyLevel.NOTIFY,

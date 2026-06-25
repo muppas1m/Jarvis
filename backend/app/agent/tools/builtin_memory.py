@@ -49,7 +49,8 @@ def register() -> None:
             "Search the master's persistent conversation memory — facts they've "
             "told you, preferences, relationships, things mentioned in past "
             "chats with you (Jarvis). "
-            "Does NOT search email content; use email_history_search for that. "
+            "Does NOT search email content (use email_history_search) and does NOT "
+            "track open tasks / to-dos (use task_list for the master's list). "
             "Use for: 'what did I tell you about X', 'do I prefer Y', 'who is Z', "
             "questions referencing prior chat context."
         ),
