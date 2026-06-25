@@ -34,6 +34,7 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from langchain_core.messages import (
@@ -277,6 +278,108 @@ async def agent_node(state: AgentState) -> dict:
 
 
 # ============================================================================
+# Shared guarded tool execution (graph node + execute-on-approve dispatcher)
+# ============================================================================
+@dataclass
+class ToolExecResult:
+    """Outcome of one guarded tool execution — the sanitized result string plus
+    success/error/latency. The graph node wraps ``content`` in a ToolMessage; the
+    out-of-band execute-on-approve dispatcher (Phase 3) renders it for the master."""
+
+    content: str
+    success: bool
+    error: str | None
+    latency_ms: int
+
+
+async def execute_tool_guarded(
+    thread_id: str,
+    tool_name: str,
+    tool_args: dict,
+    *,
+    level: SafetyLevel,
+    tool_call_id: str = "",
+) -> ToolExecResult:
+    """Execute ONE tool with the execute-time guards — the shared core used by
+    BOTH ``tool_executor_node`` (SAFE / NOTIFY / approved-APPROVE, inline) and the
+    out-of-band execute-on-approve dispatcher. Maps the JarvisError family to
+    friendly messages, captures latency, sanitizes + archives the result, audits,
+    and (NOTIFY-tier) pings the master. The whole post-execute block is wrapped so
+    a render/DB/notify failure never loses the result.
+
+    It does NOT apply the per-TURN rate limit: that's a QUEUE-time runaway guard
+    (``tool_executor_node`` still checks it before an APPROVE-tier tool is queued,
+    and it matters more now that one turn can queue several cards). The out-of-band
+    execute of a single master-approved action is exempt by design (Phase 3
+    rate-limit split)."""
+    from app.agent.tools.registry import tool_registry
+    from app.messaging.failure_alerter import notify_tool_executed
+
+    dispatch_start = time.monotonic()
+    try:
+        raw_result = await tool_registry.execute(tool_name, tool_args)
+        success = True
+        err: str | None = None
+    except RateLimitedError as exc:
+        logger.warning("tool_rate_limited", tool=tool_name, error=str(exc))
+        raw_result = f"[RATE-LIMITED] Hit hourly cap on `{tool_name}`. Try again later. ({exc})"
+        success = False
+        err = f"RATE_LIMITED: {exc}"
+    except SafetyBlockedError as exc:
+        logger.warning("tool_safety_blocked_runtime", tool=tool_name, error=str(exc))
+        raw_result = f"[BLOCKED] Safety layer rejected `{tool_name}`: {exc}"
+        success = False
+        err = f"SAFETY_BLOCKED: {exc}"
+    except ApprovalExpiredError as exc:
+        logger.warning("tool_approval_expired", tool=tool_name, error=str(exc))
+        raw_result = f"[EXPIRED] Approval window for `{tool_name}` lapsed: {exc}"
+        success = False
+        err = f"APPROVAL_EXPIRED: {exc}"
+    except CostCapExceededError as exc:
+        logger.error("tool_cost_cap_exceeded", tool=tool_name, error=str(exc))
+        raw_result = f"[BUDGET] Daily LLM spend cap reached — `{tool_name}` deferred until tomorrow."
+        success = False
+        err = f"COST_CAP_EXCEEDED: {exc}"
+    except Exception as exc:  # noqa: BLE001 — keep one tool failure from killing the turn
+        logger.error("tool_execution_failed", tool=tool_name, error=str(exc))
+        raw_result = f"[ERROR] Tool '{tool_name}' failed: {exc}"
+        success = False
+        err = str(exc)
+    latency_ms = int((time.monotonic() - dispatch_start) * 1000)
+
+    # ---- post-execute: sanitize / archive / audit / notify -----------------
+    # Wrapped as a whole: a failure in ANY of these must NOT leave the result
+    # un-recorded (and, in the node, the tool_call unanswered — the P1 orphan).
+    content = f"[ERROR] Tool '{tool_name}' ran but its result could not be recorded."
+    try:
+        content, archived_full = sanitize_tool_result(
+            tool_name=tool_name,
+            raw_result=raw_result,
+            max_chars=settings.TOOL_RESULT_MAX_CHARS,
+        )
+        if archived_full is not None:
+            archive_id = await _archive_tool_result(
+                thread_id=thread_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                full_result=archived_full,
+            )
+            content += f"\n[archived:{archive_id}]"
+
+        await _log_audit(
+            thread_id, tool_name, level, tool_args,
+            success=success, error=err, latency_ms=latency_ms,
+        )
+
+        if level == SafetyLevel.NOTIFY:
+            await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
+    except Exception as exc:  # noqa: BLE001 — never drop the result (P1 orphan guard)
+        logger.error("tool_post_execute_failed", tool=tool_name, error=str(exc))
+
+    return ToolExecResult(content=content, success=success, error=err, latency_ms=latency_ms)
+
+
+# ============================================================================
 # Node 3 — tool_executor (one tool call per invocation; loops via the graph)
 # ============================================================================
 async def tool_executor_node(state: AgentState) -> dict:
@@ -305,11 +408,7 @@ async def tool_executor_node(state: AgentState) -> dict:
     """
     # Lazy imports — these modules don't exist as module attributes; the
     # imports run at call time so test patches via `patch.object(...)` work.
-    from app.agent.tools.registry import tool_registry
-    from app.messaging.failure_alerter import (
-        notify_tool_executed,
-        send_approval_request_to_master,
-    )
+    from app.messaging.failure_alerter import send_approval_request_to_master
 
     # Walk BACK to the most recent AIMessage with tool_calls. We can't just
     # look at state["messages"][-1] because once we've processed at least one
@@ -477,84 +576,15 @@ async def tool_executor_node(state: AgentState) -> dict:
         # (trailing) is appended AFTER the result ToolMessage at the node's return.
 
     # ---- execute (SAFE, NOTIFY, or approved-APPROVE) -----------------------
-    # Latency is measured here, wrapping the dispatch chokepoint
-    # (tool_registry.execute), so a single capture covers BOTH the success and
-    # every failure path uniformly — the node is the only vantage that sees all
-    # of them (execute() can't return latency on the exception paths). The
-    # deferred per-tool timeout wrap (project_per_tool_execution_timeout_gap)
-    # lives inside execute(); this measurement already times whatever it does.
-    dispatch_start = time.monotonic()
-    try:
-        raw_result = await tool_registry.execute(tool_name, tool_args)
-        success = True
-        err: str | None = None
-    except RateLimitedError as exc:
-        logger.warning("tool_rate_limited", tool=tool_name, error=str(exc))
-        raw_result = (
-            f"[RATE-LIMITED] Hit hourly cap on `{tool_name}`. Try again later. ({exc})"
-        )
-        success = False
-        err = f"RATE_LIMITED: {exc}"
-    except SafetyBlockedError as exc:
-        logger.warning("tool_safety_blocked_runtime", tool=tool_name, error=str(exc))
-        raw_result = f"[BLOCKED] Safety layer rejected `{tool_name}`: {exc}"
-        success = False
-        err = f"SAFETY_BLOCKED: {exc}"
-    except ApprovalExpiredError as exc:
-        logger.warning("tool_approval_expired", tool=tool_name, error=str(exc))
-        raw_result = f"[EXPIRED] Approval window for `{tool_name}` lapsed: {exc}"
-        success = False
-        err = f"APPROVAL_EXPIRED: {exc}"
-    except CostCapExceededError as exc:
-        logger.error("tool_cost_cap_exceeded", tool=tool_name, error=str(exc))
-        raw_result = (
-            f"[BUDGET] Daily LLM spend cap reached — `{tool_name}` deferred until tomorrow."
-        )
-        success = False
-        err = f"COST_CAP_EXCEEDED: {exc}"
-    except Exception as exc:  # noqa: BLE001 — keep one tool failure from killing the turn
-        logger.error("tool_execution_failed", tool=tool_name, error=str(exc))
-        raw_result = f"[ERROR] Tool '{tool_name}' failed: {exc}"
-        success = False
-        err = str(exc)
-    latency_ms = int((time.monotonic() - dispatch_start) * 1000)
-
-    # ---- post-execute: sanitize / archive / audit / notify -----------------
-    # Wrapped as a whole: a failure in ANY of these — sanitize, the
-    # _archive_tool_result or _log_audit DB writes, or the notify_tool_executed
-    # Telegram send — must NOT leave the tool_call unanswered. An orphaned
-    # tool_call poisons the history and 400s the next LLM call (the P1 terminal
-    # error), so the ToolMessage ALWAYS returns, with a fallback body if
-    # rendering itself failed. (_log_audit is already best-effort internally;
-    # this is belt-and-suspenders for it and the real cover for archive/notify.)
-    sanitized = f"[ERROR] Tool '{tool_name}' ran but its result could not be recorded."
-    try:
-        sanitized, archived_full = sanitize_tool_result(
-            tool_name=tool_name,
-            raw_result=raw_result,
-            max_chars=settings.TOOL_RESULT_MAX_CHARS,
-        )
-        if archived_full is not None:
-            archive_id = await _archive_tool_result(
-                thread_id=thread_id,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                full_result=archived_full,
-            )
-            sanitized += f"\n[archived:{archive_id}]"
-
-        await _log_audit(
-            thread_id, tool_name, level, tool_args,
-            success=success, error=err, latency_ms=latency_ms,
-        )
-
-        if level == SafetyLevel.NOTIFY:
-            await notify_tool_executed(thread_id=thread_id, tool_name=tool_name)
-    except Exception as exc:  # noqa: BLE001 — never drop the ToolMessage (P1 orphan guard)
-        logger.error("tool_post_execute_failed", tool=tool_name, error=str(exc))
-
+    # The execute + JarvisError handling + sanitize/archive/audit/notify is the
+    # shared guarded core (execute_tool_guarded), reused by the Phase-3
+    # execute-on-approve dispatcher. The node wraps the result in a ToolMessage
+    # (always — the P1 orphan guard) and appends any persisted master turn.
+    exec_result = await execute_tool_guarded(
+        thread_id, tool_name, tool_args, level=level, tool_call_id=tool_call_id
+    )
     return {
-        "messages": [ToolMessage(content=sanitized, tool_call_id=tool_call_id), *trailing]
+        "messages": [ToolMessage(content=exec_result.content, tool_call_id=tool_call_id), *trailing]
     }
 
 

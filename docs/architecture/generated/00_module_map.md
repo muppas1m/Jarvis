@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (105 modules)
+## `app/` — the system (106 modules)
 
 ```
 app/
@@ -20,6 +20,7 @@ app/
 │   │   ├── email_send.py — Email send tool — provider-agnostic outbound email for the agent.
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
+│   ├── approval_dispatch.py — Generic execute-on-approve dispatcher (Phase 3 — Step 1).
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
 │   ├── decision_resolver.py — Natural-language resolution of a pending decision (A2 Piece 2).
 │   ├── graph.py — StateGraph wiring + AsyncPostgresSaver checkpointer.

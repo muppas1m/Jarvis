@@ -83,7 +83,14 @@ async def resolve_approval(
     async with async_session() as session:
         result = await session.execute(
             update(PendingApproval)
-            .where(PendingApproval.id == approval_uuid, PendingApproval.status == "pending")
+            .where(
+                PendingApproval.id == approval_uuid,
+                PendingApproval.status == "pending",
+                # Expiry/staleness gate (Phase 3 invariant 7): an expired-but-not-
+                # yet-swept row can't be claimed → can't execute. The atomic
+                # WHERE makes the expiry check part of the SAME claim — no TOCTOU.
+                PendingApproval.expires_at > datetime.now(UTC),
+            )
             .values(status=new_status, resolved_at=datetime.now(UTC), resolved_via=resolved_via)
             .returning(PendingApproval.thread_id)
         )
@@ -91,7 +98,7 @@ async def resolve_approval(
         await session.commit()
 
     if row is None:
-        # Missing OR already-resolved OR lost the claim race — do NOT dispatch.
+        # Missing OR already-resolved OR EXPIRED OR lost the claim race — no dispatch.
         logger.info("resolve_approval_not_claimed", approval_id=approval_id, action=action)
         return None
     logger.info(
