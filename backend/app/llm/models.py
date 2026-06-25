@@ -86,6 +86,11 @@ def get_models() -> dict[str, ModelConfig]:
         # Dedicated slot for owned memory fact-extraction — same paid Gemini, off
         # the agent's Groq. Routed via force_model="extractor" (app.memory.extraction).
         "extractor": _build_model(settings.MEMORY_EXTRACTION_MODEL),
+        # Dedicated slot for the decision resolver (approve/reject/edit/skip judge) —
+        # a STRONG model, never the fast tier: it gates an irreversible send on one
+        # classification, where the weakest model's ambiguous-acknowledgment leaks are
+        # unacceptable. Routed via force_model="decision" (app.agent.decision_resolver).
+        "decision": _build_model(settings.DECISION_MODEL),
     }
 
 

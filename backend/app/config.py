@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # Dedicated extraction LLM for Mem0 — see project_mem0_extraction_gemini_swap.
     # PRIMARY_MODEL on Groq free tier saturates TPM after ~1 memory write.
     MEMORY_EXTRACTION_MODEL: str = "gemini/gemini-2.5-flash-lite"
+    # Decision resolver — the natural-language approve/reject/edit/skip judge gates an
+    # IRREVERSIBLE send on ONE classification, so it does NOT run on the weakest tier:
+    # llama-3.1-8b leaked, mis-classifying a topic-echo ("right, the Q3 numbers") as
+    # approve and breaking its own "when in doubt never approve" rule. A false send is
+    # wildly asymmetric to the fractional per-call cost → route to a strong, instruction-
+    # faithful model (gpt-4o-mini holds the ambiguous-acknowledgment boundary in testing),
+    # with a second verification gate on approve (decision_resolver).
+    DECISION_MODEL: str = "openai/gpt-4o-mini"
 
     # --- Mem0 FACT-LEVEL dedup-on-write --------------------------------------
     # Skip a write when an existing memory is near-identical to the FACT being
