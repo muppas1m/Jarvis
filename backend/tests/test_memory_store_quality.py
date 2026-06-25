@@ -4,8 +4,9 @@ Postgres + pgvector, extraction LLM bypassed.
 
 Companion to test_memory_recall_integration.py (the read side). What this locks:
   - get_all() returns the FULL corpus, not Mem0's default top_k=20 truncation.
-  - the durable-fact extraction rules stay wired into Mem0.
-  - dedup-on-write skips a near-identical fact and keeps a distinct one.
+  - extraction stays OWNED by app.memory.extraction (Mem0's additive extractor
+    is not re-delegated to); Mem0 is a pure vector store.
+  - fact-level dedup-on-write skips a near-identical fact and keeps a distinct one.
 
 infer=False everywhere for the same reason as the recall suite: deterministic
 verbatim writes, no Gemini-extraction RPM dependency. Cleanup is reliable
@@ -51,7 +52,7 @@ async def memory_cleanup(test_thread_id):
 async def _add_no_infer(mem_manager: MemoryManager, content: str, thread_id: str) -> None:
     """Write content verbatim as a memory row tagged with thread_id (skips the
     extraction LLM). Goes through the raw Mem0 client so dedup-on-write is NOT
-    exercised here — tests that want dedup call mem_manager.mem0.add directly."""
+    exercised here — tests that want dedup call mem_manager.mem0.add_fact directly."""
     await mem_manager.mem0.client.add(
         messages=[{"role": "user", "content": content}],
         user_id=mem_manager.mem0.USER_ID,
@@ -91,24 +92,29 @@ async def test_get_all_returns_full_corpus_not_capped(
     assert len(rows) <= settings.MEM0_GET_ALL_LIMIT, "corpus reached the configured bound"
 
 
-def test_extraction_custom_instructions_wired() -> None:
-    """Auto-save scoping (4.B.2) depends on Mem0 receiving our durable-facts
-    extraction rules. Lock the WIRING so a config refactor can't silently drop
-    them. (Extraction behavior itself is LLM-measured — 7→3 facts/turn on a
-    representative mix — not unit-tested, since the extraction LLM is
-    non-deterministic.)"""
-    from app.memory.mem0_client import JARVIS_EXTRACTION_INSTRUCTIONS, _mem0_config
+def test_extraction_is_owned_not_delegated_to_mem0() -> None:
+    """Extraction is OWNED by app.memory.extraction (a true system prompt + role
+    separation) — Mem0's own ADDITIVE extractor is no longer used. Lock that
+    contract so a refactor can't silently re-delegate to Mem0:
+      - the Mem0 config must NOT carry custom_instructions (the old additive hook
+        that lost to Mem0's extract-everything default — 2026-06-25 diagnosis);
+      - the owned system prompt must keep the load-bearing scoping guards.
+    (Extraction behaviour itself is LLM-measured in test_memory_extraction.py.)"""
+    from app.memory.extraction import EXTRACTION_SYSTEM_PROMPT
+    from app.memory.mem0_client import _mem0_config
 
     cfg = _mem0_config()
-    assert cfg.get("custom_instructions") == JARVIS_EXTRACTION_INSTRUCTIONS, (
-        "Mem0 config no longer carries the durable-facts extraction rules — "
-        "auto-save would fall back to the noisy default prompt."
+    assert "custom_instructions" not in cfg, (
+        "Mem0 config carries custom_instructions again — that hook is ADDITIVE to "
+        "Mem0's extract-everything default and loses to it. Extraction must stay "
+        "owned by app.memory.extraction (infer=False writes)."
     )
-    ci = JARVIS_EXTRACTION_INSTRUCTIONS.lower()
+    sp = EXTRACTION_SYSTEM_PROMPT.lower()
     # the load-bearing guards must survive any future edit to the rules
-    assert "durable" in ci
-    assert "assistant" in ci          # "Assistant line is context only" guard
-    assert "do not extract" in ci
+    assert "durable" in sp
+    assert "assistant" in sp           # "assistant = context only" guard
+    assert "do not extract" in sp
+    assert "precision over recall" in sp
 
 
 @pytest.mark.asyncio
@@ -131,9 +137,9 @@ async def test_dedup_skips_true_duplicate_keeps_distinct(
     seed = f"{ns}. The user's lucky number is forty-two."
     await _add_no_infer(mem_manager, seed, test_thread_id)  # verbatim seed in the store
 
-    # (1) exact re-write → dedup search finds the seed (~1.0) → SKIPPED before any
-    #     extraction (returns early, no LLM call).
-    r_dup = await mem_manager.mem0.add(content=seed, thread_id=test_thread_id)
+    # (1) exact re-write of the SAME fact → fact-level dedup search finds the seed
+    #     (~1.0) → SKIPPED before the verbatim write (returns early).
+    r_dup = await mem_manager.mem0.add_fact(seed, thread_id=test_thread_id)
     assert r_dup.get("skipped_duplicate") is True, f"true duplicate not skipped: {r_dup}"
 
     # (2) a genuinely distinct fact (its own unique token → no near neighbor) stays

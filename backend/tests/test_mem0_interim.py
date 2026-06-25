@@ -51,16 +51,30 @@ def _make_client() -> Mem0Client:
     return c
 
 
-# MEM0_DEDUP_ENABLED defaults to False (dormant until Turn 26.5 fixes search),
-# so tests that exercise the dedup PATH must turn it on explicitly.
+# Dedup runs on a single FACT now (add_fact, infer=False), not the old turn blob.
+# MEM0_DEDUP_ENABLED defaults to True; the per-call dedup=False still bypasses it.
 @pytest.mark.asyncio
 async def test_dedup_skips_near_identical():
     c = _make_client()
-    c.search = AsyncMock(return_value=[{"score": 0.95, "content": "User likes tea"}])
+    # Above the 0.97 gate → a true near-identical re-extraction → skipped.
+    c.search = AsyncMock(return_value=[{"score": 0.98, "content": "User likes tea"}])
     with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
-        res = await c.add("User: I like tea")
+        res = await c.add_fact("User likes tea")
     assert res.get("skipped_duplicate") is True
     c.client.add.assert_not_called()  # never written
+
+
+@pytest.mark.asyncio
+async def test_dedup_keeps_contradiction_below_gate():
+    """A contradiction/update scores high (~0.96) but BELOW the 0.97 gate, so it
+    is written, never suppressed — the asymmetric-cost guard. Also pins that the
+    fact is stored VERBATIM (infer=False), not re-extracted."""
+    c = _make_client()
+    c.search = AsyncMock(return_value=[{"score": 0.962, "content": "User prefers morning meetings"}])
+    with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
+        await c.add_fact("User prefers afternoon meetings")
+    c.client.add.assert_awaited_once()
+    assert c.client.add.await_args.kwargs["infer"] is False
 
 
 @pytest.mark.asyncio
@@ -68,7 +82,7 @@ async def test_dedup_writes_novel_fact():
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.40}])  # below threshold
     with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
-        await c.add("User: I just adopted a dog named Rex")
+        await c.add_fact("User just adopted a dog named Rex")
     c.client.add.assert_awaited_once()
 
 
@@ -77,7 +91,7 @@ async def test_dedup_writes_when_no_existing_memory():
     c = _make_client()
     c.search = AsyncMock(return_value=[])
     with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
-        await c.add("User: first fact ever")
+        await c.add_fact("User's first fact ever")
     c.client.add.assert_awaited_once()
 
 
@@ -86,19 +100,20 @@ async def test_dedup_fails_open_on_search_error():
     c = _make_client()
     c.search = AsyncMock(side_effect=RuntimeError("vector store down"))
     with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
-        await c.add("User: a fact")
+        await c.add_fact("User has a fact")
     c.client.add.assert_awaited_once()  # dedup error must not block the write
 
 
 @pytest.mark.asyncio
-async def test_dedup_disabled_by_default_skips_the_search():
-    """Default-off: no dedup search runs (the P5c calibration finding — it can't
-    fire today, so don't burn a dead search per write)."""
+async def test_dedup_enabled_by_default_runs_the_search():
+    """Default-on: the dedup search runs without an explicit enable, and a
+    near-identical hit is skipped."""
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.99}])
-    await c.add("User: anything")  # MEM0_DEDUP_ENABLED defaults False
-    c.search.assert_not_called()
-    c.client.add.assert_awaited_once()
+    res = await c.add_fact("User has a recurring fact")  # MEM0_DEDUP_ENABLED defaults True
+    c.search.assert_awaited_once()
+    assert res.get("skipped_duplicate") is True
+    c.client.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -106,6 +121,6 @@ async def test_dedup_can_be_bypassed_per_call():
     c = _make_client()
     c.search = AsyncMock(return_value=[{"score": 0.99}])
     with patch("app.config.settings.MEM0_DEDUP_ENABLED", True):
-        await c.add("User: forced write", dedup=False)
+        await c.add_fact("User forced this write", dedup=False)
     c.client.add.assert_awaited_once()
     c.search.assert_not_called()  # dedup=False skips the check even when enabled

@@ -60,33 +60,6 @@ def _shape_vector_hit(row: Any) -> dict[str, Any]:
 wire_litellm_providers()
 
 
-# Highest-priority rules injected into Mem0's extraction LLM (see Mem0
-# ADDITIVE_EXTRACTION_PROMPT — custom_instructions are "User-defined rules,
-# highest priority"). Steers auto-save toward DURABLE personal facts and away
-# from the transient/task/agent chatter the default prompt over-extracts. We
-# pass the turn as a single "User: …/Assistant: …" string (persist_turn), so
-# Mem0 can't natively scope to user-role messages — these rules carry the
-# "Assistant line is context only" guard explicitly. Measured 4.B.2: 7→3
-# facts/turn on a representative mix, with every dropped fact being noise
-# (agent commentary, one-off task requests). See project_mem0_search_quality_root.
-JARVIS_EXTRACTION_INSTRUCTIONS = """You are extracting DURABLE long-term memories for a personal AI assistant whose single user is its owner. Each input is ONE conversation turn formatted as "User: ... / Assistant: ...". The "Assistant:" portion is CONTEXT ONLY — never store the assistant's actions, confirmations, or statements as facts.
-
-ONLY extract facts that are about the USER as a person AND will still matter weeks from now:
-- Stable preferences (likes/dislikes, communication style, food, tools, brands).
-- Durable personal details (name, relationships, important recurring dates, home location, profession).
-- Health & dietary facts (allergies, restrictions, fitness routines).
-- Lasting goals and standing commitments (recurring plans, ongoing projects).
-
-Do NOT extract (transient, or not a durable user fact):
-- One-off task requests or commands ("send an email to X", "what's the distance to Orlando", "summarize this", "remind me to call now").
-- The status/outcome of a task ("the email was sent", "both tools completed").
-- Anything the Assistant said or did.
-- Ephemeral conversational mechanics, acknowledgements, or pleasantries.
-- A question the user asked that reveals no durable fact about them.
-
-When uncertain whether a fact is durable, DO NOT store it. Prefer precision over recall."""
-
-
 def _mem0_config() -> dict[str, Any]:
     """Build the Mem0 config dict from app settings.
 
@@ -109,14 +82,12 @@ def _mem0_config() -> dict[str, Any]:
             },
         },
         "llm": {
-            # Goes through LiteLLM so model swapping in .env flows here too.
-            # Mem0 uses this LLM to *extract* facts from raw turns via function
-            # calling. We have a DEDICATED MEMORY_EXTRACTION_MODEL setting
-            # (defaulting to gemini/gemini-2.0-flash) rather than reusing
-            # PRIMARY_MODEL, because per-write token burn is 5-9k and Groq
-            # free tier's 12k TPM cannot sustain that on top of normal chat.
-            # See memory note `project_mem0_extraction_gemini_swap.md` for
-            # the decision rationale.
+            # Mem0 requires an LLM in its config to instantiate, but we NEVER use
+            # its extraction path: every write goes through add_fact(infer=False),
+            # so Mem0 is a pure vector store. Fact extraction is OWNED by
+            # app.memory.extraction (a true system prompt + role separation the
+            # ADDITIVE_EXTRACTION_PROMPT couldn't give us — see that module + the
+            # 2026-06-25 diagnosis). This block is kept only so from_config works.
             "provider": "litellm",
             "config": {
                 "model": settings.MEMORY_EXTRACTION_MODEL,
@@ -135,9 +106,6 @@ def _mem0_config() -> dict[str, Any]:
                 "embedding_dims": settings.EMBEDDING_DIMS,
             },
         },
-        # Scope auto-save to durable personal facts (4.B.2). Mem0 injects this as
-        # the highest-priority block of its extraction prompt.
-        "custom_instructions": JARVIS_EXTRACTION_INSTRUCTIONS,
     }
 
 
@@ -155,29 +123,36 @@ class Mem0Client:
             vector_store="pgvector(jarvis.mem0_memories)",
         )
 
-    async def add(
+    async def add_fact(
         self,
-        content: str,
+        fact: str,
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         dedup: bool = True,
     ) -> Any:
-        """Extract and store memories from a turn or fact statement.
+        """Store a single durable FACT VERBATIM (``infer=False`` — Mem0 does NOT
+        re-extract; extraction is owned by ``app.memory.extraction``).
 
-        Dedup-on-write (P5c interim, slows the per-session bloat): if an existing
-        memory is near-identical to ``content`` (cosine score >= MEM0_DEDUP_THRESHOLD),
-        skip the write entirely. High threshold by default so only true duplicates
-        are dropped, never a distinct fact — full semantic consolidation/supersession
-        is Turn 26.5. Best-effort: a dedup-check failure never blocks the write."""
+        Fact-level dedup (the granularity fix): we search the store for THIS fact
+        and skip the write if its nearest neighbour scores >= MEM0_DEDUP_THRESHOLD.
+        The old path dedup-searched the whole TURN blob against single-fact rows —
+        a granularity mismatch that never fired (0 skips/48h observed) and let
+        identical facts pile up. Searching a fact against facts makes the threshold
+        meaningful. 0.97 sits ABOVE the measured contradiction/negation ceiling
+        (~0.962, re-measured 2026-06-25), so an updated/contradicting fact is never
+        wrongly suppressed; it catches the dominant bloat driver — identical
+        re-extraction (~1.0). Softer-paraphrase merging + true supersession is the
+        deferred consolidation engine's job (it needs truth-guards, not a cosine
+        threshold). Best-effort: a dedup-check failure never blocks the write."""
         if dedup and settings.MEM0_DEDUP_ENABLED:
             try:
-                hits = await self.search(query=content, top_k=1)
+                hits = await self.search(query=fact, top_k=1)
                 if hits and hits[0].get("score", 0.0) >= settings.MEM0_DEDUP_THRESHOLD:
                     logger.info(
-                        "mem0_add_skipped_duplicate",
+                        "mem0_fact_skipped_duplicate",
                         score=round(float(hits[0]["score"]), 4),
                         existing_preview=(hits[0].get("content") or "")[:80],
-                        new_preview=content[:80],
+                        new_preview=fact[:80],
                     )
                     return {"results": [], "skipped_duplicate": True}
             except Exception as exc:  # noqa: BLE001 — dedup is best-effort
@@ -187,9 +162,10 @@ class Mem0Client:
         if thread_id:
             meta["thread_id"] = thread_id
         return await self.client.add(
-            messages=[{"role": "user", "content": content}],
+            messages=[{"role": "user", "content": fact}],
             user_id=self.USER_ID,
             metadata=meta,
+            infer=False,   # store the fact verbatim — extraction already happened
         )
 
     async def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:

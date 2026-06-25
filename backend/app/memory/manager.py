@@ -18,6 +18,7 @@ Tier breakdown:
 from typing import Any
 
 from app.config import settings
+from app.memory.extraction import extract_facts
 from app.memory.mem0_client import Mem0Client
 from app.memory.user_profile import UserProfileManager
 from app.utils.logging import get_logger
@@ -104,14 +105,27 @@ class MemoryManager:
         user_message: str,
         assistant_response: str,
     ) -> None:
-        """After a turn closes, hand the (user, assistant) pair to Mem0 so it
-        can extract durable memories. Raw messages stay with LangGraph; only
-        Mem0 extractions land in our memory store."""
+        """After a turn closes, extract durable USER facts from the (user,
+        assistant) pair and store each verbatim. Extraction is owned by
+        app.memory.extraction (precision-first, role-separated) — Mem0 is a pure
+        vector store via add_fact(infer=False). Raw messages stay with LangGraph;
+        only durable facts land in our memory store."""
         if _is_trivial_turn(user_message):
             logger.debug("mem0_persist_skipped_trivial", user_preview=user_message[:60])
             return
-        combined = f"User: {user_message}\nAssistant: {assistant_response}"
-        await self.mem0.add(content=combined, thread_id=thread_id)
+        facts = await extract_facts(user_message, assistant_response)
+        written = 0
+        for fact in facts:
+            result = await self.mem0.add_fact(fact, thread_id=thread_id)
+            if not (isinstance(result, dict) and result.get("skipped_duplicate")):
+                written += 1
+        logger.info(
+            "mem0_persist_turn",
+            extracted=len(facts),
+            written=written,
+            deduped=len(facts) - written,
+            thread_id=thread_id,
+        )
 
     # ------------------------------------------------------------------
     # Profile mutators — kept here so callers don't need a separate
@@ -123,8 +137,10 @@ class MemoryManager:
 
     async def update_profile_on_demand(self, key: str, value: Any) -> None:
         await self.profile_mgr.update_on_demand(key, value)
-        await self.mem0.add(
-            content=f"Profile section [{key}]: {value}",
+        # A profile section is already a durable fact statement — write it verbatim
+        # (add_fact, infer=False), not through extraction.
+        await self.mem0.add_fact(
+            f"Profile section [{key}]: {value}",
             metadata={"kind": "profile", "key": key},
         )
 

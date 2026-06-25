@@ -45,20 +45,26 @@ class Settings(BaseSettings):
     # PRIMARY_MODEL on Groq free tier saturates TPM after ~1 memory write.
     MEMORY_EXTRACTION_MODEL: str = "gemini/gemini-2.5-flash-lite"
 
-    # --- Mem0 dedup-on-write (4.B.2) -----------------------------------------
-    # Skip a write when an existing memory is near-identical (true cosine >=
-    # threshold). ENABLED as of 4.B.2 now that 4.B.1 restored the true cosine
-    # (the old fused ~0.45 made any threshold meaningless). Threshold CALIBRATED
-    # against real post-4.B.1 scores, biased high because the cost is asymmetric
-    # — wrongly skipping a DISTINCT fact loses information, wrongly keeping a dup
-    # is only minor bloat:
-    #   duplicates (paraphrase/reorder/exact): 0.972 – 1.0
-    #   contradictions (e.g. "morning" vs "afternoon meetings"): up to 0.958  ← must NOT skip
-    #   negations ("allergic" vs "not allergic"): <= 0.895
-    #   distinct facts (different allergen/value): <= 0.93
-    # 0.97 sits above every contradiction/negation/distinct case (so those are
-    # kept, not skipped) and catches identical re-extraction, the dominant bloat
-    # driver. Trivial-turn gating (manager._is_trivial_turn) still runs upstream.
+    # --- Mem0 FACT-LEVEL dedup-on-write --------------------------------------
+    # Skip a write when an existing memory is near-identical to the FACT being
+    # written (true cosine >= threshold). The dedup now runs in add_fact() against
+    # a single extracted fact (not the old turn-blob, which never matched a stored
+    # fact → 0 skips/48h while identical facts piled up). Threshold biased HIGH
+    # because the cost is asymmetric — wrongly skipping a DISTINCT/updated fact
+    # loses information, wrongly keeping a paraphrase is only minor bloat.
+    # Re-measured 2026-06-25 on real bge-m3 cosines:
+    #   true paraphrase (SHOULD skip):           0.89 – 0.97
+    #   contradiction ("morning" vs "afternoon"): up to 0.962  ← must NOT skip
+    #   negation ("allergic" vs "not allergic"):  <= 0.878      ← must NOT skip
+    #   distinct facts (shellfish vs peanuts):    <= 0.844
+    # The paraphrase and contradiction bands OVERLAP (a 0.962 contradiction scores
+    # higher than a 0.947 paraphrase) — cosine cannot separate "restate" from
+    # "update", so NO threshold catches every paraphrase without risking a
+    # contradiction. 0.97 is the safe floor: above the 0.962 contradiction ceiling
+    # (never suppresses an update) while still catching identical re-extraction —
+    # the dominant bloat driver. Softer-paraphrase merging is the deferred
+    # consolidation engine's job (truth-guards, not a threshold). Trivial-turn
+    # gating (manager._is_trivial_turn) still runs upstream.
     MEM0_DEDUP_ENABLED: bool = True
     MEM0_DEDUP_THRESHOLD: float = 0.97
 
