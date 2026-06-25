@@ -1,22 +1,25 @@
 """
 Tool selector structural smoke.
 
-Phase 1 only registers one tool (memory_search) and it's `always_loaded=True`.
-That means we CAN'T meaningfully test "the selector picks the right tool
-from N candidates" — there are no candidates to choose between. But we
-CAN test the structural contract that matters when Phase 2 onboards
-gmail / calendar / web_research tools:
+select_relevant_tools(query, top_k) returns every `always_loaded=True` tool PLUS
+the top_k rankables by cosine — and at the current scale (rankable tools <= top_k)
+it FAST-PATHS to "all rankables", skipping the cosine search as pure latency (tool
+order doesn't change whether the model calls a tool). These tests lock the
+structural contract the agent depends on:
 
-  - select_relevant_tools(query) returns AT LEAST every always-loaded tool.
-  - When no rankable tools exist, the result is exactly the always-loaded
-    set (not duplicated, not missing, not silently failing).
-  - The always-loaded set is non-empty in Phase 1 (memory_search is in it).
+  - the always-loaded set is non-empty (memory_search is in it);
+  - select_relevant_tools ALWAYS includes every always-loaded tool;
+  - at current scale it returns always-loaded ∪ all-rankable, deduped;
+  - empty/whitespace queries don't crash.
 
-If any of these break, Phase 2's gmail tools won't surface even when the
-master's query screams "send an email" — because the dynamic-selection
-path is what passes them to the LLM. The structural smoke locks down the
-plumbing so the actual tool-relevance test can be added in Phase 2 once
-there are real candidates to rank.
+If always-loaded plumbing breaks, the master's "send an email" tools won't surface
+to the LLM. Deliberate NON-GOAL: there is no cosine relevance threshold on
+selection — the design is offer-generously / let-the-model-decide. Withholding a
+tool the query actually needs (a false negative; tool-description-vs-query cosine
+is often low even when the tool IS relevant) is worse than offering an unused one
+the model ignores. Over-invocation on trivial inputs is addressed by always_loaded
+scoping + the triviality-classifier route, NOT by thresholding selection (see
+project_trivial_message_over_invocation).
 """
 import pytest
 
@@ -53,33 +56,38 @@ def test_always_loaded_set_is_non_empty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_selector_returns_only_always_loaded_when_no_rankables() -> None:
-    """With Phase 1's registry (only memory_search, always_loaded=True),
-    select_relevant_tools should return exactly that one tool — the
-    always-loaded set, no ranked additions, no duplicates.
+async def test_selector_surfaces_always_loaded_plus_rankables_at_current_scale() -> None:
+    """The load-bearing contract: select_relevant_tools ALWAYS includes every
+    always-loaded tool, and at the current scale (rankable tools <= top_k) it
+    returns always-loaded ∪ all-rankable — the fast-path "offer generously, let
+    the model decide" design (there is NO relevance threshold on selection).
 
-    This is the structural contract Phase 2 relies on: when ranked
-    candidates exist they merge AFTER always-loaded; when they don't,
-    the result equals always-loaded."""
-    expected_names = set(_always_loaded_names())
-    if not expected_names:
+    (Was a Phase-1 assertion that an unrelated query returns ONLY memory_search —
+    obsolete once calendar / document / task tools onboarded as rankables; an
+    unrelated query now correctly surfaces all rankables, since the model, not a
+    cosine floor, decides what to call.)"""
+    always = set(_always_loaded_names())
+    if not always:
         pytest.skip("no always-loaded tools registered — nothing to assert")
+    rankable = {e.name for e in tool_registry._entries.values() if not e.always_loaded}
 
-    # Issue a query that has nothing semantically to do with memory_search.
-    # The point isn't relevance; it's that the selector path runs cleanly
-    # and returns the always-loaded set.
-    selected = await tool_registry.select_relevant_tools(
-        query="xyzzy unrelated query placeholder",
-        top_k=5,
-    )
-    selected_names = {t.name for t in selected}
+    top_k = 15
+    selected = [
+        t.name for t in await tool_registry.select_relevant_tools(
+            query="xyzzy unrelated query placeholder", top_k=top_k,
+        )
+    ]
+    selected_set = set(selected)
 
-    assert selected_names == expected_names, (
-        f"Selector returned {sorted(selected_names)}, expected exactly "
-        f"the always-loaded set {sorted(expected_names)}. Either the "
-        f"always-loaded plumbing is broken, or rankable tools snuck in "
-        f"and duplicated entries (which would also break this assertion)."
-    )
+    assert always.issubset(selected_set), f"always-loaded dropped: {sorted(always - selected_set)}"
+    assert len(selected) == len(selected_set), f"duplicate tool names: {selected}"
+    assert len(selected_set) <= len(always) + top_k
+    if len(rankable) <= top_k:
+        # Fast-path: relevance is irrelevant at this scale — everything is offered.
+        assert selected_set == always | rankable, (
+            f"fast-path contract broken: expected always ∪ rankable, "
+            f"got {sorted(selected_set)} (missing {sorted((always | rankable) - selected_set)})"
+        )
 
 
 @pytest.mark.asyncio
