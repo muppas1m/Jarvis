@@ -61,11 +61,13 @@ async def resolve_approval(
 
     Args:
         approval_id: PendingApproval.id (UUID as string).
-        action: "approve" or "reject".
+        action: "approve", "reject", or "discard" (superseded by an edit/revision —
+            same atomic claim, so a concurrent approve can't race a discard).
         resolved_via: which channel completed the action ("telegram", "web", "voice").
     """
-    if action not in ("approve", "reject"):
-        raise ValueError(f"action must be 'approve' or 'reject', got {action!r}")
+    _STATUS = {"approve": "approved", "reject": "rejected", "discard": "discarded"}
+    if action not in _STATUS:
+        raise ValueError(f"action must be one of {tuple(_STATUS)}, got {action!r}")
 
     try:
         approval_uuid = uuid.UUID(approval_id)
@@ -73,7 +75,7 @@ async def resolve_approval(
         logger.warning("resolve_approval_bad_uuid", approval_id=approval_id)
         return None
 
-    new_status = "approved" if action == "approve" else "rejected"
+    new_status = _STATUS[action]
     async with async_session() as session:
         result = await session.execute(
             update(PendingApproval)

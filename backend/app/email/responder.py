@@ -78,3 +78,61 @@ async def generate_draft(subject: str, sender: str, body: str) -> dict:
         }
     except json.JSONDecodeError:
         return {"complexity": "complex", "response": content}
+
+
+REVISE_PROMPT = """You are revising a draft email reply on behalf of your master ({master_name}).
+
+You already drafted the reply below. The master reviewed it and asked for ONE
+change. Apply their change and return the REVISED reply — keep everything else
+intact; change only what they asked for.
+
+Same hard rule as the original draft: do NOT fabricate facts. Use only what's in
+the draft, the original email, or the master's profile. If the requested change
+needs information you don't have, ask the sender for it rather than inventing it.
+
+Respond in this exact JSON format:
+{{
+    "response": "Your revised email reply here"
+}}
+
+---
+Original email — From: {sender}, Subject: {subject}
+
+The draft you wrote:
+{draft}
+
+The master's requested change: {change}
+
+Master's communication style: {comm_style}
+"""
+
+
+async def revise_draft(*, subject: str, sender: str, draft: str, change: str) -> str:
+    """Re-draft an email reply applying the master's requested change, returning the
+    revised reply body. The original ``draft`` + the ``change`` are the re-draft
+    CONTEXT (they go in the prompt) — never the master's persisted words."""
+    import json
+
+    profile = await get_memory().profile_mgr.get_full()
+    always_on = profile.get("always_on", {})
+
+    prompt = REVISE_PROMPT.format(
+        master_name=profile.get("name", "Master"),
+        sender=sender,
+        subject=subject,
+        draft=draft,
+        change=change,
+        comm_style=always_on.get("communication_style", "Professional and concise"),
+    )
+
+    response = await llm_gateway.complete(
+        messages=[{"role": "user", "content": prompt}],
+        task_type="drafting",
+        temperature=0.3,
+    )
+
+    content = response["choices"][0]["message"]["content"]
+    try:
+        return json.loads(content).get("response", "") or content
+    except json.JSONDecodeError:
+        return content

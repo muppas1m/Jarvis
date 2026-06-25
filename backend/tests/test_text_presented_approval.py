@@ -169,11 +169,99 @@ async def test_text_approve_lost_claim_no_double_send(monkeypatch):
     assert events[-1]["type"] == "done"
 
 
-async def test_text_edit_keeps_pending(monkeypatch):
+async def test_text_edit_without_context_nudges(monkeypatch):
+    # No message/conversation_thread_id (e.g. a caller that can't re-draft) → the
+    # SAFE floor: a nudge, never a claim/send. (The voice path lands here too.)
     rec = _wire_decision(monkeypatch)
     events = await _collect(runner._resolve_presented_decision(_judgment("edit"), speak=False))
-    assert "call" not in rec and _resolved(events) is None  # edit never claims → stays pending
+    assert "call" not in rec and _resolved(events) is None
     assert events[-1]["type"] == "done"
+
+
+# --- edit (REVISE) — TEXT re-draft: discard-FIRST (claim-gated) + re-queue -----
+def _edit_judgment(change="make it shorter"):
+    return runner._PresentedJudgment(
+        approval_id="uuid-1", row=_Row(), intent="edit", change=change
+    )
+
+
+def _wire_revise(monkeypatch, *, claimed=True, revised="Shorter draft.", raises=None):
+    rec: dict = {}
+
+    async def fake_claim(approval_id, action, resolved_via):
+        rec["claim"] = (approval_id, action, resolved_via)
+        return ("email:gmail:msg-1" if claimed else None)
+
+    async def fake_revise(*, subject, sender, draft, change):
+        rec["revise"] = {"draft": draft, "change": change}
+        if raises:
+            raise raises
+        return revised
+
+    async def fake_requeue(row, revised_draft):
+        rec["requeue"] = revised_draft
+        return {
+            "approval_id": "uuid-NEW", "tool_name": "email_reply",
+            "tool_args": {"to": "p@x.com", "subject": "Q3", "body": revised_draft},
+            "description": "Reply to 'Q3' from Priya",
+        }
+
+    async def fake_persist(thread_id, message):
+        rec["persist"] = (thread_id, message)
+
+    monkeypatch.setattr("app.api.approvals.resolve_approval", fake_claim)
+    monkeypatch.setattr("app.email.responder.revise_draft", fake_revise)
+    monkeypatch.setattr(runner, "_requeue_revised_email", fake_requeue)
+    monkeypatch.setattr(runner, "_persist_edit_to_conversation", fake_persist)
+    return rec
+
+
+async def test_text_edit_discards_then_requeues_new_card(monkeypatch):
+    rec = _wire_revise(monkeypatch)
+    events = await _collect(runner._resolve_presented_decision(
+        _edit_judgment(), speak=False, message="make it shorter", conversation_thread_id="web:master"
+    ))
+    assert rec["claim"] == ("uuid-1", "discard", "web")  # DISCARD-first, claim-gated
+    assert _resolved(events) == "discarded"  # the OLD card greys to discarded
+    assert rec["revise"]["change"] == "make it shorter"  # original draft + change = context
+    assert rec["revise"]["draft"] == "On it."
+    # exactly ONE new card (new approval_id) — no double, no two-pending window
+    cards = [e for e in events if e["type"] == "approval_required"]
+    assert len(cards) == 1
+    assert cards[0]["content"]["approval_id"] == "uuid-NEW"
+    assert cards[0]["content"]["tool_name"] == "email_reply"  # renders as an email card
+    assert cards[0]["content"]["tool_args"]["body"] == "Shorter draft."
+    # the master's ACTUAL words persisted (NOT a synthetic instruction)
+    assert rec["persist"] == ("web:master", "make it shorter")
+    assert events[-1]["type"] == "done"
+
+
+async def test_text_edit_lost_claim_no_redraft_no_double(monkeypatch):
+    # A concurrent approve won the claim first → discard loses → NO re-draft, no
+    # new card (the original already sent/resolved). Never two approvable cards.
+    rec = _wire_revise(monkeypatch, claimed=False)
+    events = await _collect(runner._resolve_presented_decision(
+        _edit_judgment(), speak=False, message="make it shorter", conversation_thread_id="web:master"
+    ))
+    assert rec["claim"][1] == "discard"  # the claim was attempted
+    assert "revise" not in rec  # lost claim → never re-drafts
+    assert not any(e["type"] == "approval_required" for e in events)  # no new card
+    assert _resolved(events) is None
+    assert events[-1]["type"] == "done"
+
+
+async def test_text_edit_failed_redraft_leaves_no_card(monkeypatch):
+    # Discard-FIRST, then the re-draft fails → NO new card (the old is discarded;
+    # the master re-asks). Never two cards, never an error/send.
+    rec = _wire_revise(monkeypatch, raises=RuntimeError("llm down"))
+    events = await _collect(runner._resolve_presented_decision(
+        _edit_judgment(), speak=False, message="make it shorter", conversation_thread_id="web:master"
+    ))
+    assert _resolved(events) == "discarded"  # old still discarded (discard-first held)
+    assert "requeue" not in rec  # re-draft failed → no re-queue
+    assert not any(e["type"] == "approval_required" for e in events)  # NO new card
+    assert "persist" not in rec  # didn't persist a half-state
+    assert events[-1]["type"] == "done"  # never errors the turn
 
 
 # --- the spoken/typed outcome line (3rd transport) distinguishes the cases ----

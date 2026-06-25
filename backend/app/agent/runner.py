@@ -323,7 +323,9 @@ async def stream_turn(
                 "stream_turn_resolving_presented_approval",
                 thread_id=thread_id, approval_id=presented_approval_id, intent=judged.intent,
             )
-            async for ev in _resolve_presented_decision(judged, speak=False):
+            async for ev in _resolve_presented_decision(
+                judged, speak=False, message=user_message, conversation_thread_id=thread_id
+            ):
                 yield ev
             return
         logger.info(
@@ -730,12 +732,15 @@ async def _resolve_presented_approval_voice(
 
 
 async def _resolve_presented_decision(
-    judged: _PresentedJudgment, *, speak: bool
+    judged: _PresentedJudgment, *, speak: bool,
+    message: str = "", conversation_thread_id: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """Resolve an ACTIONABLE judgment (approve/reject/edit) for ANY presented card
-    — inbound email OR chat-queued tool call (Phase 3). Goes through the ONE
-    claim-then-dispatch gate (``resolve_and_dispatch``); a lost claim → acknowledge,
-    never double-execute. Shared by text and voice (``speak`` adds the audio)."""
+    — inbound email OR chat-queued tool call (Phase 3). Approve/reject go through
+    the ONE claim-then-dispatch gate (``resolve_and_dispatch``); a lost claim →
+    acknowledge, never double-execute. Edit (TEXT only) re-drafts. Shared by text
+    and voice (``speak`` adds the audio); ``message``/``conversation_thread_id`` are
+    the text edit's re-draft inputs (the master's actual words + their thread)."""
     from app.agent.approval_dispatch import resolve_and_dispatch
 
     h = settings.MASTER_HONORIFIC
@@ -767,10 +772,116 @@ async def _resolve_presented_decision(
             yield ev
         return
 
-    # edit — degraded to a nudge in the cutover (the REVISE re-draft lands as a
-    # follow-up increment). Edit NEVER errors or sends; the card stays pending.
+    # edit (REVISE) — TEXT re-drafts: discard-first (claim-gated) then re-queue a
+    # NEW card. VOICE stays the safe nudge (audio re-draft of a chat card isn't worth
+    # the turn complexity yet). Edit NEVER errors or sends.
+    if not speak and message and conversation_thread_id:
+        async for ev in _revise_presented_card(judged, message, conversation_thread_id, _emit):
+            yield ev
+        return
     async for ev in _emit(f"I can only send or discard this for now, {h}. Shall I go ahead?"):
         yield ev
+
+
+async def _requeue_revised_email(row: Any, revised_draft: str) -> dict[str, Any]:
+    """Create a NEW email_reply card from the discarded one's payload + the revised
+    draft (same email thread → still a threaded reply to the same message; new
+    approval_id). Returns the present-in-moment card content (the SAME tool-kind
+    shape the queue / 3B emit, so 3C renders it identically)."""
+    from datetime import timedelta
+
+    from app.db.engine import async_session
+    from app.db.models import PendingApproval
+
+    payload = dict(row.payload or {})
+    payload["draft"] = revised_draft
+    sender = payload.get("sender", "")
+    subject = payload.get("subject", "")
+    description = f"Reply to '{subject}' from {sender}:\n\n{revised_draft}"
+    async with async_session() as session:
+        approval = PendingApproval(
+            thread_id=row.thread_id,      # same email thread — a reply to the same message
+            interrupt_id=row.thread_id,   # mirrors thread_id (no LangGraph token; not unique)
+            action_type="email_reply",
+            description=description,
+            payload=payload,
+            expires_at=datetime.now(UTC) + timedelta(hours=settings.APPROVAL_EXPIRY_HOURS),
+        )
+        session.add(approval)
+        await session.commit()
+        await session.refresh(approval)
+        new_id = str(approval.id)
+    return {
+        "approval_id": new_id,
+        "tool_name": "email_reply",
+        "tool_args": {"to": sender, "subject": subject, "body": revised_draft},
+        "description": description,
+    }
+
+
+async def _persist_edit_to_conversation(thread_id: str, message: str) -> None:
+    """History fidelity: append the master's ACTUAL edit words + a brief confirmation
+    to the conversation thread so a reload shows the negotiation. The re-draft CONTEXT
+    (original draft + the change) is NOT persisted — it lived only in the re-draft
+    prompt. Best-effort: a persistence hiccup never fails the edit."""
+    h = settings.MASTER_HONORIFIC
+    try:
+        await graph().aupdate_state(
+            {"configurable": {"thread_id": thread_id}},
+            {"messages": [
+                HumanMessage(content=message),
+                AIMessage(content=f"I've revised that reply, {h} — the new draft is queued for your approval."),
+            ]},
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort persistence
+        logger.warning("persist_edit_to_conversation_failed", thread_id=thread_id, error=str(exc))
+
+
+async def _revise_presented_card(
+    judged: _PresentedJudgment, message: str, conversation_thread_id: str, emit
+) -> AsyncIterator[dict[str, Any]]:
+    """TEXT edit re-draft. DISCARD-FIRST (claim-gated, reusing the atomic claim so a
+    concurrent approve can't race it), THEN re-draft + re-queue a NEW email_reply
+    card. A failed re-draft leaves NO card (the old is already discarded; the master
+    re-asks) — never two approvable cards, never a send."""
+    from app.api.approvals import resolve_approval
+    from app.email.responder import revise_draft
+
+    h = settings.MASTER_HONORIFIC
+    # 1. Claim-gated discard (pending→discarded). A lost claim → already resolved
+    # (e.g. a concurrent approve won) → acknowledge, do nothing else.
+    if await resolve_approval(judged.approval_id, "discard", "web") is None:
+        async for ev in emit(f"That one's already taken care of, {h}."):
+            yield ev
+        return
+    yield _decision_resolved_event(judged.row.thread_id, judged.approval_id, "discarded")
+
+    payload = judged.row.payload or {}
+    # 2. Re-draft + re-queue. On ANY failure → no new card (the old is discarded),
+    # so the master is never left with two cards or a silent half-state.
+    try:
+        revised = await revise_draft(
+            subject=payload.get("subject", ""),
+            sender=payload.get("sender", ""),
+            draft=payload.get("draft", ""),
+            change=(judged.change or message),
+        )
+        if not (revised or "").strip():
+            raise ValueError("empty revised draft")
+        card = await _requeue_revised_email(judged.row, revised)
+    except Exception as exc:  # noqa: BLE001 — never error the turn / never send
+        logger.warning("revise_presented_failed", approval_id=judged.approval_id, error=str(exc))
+        async for ev in emit(f"I couldn't revise that one, {h} — ask me again and I'll redo it."):
+            yield ev
+        return
+
+    # 3. Persist the master's actual words (history fidelity) + surface the NEW card
+    # present-in-moment (the queue poll is the durable fallback for other sessions).
+    await _persist_edit_to_conversation(conversation_thread_id, message)
+    yield {"type": "approval_required", "thread_id": conversation_thread_id, "content": card}
+    yield {"type": "done", "content": _terminal_payload(
+        {"thread_id": conversation_thread_id, "status": "complete", "response": ""}
+    )}
 
 
 def _presented_outcome_speech(outcome: Any, intent: str) -> str:
