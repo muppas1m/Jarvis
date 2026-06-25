@@ -9,8 +9,9 @@ Two entry modes:
     `/api/webhooks/telegram`; same code path through `normalize()`.
 
 The two-button approval keyboard ferries `{"a": "approve"|"reject", "id": <approval_id>}`
-back through the CallbackQueryHandler, which resolves the DB row and
-resumes the graph via `route_approval_decision`.
+back through the CallbackQueryHandler, which resolves it through the claim-gated
+dispatcher (`resolve_and_dispatch`) — atomically claiming the row and executing
+the action out-of-band (no graph resume).
 
 Lazy factory `get_telegram_channel()` — the constructor raises if
 TELEGRAM_BOT_TOKEN is unset, and we don't want that crash to fire at

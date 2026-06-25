@@ -5,9 +5,10 @@ Topology lives in `build_graph()`'s docstring below — keeping it in one
 place so the diagram doesn't drift across files. nodes.py also references
 the same picture from the consumer side.
 
-The checkpointer persists state to Postgres after each node, so a turn that
-hits `interrupt()` (in tool_executor for an APPROVE-level call) survives
-process restarts. Resume happens via `Command(resume=...)` from runner.py.
+The checkpointer persists state to Postgres after each node, so a conversation
+survives process restarts. Phase 3 retired `interrupt()`: an APPROVE-level tool
+no longer pauses the graph — it QUEUES a PendingApproval and the turn completes,
+executing out-of-band on approve via the claim-gated dispatcher.
 
 Lifecycle:
   - `init_checkpointer()` is called from FastAPI's lifespan startup hook.

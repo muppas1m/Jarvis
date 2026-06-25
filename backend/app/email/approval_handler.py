@@ -207,12 +207,3 @@ def channel_alert_for(outcome: EmailApprovalOutcome, thread_id: str) -> str | No
     )
 
 
-async def resolve(thread_id: str, platform: str, decision: dict[str, Any]) -> None:
-    """Channel-origin approval entry for the messaging router (Telegram, etc.):
-    resolve, then push the master-facing alert through the originating channel."""
-    from app.messaging.channel_registry import channel_registry
-
-    outcome = await dispatch_email_approval(thread_id, decision)
-    text = channel_alert_for(outcome, thread_id)
-    if text:
-        await channel_registry.get(platform).send_alert(text)

@@ -17,9 +17,10 @@ the dispatcher runs only for the call that WON the claim, so a tool executes at
 most once across any resolve path / race / retry. This module assumes the claim
 already succeeded; it never re-claims, and never re-checks expiry (the claim did).
 
-NOT wired into ``decide_approval`` / ``route_approval_decision`` yet — Step 1
-builds + tests this in isolation. The cutover that retires ``interrupt()`` and
-routes ALL tool-call resolution here is Step 2.
+Wired into EVERY transport through the single ``resolve_and_dispatch`` gate
+(dashboard ``decide_approval``, Telegram ``_on_callback``, the voice/typed
+presented-card resolvers). The cutover that retired ``interrupt()`` and routes
+ALL tool-call resolution here has landed; there is no graph resume anymore.
 """
 from __future__ import annotations
 

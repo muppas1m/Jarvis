@@ -55,10 +55,9 @@ def _make_gmail_service(email_dict: dict) -> tuple[MagicMock, list]:
 
 @pytest.mark.asyncio
 async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
-    from app.api.approvals import resolve_approval
+    from app.api.approvals import DecideRequest, decide_approval
     from app.email.inbound import _process_message
     from app.email.provider import GmailProvider
-    from app.messaging.router import route_approval_decision
 
     msg_id = f"vtest-{uuid.uuid4().hex[:12]}"
     rfc822_id = f"<orig-{uuid.uuid4().hex[:8]}@example.com>"
@@ -93,9 +92,7 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
                    AsyncMock(return_value={"complexity": "simple", "response": draft_body})), \
              patch("app.email.inbound.send_approval_request_to_master", AsyncMock()) as mock_req, \
              patch("app.email.inbound.send_system_alert", AsyncMock()) as mock_sys_alert, \
-             patch("app.email.provider.gmail.GmailProvider._service", return_value=service), \
-             patch("app.messaging.router.channel_registry.get",
-                   return_value=MagicMock(send_alert=AsyncMock())):
+             patch("app.email.provider.gmail.GmailProvider._service", return_value=service):
 
             # ---- inbound: provider fetch → classify (mocked) → draft (mocked) →
             #      EmailLog gate → queue approval. Drives the REAL pipeline through
@@ -124,10 +121,13 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
             assert mock_req.await_count == 1, "master should have been asked to approve exactly once"
             assert mock_sys_alert.await_count == 0, "simple-draft path must NOT emit a system alert"
 
-            # ---- master approves → dispatch → send_email → provider → mocked send() ----
-            tid = await resolve_approval(str(approval.id), "approve", "test")
-            assert tid == f"email:gmail:{msg_id}"
-            await route_approval_decision(f"email:gmail:{msg_id}", "telegram", {"approved": True})
+            # ---- master approves via the LIVE dashboard endpoint → the claim-gated
+            #      gate (resolve_and_dispatch) → dispatch_approval → dispatch_email_approval
+            #      → send_email → provider → mocked send(). The REAL production path,
+            #      exactly what the dashboard Approve button drives. ----
+            env = await decide_approval(DecideRequest(approved=True), str(approval.id))
+            assert env["status"] == "complete"
+            assert "bob@example.com" in env["response"]  # "✅ Reply sent to bob@example.com"
 
         # ---- assert the mocked Google client got the correct MIME / threading ----
         assert len(sent_payloads) == 1, f"expected exactly one send, got {len(sent_payloads)}"

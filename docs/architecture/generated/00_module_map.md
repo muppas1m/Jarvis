@@ -100,7 +100,7 @@ app/
 │   ├── channel.py — Channel abstraction.
 │   ├── channel_registry.py — Channel registry.
 │   ├── failure_alerter.py — Channel-routed system alerts.
-│   └── router.py — Inbound + resume routing.
+│   └── router.py — Inbound routing.
 ├── scheduler/
 │   ├── tasks/
 │   │   ├── __init__.py — Scheduled Celery tasks — autodiscovered by app.scheduler.celery_app.

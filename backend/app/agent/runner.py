@@ -3,19 +3,17 @@ Public agent entry point.
 
 The messaging layer (Telegram channel, web chat API, future iMessage / Discord
 adapters) calls into this module ONLY. Everything below — graph wiring,
-checkpointer state, interrupt detection — stays internal.
+checkpointer state — stays internal.
 
-Two surfaces:
+Primary surface:
 
   run_turn(user_message, thread_id, platform, channel_user_id)
-      Start a fresh turn. Returns a TurnEnvelope dict.
+      Start a fresh turn. Returns a TurnEnvelope dict. An APPROVE-tier tool no
+      longer pauses the turn (Phase 3 retired interrupt()/resume): it QUEUES a
+      PendingApproval and the turn completes; the action executes out-of-band on
+      approve via the claim-gated dispatcher (app/agent/approval_dispatch.py).
 
-  resume_turn(thread_id, decision)
-      Continue a paused graph after the master approves/rejects.
-      decision: {"approved": True} or {"approved": False, "reason": "..."}.
-      Same return shape; can re-pause if a follow-up tool also requires APPROVE.
-
-Both compile the graph lazily (build_graph() reads the checkpointer singleton).
+It compiles the graph lazily (build_graph() reads the checkpointer singleton).
 
 The TurnEnvelope is the canonical shape both for HTTP responses (/api/chat,
 /api/approvals/{id}/decide) and for the messaging layer's reply rendering.
@@ -41,7 +39,6 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langgraph.types import Command
 
 from app.agent.decision_resolver import resolve_decision
 from app.agent.graph import build_graph
@@ -263,40 +260,6 @@ async def run_turn(
         ),
     )
     return envelope  # context already on the envelope (set in _build_envelope)
-
-
-async def resume_turn(
-    thread_id: str,
-    decision: dict[str, Any],
-) -> dict[str, Any]:
-    """Resume a graph paused at an interrupt() (typically an APPROVE-level tool).
-
-    decision shape:
-        {"approved": True}
-        {"approved": False, "reason": "looks risky"}
-    """
-    config, handler = _config_with_handler(thread_id)
-    msgs_before = await _existing_message_count(thread_id)
-
-    started_ms = time.monotonic()
-    try:
-        result = await graph().ainvoke(Command(resume=decision), config=config)
-    except Exception as exc:
-        logger.exception("graph_resume_failed", thread_id=thread_id, error=str(exc))
-        return _error_envelope(
-            thread_id, "I hit an internal error while resuming. Please try again.",
-            stop_reason=_stop_reason_for_error(exc),
-        )
-
-    duration_ms = int((time.monotonic() - started_ms) * 1000)
-    return await _build_envelope(
-        thread_id=thread_id,
-        result=result,
-        config=config,
-        msgs_before=msgs_before,
-        duration_ms=duration_ms,
-        handler=handler,
-    )
 
 
 # --------------------------------------------------------------------------- #

@@ -19,9 +19,9 @@ Two integration points exist between Jarvis and Langfuse:
        pip install langchain langfuse[langchain]
 
    `langfuse_callback_handler(thread_id)` returns a fresh handler per call.
-   The handler is stateless across `run_turn` / `resume_turn` invocations —
-   each invocation produces its own trace, all grouped under the same
-   `session_id` (= thread_id) for the Langfuse Sessions view.
+   The handler is stateless across `run_turn` invocations — each invocation
+   produces its own trace, all grouped under the same `session_id`
+   (= thread_id) for the Langfuse Sessions view.
 
    See memory note `project_langfuse_langchain_callback.md` for more detail.
 
@@ -66,9 +66,8 @@ def langfuse_callback_handler(thread_id: str | None = None) -> Any | None:
 
     The handler is fresh per call on purpose:
       - Each `run_turn` produces its own trace (one root span "memory_load → agent → ...").
-      - Each `resume_turn` produces its own trace too (one root span starting at
-        the resumed node). Langfuse groups both traces under the same
-        `session_id` (thread_id) in its Sessions view.
+        Langfuse groups a thread's traces under the same `session_id` (thread_id)
+        in its Sessions view.
       - The handler is NOT shared across calls. It holds no state we want to
         accumulate — each new graph invocation should start fresh.
     """

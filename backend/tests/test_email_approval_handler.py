@@ -1,13 +1,13 @@
-"""Inbound-email approval resolution — the ONE shared core every transport drives,
-now provider-agnostic. Covers the neutral payload + the LEGACY (gmail:) payload
-compat, the send via the provider-neutral send_email (mocked), the stale-row
-provider fetch, the exact channel-alert wording (Telegram regression guard), and
-the router prefix-dispatch for BOTH email: and gmail: origins.
+"""Inbound-email approval resolution — `dispatch_email_approval`, the shared core
+every transport reaches through the claim-gated dispatcher (resolve_and_dispatch →
+dispatch_approval → here). Covers the neutral payload + the LEGACY (gmail:)
+payload compat, the send via the provider-neutral send_email (mocked), the
+stale-row provider fetch, and the exact channel-alert wording (Telegram
+regression guard).
 """
 # Importing the handler at collection pulls in app.email.send (which binds
 # async_session at module scope) UNPATCHED — so a later async_session fake can't
 # leak into the real send path (project_async_state_rebind_pattern sibling).
-import app.messaging.router as router_mod
 from app.email.approval_handler import (
     EMAIL_THREAD_PREFIXES,
     EmailApprovalOutcome,
@@ -190,23 +190,3 @@ def test_channel_alert_wording_unchanged():
     uncertain = channel_alert_for(EmailApprovalOutcome(status="send_uncertain", recipient="p@x.com"), "x")
     assert "couldn't confirm" in uncertain.lower() and "sent folder" in uncertain.lower()
     assert "❌" not in uncertain  # not a flat failure
-
-
-# --- router prefix-dispatch (both email: and legacy gmail:) ------------------
-async def test_router_dispatches_email_and_gmail_prefixes(monkeypatch):
-    called: list = []
-
-    async def fake_handler(thread_id, platform, decision):
-        called.append(thread_id)
-
-    async def fake_resume(**k):
-        called.append("RESUMED")
-        return {"status": "interrupted"}
-
-    for prefix in EMAIL_THREAD_PREFIXES:
-        monkeypatch.setitem(router_mod.CHANNEL_ORIGIN_HANDLERS, prefix, fake_handler)
-    monkeypatch.setattr(router_mod, "resume_turn", fake_resume)
-
-    await router_mod.route_approval_decision("email:gmail:m1", "telegram", {"approved": True})
-    await router_mod.route_approval_decision("gmail:legacy", "telegram", {"approved": True})
-    assert called == ["email:gmail:m1", "gmail:legacy"]  # both → handler, neither resumed

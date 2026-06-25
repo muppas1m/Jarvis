@@ -10,7 +10,7 @@ instance and autodiscovers tasks. Without explicit per-worker initialization,
 half the scheduled tasks fail at runtime — approval_expiry needs the DB engine
 for async_session, @critical_task's failure alerts need the channel registry,
 email_renew + email_check need the provider which is fine but anything
-calling resume_turn needs the checkpointer.
+driving the agent graph (run_turn) needs the checkpointer.
 
 The `worker_process_init` Celery signal fires once per worker process at
 startup (each `--concurrency=N` spawns N processes). Initialize everything

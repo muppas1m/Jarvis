@@ -4,7 +4,10 @@ Action Safety Classifier — every tool call is intercepted before execution.
 Four levels:
   SAFE     -> execute silently (read-only operations).
   NOTIFY   -> execute, then inform master (low-risk writes).
-  APPROVE  -> pause via LangGraph interrupt(), ask master, resume only on yes.
+  APPROVE  -> QUEUE a PendingApproval (non-blocking; the turn completes), ask
+              master, and execute OUT-OF-BAND only on yes — via the claim-gated
+              dispatcher (app/agent/approval_dispatch.py). Phase 3 retired the old
+              interrupt()/resume pause; nothing blocks the turn now.
   BLOCKED  -> never execute, regardless of context.
 
 Default for unknown tools is APPROVE — this is fail-safe. Anything not in the
