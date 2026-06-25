@@ -8,14 +8,15 @@ risk that `feedback_verify_before_claiming.md` originated on this surface to
 prevent. Sibling discipline to email_check / email_renew / morning_brief
 wrappers — every belt-and-braces scheduled task should be fail-loud."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+import structlog
 from sqlalchemy import select
 
-from app.scheduler.task_helpers import reset_async_state_for_task
-from app.scheduler.task_wrapper import critical_task
 from app.db.engine import async_session
 from app.db.models import PendingApproval
-import structlog
+from app.scheduler.task_helpers import reset_async_state_for_task
+from app.scheduler.task_wrapper import critical_task
 
 logger = structlog.get_logger()
 
@@ -29,30 +30,23 @@ def sweep_expired_approvals():
 async def _sweep():
     await reset_async_state_for_task()
 
-    from app.messaging.router import route_approval_decision
     async with async_session() as session:
         result = await session.execute(
             select(PendingApproval).where(
                 PendingApproval.status == "pending",
-                PendingApproval.expires_at < datetime.now(timezone.utc),
+                PendingApproval.expires_at < datetime.now(UTC),
             )
         )
         expired = result.scalars().all()
 
         for approval in expired:
             approval.status = "expired"
-            approval.resolved_at = datetime.now(timezone.utc)
+            approval.resolved_at = datetime.now(UTC)
             approval.resolved_via = "system"
         await session.commit()
         logger.info("approval_expiry_swept", count=len(expired))
 
-    # Resume each expired graph with a rejection (out of session)
-    for approval in expired:
-        try:
-            platform = approval.thread_id.split(":", 1)[0] if ":" in approval.thread_id else "web"
-            await route_approval_decision(
-                approval.thread_id, platform,
-                {"approved": False, "reason": "approval expired (no response within 24h)"},
-            )
-        except Exception as e:
-            logger.error("expiry_resume_failed", approval_id=str(approval.id), error=str(e))
+    # Phase 3: marking the row 'expired' IS the cleanup. There is no paused graph
+    # to resume (APPROVE-tier tools no longer interrupt), and the atomic claim's
+    # `expires_at > now()` gate already prevents any expired row from executing
+    # (invariant 7) — so no resume/route-to-reject step is needed anymore.

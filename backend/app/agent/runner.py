@@ -200,19 +200,17 @@ async def run_turn(
     runtime_stats.record_turn()
     config, handler = _config_with_handler(thread_id)
 
-    # A pending approval interrupt: do NOT start a fresh turn (a free-text
-    # HumanMessage appended after the pending AIMessage tool_call would orphan it
-    # → the next LLM call 400s the thread — the Jun-11 terminal error). Instead,
-    # A2 Piece 2 resolves the message AGAINST the pending decision (approve /
-    # reject / edit / unrelated) via the resume path; the master's words persist
-    # correctly (after the resolving ToolMessage). Only a genuinely unrelated /
-    # ambiguous message falls back to the nudge.
+    # Legacy paused-at-interrupt checkpoint (pre-Phase-3). APPROVE-tier tools no
+    # longer interrupt, so NOTHING new pauses here; the deploy-time drain clears
+    # any pre-cutover paused checkpoint. This guard is the belt-and-braces backstop
+    # for the deploy window: NUDGE to the buttons (which resolve through the claim-
+    # gated dispatcher), and NEVER resume the graph. The old Command(resume) path is
+    # retired — resuming a legacy checkpoint would flip the row to approved WITHOUT
+    # dispatching the tool (a silent action-drop), so the only safe response is the
+    # nudge. The orphan-repair (message_repair) still protects the Jun-11 shape.
     if await _is_awaiting_approval(thread_id):
-        logger.info("run_turn_resolving_pending_interrupt", thread_id=thread_id)
-        resolved = await _resolve_pending(thread_id, user_message)
-        if resolved["outcome"] == "unrelated":
-            return _pending_interrupt_envelope(thread_id)
-        return resolved["envelope"]
+        logger.info("run_turn_legacy_pending_checkpoint_nudge", thread_id=thread_id)
+        return _pending_interrupt_envelope(thread_id)
 
     # Clean any barge-in / send-over cancellation residue (dirty state.next +
     # orphaned tool_call) so this fresh turn starts on a consistent thread.
@@ -302,96 +300,6 @@ async def resume_turn(
 
 
 # --------------------------------------------------------------------------- #
-# Natural-language resolution of a pending decision (A2 Piece 2)              #
-# --------------------------------------------------------------------------- #
-
-
-async def _load_pending_decision(thread_id: str) -> dict[str, Any] | None:
-    """The thread's current pending decision (tool + args + description), or None.
-    One interrupt pauses at a time, so there's at most one pending row."""
-    from app.api.approvals import get_thread_decisions  # lazy — avoid import cycle
-
-    decisions = await get_thread_decisions(thread_id)
-    pending = [d for d in decisions if d.get("status") == "pending"]
-    return pending[-1] if pending else None
-
-
-async def _resolve_approval_row(approval_id: str, action: str) -> None:
-    from app.api.approvals import resolve_approval  # lazy — avoid import cycle
-
-    await resolve_approval(approval_id, action, resolved_via="web")
-
-
-async def _resolve_pending(thread_id: str, user_message: str) -> dict[str, Any]:
-    """Resolve the thread's pending decision against a natural-language message.
-
-    Returns ``{"outcome": "approved"|"rejected"|"discarded"|"unrelated",
-    "approval_id": <id|None>, "envelope": <resumed turn envelope|None>}``.
-    ``unrelated`` resumes nothing — the caller keeps the card pending and nudges.
-    The master's message persists in the thread via the resume's ``user_msg``
-    (added as a HumanMessage after the resolving ToolMessage — see
-    tool_executor_node), so a reload shows the negotiation in order. Modality-
-    agnostic: the voice path (Piece 3) calls this same function."""
-    pending = await _load_pending_decision(thread_id)
-    if not pending:
-        return {"outcome": "unrelated", "approval_id": None, "envelope": None}
-
-    approval_id = pending["approval_id"]
-    res = await resolve_decision(
-        pending.get("tool_name", "action"),
-        pending.get("tool_args") or {},
-        pending.get("description"),
-        user_message,
-    )
-    logger.info("pending_decision_routed", thread_id=thread_id, intent=res.intent)
-
-    if res.intent == "unrelated":
-        return {"outcome": "unrelated", "approval_id": approval_id, "envelope": None}
-    if res.intent == "approve":
-        await _resolve_approval_row(approval_id, "approve")
-        env = await resume_turn(thread_id, {"approved": True, "user_msg": user_message})
-        return {"outcome": "approved", "approval_id": approval_id, "envelope": env}
-    if res.intent == "reject":
-        await _resolve_approval_row(approval_id, "reject")
-        env = await resume_turn(thread_id, {"approved": False, "user_msg": user_message})
-        return {"outcome": "rejected", "approval_id": approval_id, "envelope": env}
-    # edit → discard this card + the agent re-drafts a new one (tool_executor_node)
-    env = await resume_turn(
-        thread_id,
-        {"approved": False, "revise": True, "feedback": res.change, "user_msg": user_message},
-    )
-    return {
-        "outcome": "discarded",
-        "approval_id": approval_id,
-        "envelope": env,
-        "change": res.change,  # surfaced so the voice path can echo the edit
-    }
-
-
-async def _resolve_pending_stream(
-    thread_id: str, user_message: str
-) -> AsyncIterator[dict[str, Any]]:
-    """SSE events for resolving a pending decision by natural language: a
-    ``decision_resolved`` signal for the affected card, then the resumed turn's
-    result (a new ``approval_required`` card for an edit, else ``done``). An
-    ``unrelated`` message leaves the card pending and emits the gentle nudge."""
-    result = await _resolve_pending(thread_id, user_message)
-    if result["outcome"] == "unrelated":
-        yield {"type": "done", "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
-        return
-    yield {
-        "type": "decision_resolved",
-        "thread_id": thread_id,
-        "content": {"approval_id": result["approval_id"], "status": result["outcome"]},
-    }
-    env = result["envelope"] or {}
-    if env.get("status") == "interrupted":
-        yield {"type": "approval_required", "thread_id": thread_id, "content": env.get("interrupt")}
-    else:
-        yield {"type": "done", "content": _terminal_payload(env)}
-
-
-# --------------------------------------------------------------------------- #
 # Streaming surface (Phase 4 — true token streaming through the same graph)   #
 # --------------------------------------------------------------------------- #
 
@@ -430,13 +338,13 @@ async def stream_turn(
 
     config, handler = _config_with_handler(thread_id)
 
-    # A pending decision: resolve it by natural language (approve / reject / edit
-    # / unrelated) instead of blanket-nudging — A2 Piece 2. Same prevent-at-source
-    # discipline as run_turn (no raw HumanMessage at the pending tool_call).
+    # Legacy paused-at-interrupt checkpoint backstop (see run_turn) — nudge to the
+    # buttons, never resume. Nothing new pauses post-cutover; the drain clears any
+    # pre-deploy paused checkpoint.
     if await _is_awaiting_approval(thread_id):
-        logger.info("stream_turn_resolving_pending_interrupt", thread_id=thread_id)
-        async for ev in _resolve_pending_stream(thread_id, user_message):
-            yield ev
+        logger.info("stream_turn_legacy_pending_checkpoint_nudge", thread_id=thread_id)
+        yield {"type": "done",
+               "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
         return
 
     if presented_approval_id:
@@ -654,46 +562,6 @@ async def synth_line(text: str) -> dict[str, Any] | None:
     return ev["content"] if ev else None
 
 
-async def _resolve_pending_voice(
-    thread_id: str, transcript: str
-) -> AsyncIterator[dict[str, Any]]:
-    """Voice variant of _resolve_pending_stream: the SAME decision_resolved /
-    approval_required / done events (so the card updates identically to text),
-    PLUS a concise spoken response so the master resolves the card hands-free.
-    Reuses _resolve_pending unchanged — no forked resolution logic."""
-    result = await _resolve_pending(thread_id, transcript)
-    outcome = result["outcome"]
-    if outcome == "unrelated":
-        env = _pending_interrupt_envelope(thread_id)
-        ev = await _speak_text(env["response"])
-        if ev:
-            yield ev
-        yield {"type": "done", "content": _terminal_payload(env)}
-        return
-    yield {
-        "type": "decision_resolved",
-        "thread_id": thread_id,
-        "content": {"approval_id": result["approval_id"], "status": outcome},
-    }
-    env = result["envelope"] or {}
-    if env.get("status") == "interrupted":
-        interrupt = env.get("interrupt") or {}
-        speech = _approval_speech(interrupt, revised=True, change=result.get("change", ""))
-        ev = await _speak_text(speech)
-        if ev:
-            yield ev
-        yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
-    else:
-        h = settings.MASTER_HONORIFIC
-        spoken = (env.get("response") or "").strip() or (
-            f"Done, {h}." if outcome == "approved" else f"Cancelled, {h}."
-        )
-        ev = await _speak_text(spoken)
-        if ev:
-            yield ev
-        yield {"type": "done", "content": _terminal_payload(env)}
-
-
 # --------------------------------------------------------------------------- #
 # Hands-free resolution of a CROSS-THREAD presented approval (inbound email)   #
 # --------------------------------------------------------------------------- #
@@ -841,15 +709,16 @@ async def _resolve_presented_approval_voice(
 async def _resolve_presented_decision(
     judged: _PresentedJudgment, *, speak: bool
 ) -> AsyncIterator[dict[str, Any]]:
-    """Resolve an ACTIONABLE judgment (approve/reject/edit) — shared by text and
-    voice; ``speak`` adds the spoken audio events for the voice path. Yields the
-    decision_resolved (card flip) + a terminal done, with the B1 idempotency
-    claim gating the actual send (a lost claim → acknowledge, never double-send)."""
-    from app.email.approval_handler import dispatch_email_approval
+    """Resolve an ACTIONABLE judgment (approve/reject/edit) for ANY presented card
+    — inbound email OR chat-queued tool call (Phase 3). Goes through the ONE
+    claim-then-dispatch gate (``resolve_and_dispatch``); a lost claim → acknowledge,
+    never double-execute. Shared by text and voice (``speak`` adds the audio)."""
+    from app.agent.approval_dispatch import resolve_and_dispatch
 
     h = settings.MASTER_HONORIFIC
     thread_id = judged.row.thread_id
     approval_id = judged.approval_id
+    resolved_via = "voice" if speak else "web"
 
     async def _emit(response: str):
         if speak:
@@ -862,24 +731,34 @@ async def _resolve_presented_decision(
 
     if judged.intent in ("approve", "reject"):
         action = "approve" if judged.intent == "approve" else "reject"
-        if not await _resolve_presented_row(approval_id, action):  # B1 claim
+        outcome = await resolve_and_dispatch(
+            approval_id, action, resolved_via, {"approved": judged.intent == "approve"}
+        )
+        if outcome.status == "not_claimed":  # lost the claim → never double-execute
             async for ev in _emit(f"That one's already taken care of, {h}."):
                 yield ev
             return
-        if judged.intent == "approve":
-            outcome = await dispatch_email_approval(thread_id, {"approved": True})
-            yield _decision_resolved_event(thread_id, approval_id, "approved")
-            async for ev in _emit(_email_outcome_speech(outcome)):
-                yield ev
-        else:
-            yield _decision_resolved_event(thread_id, approval_id, "rejected")
-            async for ev in _emit(f"Discarded, {h} — I'll leave it in your inbox."):
-                yield ev
+        flip = "approved" if judged.intent == "approve" else "rejected"
+        yield _decision_resolved_event(thread_id, approval_id, flip)
+        async for ev in _emit(_presented_outcome_speech(outcome, judged.intent)):
+            yield ev
         return
 
-    # edit — not supported for an inbound reply this slice; the card stays pending.
-    async for ev in _emit(f"I can only send or discard this reply for now, {h}. Shall I send it?"):
+    # edit — degraded to a nudge in the cutover (the REVISE re-draft lands as a
+    # follow-up increment). Edit NEVER errors or sends; the card stays pending.
+    async for ev in _emit(f"I can only send or discard this for now, {h}. Shall I go ahead?"):
         yield ev
+
+
+def _presented_outcome_speech(outcome: Any, intent: str) -> str:
+    """The spoken/typed line for a resolved presented card: the inbound-email
+    taxonomy for an email outcome, the tool's deterministic result for a tool."""
+    h = settings.MASTER_HONORIFIC
+    if intent == "reject":
+        return f"Discarded, {h}."
+    if outcome.kind == "email":
+        return _email_outcome_speech(outcome.email_outcome)
+    return outcome.detail or f"Done, {h}."
 
 
 def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> dict[str, Any]:
@@ -890,15 +769,6 @@ def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> d
         "thread_id": thread_id,
         "content": {"approval_id": approval_id, "status": status},
     }
-
-
-async def _resolve_presented_row(approval_id: str, action: str) -> str | None:
-    """Claim the approval for the voice transport. Returns the thread_id ONLY if
-    this call won the pending→resolved transition (None → already resolved; the
-    caller must not dispatch)."""
-    from app.api.approvals import resolve_approval  # lazy — avoid import cycle
-
-    return await resolve_approval(approval_id, action, resolved_via="voice")
 
 
 async def voice_turn(
@@ -930,14 +800,16 @@ async def voice_turn(
     config, handler = _config_with_handler(thread_id)
 
     if await _is_awaiting_approval(thread_id):
-        # A live decision card + a spoken reply → resolve it by voice through the
-        # SAME resolver as text (approve / reject / edit / unrelated), with a
-        # concise spoken response. The conservative resolver (ambient/ambiguous →
-        # unrelated, never approve) is the safety; capture only fires on real
-        # speech. A2 Piece 3. (The wake transport / barge-in is untouched.)
-        logger.info("voice_turn_resolving_pending_interrupt", thread_id=thread_id)
-        async for ev in _resolve_pending_voice(thread_id, user_message):
+        # Legacy paused-at-interrupt checkpoint backstop (see run_turn) — speak the
+        # nudge, never resume. Nothing new pauses post-cutover; the drain clears any
+        # pre-deploy paused checkpoint. (A spoken card is resolved hands-free via
+        # the presented_approval_id path below, through the claim-gated dispatcher.)
+        logger.info("voice_turn_legacy_pending_checkpoint_nudge", thread_id=thread_id)
+        env = _pending_interrupt_envelope(thread_id)
+        ev = await _speak_text(env["response"])
+        if ev:
             yield ev
+        yield {"type": "done", "content": _terminal_payload(env)}
         return
 
     if presented_approval_id:

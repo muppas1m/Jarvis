@@ -1,4 +1,4 @@
-"""P1 — orphaned-tool_call repair + the run_turn pending-interrupt guard.
+"""P1 — orphaned-tool_call repair + the run_turn legacy-checkpoint backstop.
 
 Two layers protect against the Jun-11 terminal error (a free-text turn landing
 on a pending approval interrupt → an AIMessage tool_call with no ToolMessage →
@@ -6,8 +6,12 @@ the OpenAI fallback 400s the whole history):
 
   1. repair_orphaned_tool_calls — defense-in-depth: stub any orphan before the
      LLM call so the fallback can't choke. (pure function, exhaustively tested)
-  2. run_turn's _is_awaiting_approval guard — prevent-at-source: don't even
-     start a fresh turn while an approval is pending; nudge to the buttons.
+  2. run_turn's _is_awaiting_approval backstop — Phase 3 retired interrupt() so
+     nothing NEW pauses; the deploy-time drain clears any pre-cutover paused
+     checkpoint. This backstop covers the deploy window: a free-text turn on a
+     legacy paused checkpoint NUDGES to the buttons (which resolve through the
+     claim-gated dispatcher) and NEVER resumes the graph — resuming would flip the
+     row to approved without dispatching the tool (a silent action-drop).
 """
 from unittest.mock import patch
 
@@ -129,23 +133,29 @@ def _assert_no_orphans(messages) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# run_turn guard — prevent-at-source                                          #
+# run_turn legacy-checkpoint backstop — nudge, never resume                    #
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_run_turn_blocks_when_approval_pending():
-    """A free-text turn while an interrupt is pending must NOT invoke the graph
-    (which would orphan the pending tool_call). It returns a 'pending_approval'
-    nudge envelope and leaves the interrupt intact."""
+async def test_run_turn_nudges_on_legacy_paused_checkpoint():
+    """A free-text turn on a LEGACY paused-at-interrupt checkpoint (pre-Phase-3)
+    must NOT invoke OR resume the graph — either would either orphan the pending
+    tool_call (Jun-11 error) or flip the row to approved without dispatching (a
+    silent drop). It nudges to the buttons and leaves the checkpoint intact for
+    the drain / a button-decide."""
+
+    class _Task:
+        interrupts = ({"value": "Approve calendar_create?"},)  # a REAL interrupt
 
     class _PausedState:
-        next = ("tool_executor",)  # non-empty → paused at interrupt
+        next = ("tool_executor",)
+        tasks = (_Task(),)  # task.interrupts populated → genuinely paused
         values: dict = {}
 
     async def fake_aget_state(_config):
         return _PausedState()
 
     async def fake_ainvoke(*args, **kwargs):  # noqa: ARG001
-        raise AssertionError("run_turn must not invoke the graph while paused")
+        raise AssertionError("run_turn must not invoke/resume the graph while paused")
 
     with patch("app.agent.runner.graph") as mock_graph_factory:
         mock_graph = mock_graph_factory.return_value
@@ -154,16 +164,17 @@ async def test_run_turn_blocks_when_approval_pending():
 
         envelope = await run_turn(
             user_message="yes send it",
-            thread_id="poisoned-thread",
+            thread_id="legacy-paused-thread",
             platform="telegram",
             channel_user_id="master",
         )
 
     assert envelope["status"] == "complete"
     assert envelope["stop_reason"] == "pending_approval"
-    assert "Approve" in envelope["response"] and "Reject" in envelope["response"]
-    assert envelope["interrupt"] is None  # we don't re-send the buttons
-    mock_graph.ainvoke.assert_not_called()
+    assert "decision waiting" in envelope["response"]
+    assert "approve" in envelope["response"].lower()  # nudge to the buttons
+    assert envelope["interrupt"] is None  # we don't re-send the buttons (no dup row)
+    mock_graph.ainvoke.assert_not_called()  # neither a fresh turn NOR a resume
 
 
 @pytest.mark.asyncio

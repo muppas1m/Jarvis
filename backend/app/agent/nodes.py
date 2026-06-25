@@ -46,7 +46,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_litellm import ChatLiteLLM
-from langgraph.types import interrupt
 from sqlalchemy import select, update
 
 from app.agent.message_repair import repair_orphaned_tool_calls
@@ -379,29 +378,40 @@ async def execute_tool_guarded(
     return ToolExecResult(content=content, success=success, error=err, latency_ms=latency_ms)
 
 
+# The result handed back to the agent when an APPROVE-tier tool is QUEUED (Phase
+# 3). It must read as NOT-done so the agent relays "queued for approval", never
+# "sent/done" (no-hallucinated-actions). The card is the durable record either way.
+_QUEUED_MARKER = (
+    "[QUEUED] The `{tool}` action is NOT done — it has been QUEUED for the master's "
+    "approval and will run ONLY after they approve it. Tell the master you've queued "
+    "it for their approval; do NOT say it is sent / done / created / scheduled."
+)
+
+
 # ============================================================================
 # Node 3 — tool_executor (one tool call per invocation; loops via the graph)
 # ============================================================================
 async def tool_executor_node(state: AgentState) -> dict:
     """Execute exactly ONE pending tool call from the most recent AIMessage.
 
-    Single-call-per-invocation is deliberate. LangGraph's `interrupt()` does
-    NOT commit the function's partial return value — it just snapshots state
-    and exits. So if we processed multiple tool calls in a loop and hit
-    interrupt() halfway, on resume the loop would restart and earlier tool
-    calls would re-execute (email_send sends twice — catastrophic). Doing one
-    call per invocation makes each invocation atomically idempotent: state
-    is committed BETWEEN invocations, not within one.
+    Single-call-per-invocation loops via `should_continue_tools` (which re-enters
+    this node while the latest AIMessage still has un-processed tool calls, else
+    routes back to `agent`). Each invocation commits its own ToolMessage, so a
+    turn with mixed tool calls (e.g. a SAFE calendar read + an APPROVE-tier email
+    send) executes the SAFE one and QUEUES the APPROVE one, all in one completing
+    turn — no blocking.
 
-    Routing: `should_continue_tools` after this node loops back here if the
-    most recent AIMessage still has un-processed tool calls; otherwise the
-    graph routes back to `agent`.
+    (Phase 3 retired `interrupt()`: APPROVE-tier tools no longer pause the turn;
+    they queue + return a [QUEUED] ToolMessage and execute out-of-band on approve.
+    The old one-call rationale — "interrupt() doesn't commit partial returns" — no
+    longer applies; the per-call loop simply keeps each ToolMessage commit clean.)
 
     For each call:
-      1. Per-turn rate-limit check.
+      1. Per-turn rate-limit check (the QUEUE-time runaway guard).
       2. Safety classification (SAFE / NOTIFY / APPROVE / BLOCKED).
-      3. APPROVE → write a PendingApproval row, ping master, interrupt().
-      4. Execute the tool (catching JarvisError family for friendly messages).
+      3. APPROVE → write a PendingApproval row, ping master, return [QUEUED]
+         (NON-blocking — no interrupt, no in-turn side effect).
+      4. SAFE/NOTIFY → execute the tool (catching JarvisError family).
       5. Sanitize + optionally archive the result.
       6. Audit-log the row.
       7. NOTIFY → ping master that the tool ran.
@@ -444,12 +454,6 @@ async def tool_executor_node(state: AgentState) -> dict:
     thread_id = state["thread_id"]
     turn_id = state.get("turn_started_at", "no-turn")
 
-    # A natural-language resolution ("change the name to Pavan", "send it") persists
-    # as a real HumanMessage so a reload shows the full negotiation in order. It MUST
-    # go AFTER the resolving ToolMessage (a HumanMessage between an AIMessage
-    # tool_call and its ToolMessage orphans the call → 400). Empty on button clicks.
-    trailing: list = []
-
     # ---- per-turn rate limit ------------------------------------------------
     ok = await rate_limiter.check_and_increment_tool(
         thread_id, turn_id, tool_name, tool_call_id=tool_call_id
@@ -485,14 +489,22 @@ async def tool_executor_node(state: AgentState) -> dict:
             ]
         }
 
-    # ---- APPROVE → pause via interrupt --------------------------------------
+    # ---- APPROVE → QUEUE (non-blocking; executes out-of-band on approve) ----
     if level == SafetyLevel.APPROVE:
-        # Idempotency guard: LangGraph re-runs this node from the top on every
-        # resume, so creating the row + pinging the master here unconditionally
-        # produced a DUPLICATE PendingApproval row + a second Telegram prompt on
-        # each resume (the Jun-11 double-prompt bug). interrupt_id is unique per
-        # tool call — if a row already exists for it, the first pass already did
-        # the create + send; skip straight to re-entering interrupt().
+        # Phase 3 — APPROVE-tier tools are NON-BLOCKING: QUEUE, never interrupt().
+        # The graph used to interrupt() here and BLOCK the whole turn until a
+        # resume re-entered the node and executed. Now the node creates the
+        # synthetic PendingApproval row, pings the master, and returns a [QUEUED]
+        # ToolMessage so the TURN COMPLETES cleanly. The action executes
+        # OUT-OF-BAND on approve via the execute-on-approve dispatcher
+        # (resolve_and_dispatch → dispatch_approval), reusing THIS row's payload.
+        # Retiring interrupt() kills its whole fragility class (orphaned
+        # tool_calls, resume-fail, async-rebind-on-resume). NO side effect fires
+        # in this turn — only the durable queue row + the ping.
+        #
+        # Idempotency: interrupt_id (the tool_call_id) is unique per call; the
+        # find-or-create keeps the should_continue_tools loop (or any re-process)
+        # from minting a duplicate row + a second ping.
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
         if approval_id is None:
             # Enrich the prompt with a pre-approval warning (calendar conflict
@@ -514,78 +526,31 @@ async def tool_executor_node(state: AgentState) -> dict:
             )
         else:
             logger.info(
-                "approval_already_pending_skip_duplicate",
+                "approval_already_queued_skip_duplicate",
                 thread_id=thread_id, interrupt_id=tool_call_id, tool_name=tool_name,
             )
-        # interrupt() snapshots state and exits. On resume, this same call
-        # returns the resume value. Resume payload shape:
-        #   {"approved": True}              -> proceed to execution below
-        #   {"approved": False, "reason": ...} -> emit a [REJECTED] ToolMessage
-        decision = interrupt(
-            {
-                "type": "approval_required",
-                "approval_id": str(approval_id),
-                "tool_name": tool_name,
-                "tool_args": tool_args,
-                "description": _describe_action(tool_name, tool_args),
-            }
+        # Audit the QUEUE event (not an execute — the tool has NOT run).
+        await _log_audit(
+            thread_id, tool_name, level, tool_args, success=False, error="QUEUED",
         )
-        decision = decision if isinstance(decision, dict) else {}
-        user_msg = decision.get("user_msg")
-        if isinstance(user_msg, str) and user_msg.strip():
-            trailing = [HumanMessage(content=user_msg)]
+        return {
+            "messages": [
+                ToolMessage(
+                    content=_QUEUED_MARKER.format(tool=tool_name),
+                    tool_call_id=tool_call_id,
+                )
+            ]
+        }
 
-        if decision.get("revise"):
-            # EDIT: the master asked for changes BEFORE it sends. Discard this
-            # proposal (card greys in history) and have the AGENT re-draft + re-call
-            # the tool — reusing its full-context drafting (no field-patching) — so a
-            # NEW card is proposed. This is NOT a cancellation.
-            feedback = decision.get("feedback") or ""
-            await _discard_pending_approval(thread_id, interrupt_id=tool_call_id)
-            await _log_audit(
-                thread_id, tool_name, level, tool_args,
-                success=False, error=f"REVISE: {feedback}",
-            )
-            revise_marker = ToolMessage(
-                content=(
-                    "[REVISE] You proposed this action; the master reviewed it and asked "
-                    "for a change BEFORE it is sent — this is NOT a cancellation. Re-draft "
-                    "the action applying their change (see their message that follows) and "
-                    "call the SAME tool again so they can approve the revised version."
-                ),
-                tool_call_id=tool_call_id,
-            )
-            return {"messages": [revise_marker, *trailing]}
-
-        if not decision.get("approved"):
-            reason = decision.get("reason", "rejected by master")
-            await _log_audit(
-                thread_id, tool_name, level, tool_args,
-                success=False, error=f"REJECTED: {reason}",
-            )
-            return {
-                "messages": [
-                    ToolMessage(
-                        content=f"[REJECTED] Master rejected: {reason}",
-                        tool_call_id=tool_call_id,
-                    ),
-                    *trailing,
-                ]
-            }
-        # Approved — fall through to execution below; the persisted master turn
-        # (trailing) is appended AFTER the result ToolMessage at the node's return.
-
-    # ---- execute (SAFE, NOTIFY, or approved-APPROVE) -----------------------
+    # ---- execute (SAFE or NOTIFY — APPROVE is queued above, never reaches here)
     # The execute + JarvisError handling + sanitize/archive/audit/notify is the
-    # shared guarded core (execute_tool_guarded), reused by the Phase-3
-    # execute-on-approve dispatcher. The node wraps the result in a ToolMessage
-    # (always — the P1 orphan guard) and appends any persisted master turn.
+    # shared guarded core (execute_tool_guarded), reused by the execute-on-approve
+    # dispatcher. The node wraps the result in a ToolMessage (always — the P1
+    # orphan guard).
     exec_result = await execute_tool_guarded(
         thread_id, tool_name, tool_args, level=level, tool_call_id=tool_call_id
     )
-    return {
-        "messages": [ToolMessage(content=exec_result.content, tool_call_id=tool_call_id), *trailing]
-    }
+    return {"messages": [ToolMessage(content=exec_result.content, tool_call_id=tool_call_id)]}
 
 
 def should_continue_tools(state: AgentState) -> str:

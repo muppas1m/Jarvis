@@ -92,50 +92,87 @@ async def test_judge_FAILS_OPEN_to_unrelated_never_approve(monkeypatch):
 
 
 # --- the text (no-audio) resolution of an actionable judgment ----------------
+# Phase 3: the presented-card resolver now goes through the SAME generic gate as
+# every other transport — `resolve_and_dispatch` (claim + dispatch-by-row-shape),
+# NOT the email-specific `dispatch_email_approval`. So a chat-queued TOOL card and
+# an inbound EMAIL card both resolve here, claim-gated (invariant 3).
 def _wire_decision(monkeypatch, *, claimed=True, outcome=None):
+    from app.agent.approval_dispatch import ApprovalDispatchOutcome
+
     rec: dict = {}
 
-    async def fake_dispatch(thread_id, decision):
-        rec["dispatch"] = (thread_id, decision)
-        return outcome or EmailApprovalOutcome(status="sent", recipient="p@x.com")
+    async def fake_rad(approval_id, action, resolved_via, decision):
+        rec["call"] = (approval_id, action, resolved_via, decision)
+        if not claimed:
+            return ApprovalDispatchOutcome(kind="none", status="not_claimed")
+        if action == "reject":
+            return ApprovalDispatchOutcome(
+                kind="email", status="rejected", thread_id="email:gmail:msg-1"
+            )
+        return outcome or ApprovalDispatchOutcome(
+            kind="email", status="sent", success=True, thread_id="email:gmail:msg-1",
+            email_outcome=EmailApprovalOutcome(status="sent", recipient="p@x.com"),
+        )
 
-    async def fake_claim(approval_id, action):
-        rec["claim"] = (approval_id, action)
-        return ("email:gmail:msg-1" if claimed else None)
-
-    monkeypatch.setattr(runner, "_resolve_presented_row", fake_claim)
-    monkeypatch.setattr("app.email.approval_handler.dispatch_email_approval", fake_dispatch)
+    monkeypatch.setattr("app.agent.approval_dispatch.resolve_and_dispatch", fake_rad)
     return rec
 
 
 async def test_text_approve_dispatches_no_audio(monkeypatch):
     rec = _wire_decision(monkeypatch)
     events = await _collect(runner._resolve_presented_decision(_judgment("approve"), speak=False))
-    assert rec["dispatch"] == ("email:gmail:msg-1", {"approved": True})
-    assert rec["claim"] == ("uuid-1", "approve")
+    assert rec["call"] == ("uuid-1", "approve", "web", {"approved": True})
     assert _resolved(events) == "approved"
+    assert any("Sent to p@x.com" in str(e.get("content", "")) for e in events)  # email taxonomy
     assert not any(e["type"] == "audio" for e in events)  # TEXT path → no audio
     assert events[-1]["type"] == "done"
 
 
-async def test_text_reject_marks_no_dispatch(monkeypatch):
+async def test_text_approve_tool_card_renders_tool_result(monkeypatch):
+    """Invariant 3: a chat-queued TOOL card resolves through the generic gate and
+    its spoken/typed line is the tool's deterministic result — not email copy."""
+    from app.agent.approval_dispatch import ApprovalDispatchOutcome
+
+    rec: dict = {}
+
+    async def fake_rad(approval_id, action, resolved_via, decision):
+        rec["call"] = (approval_id, action)
+        return ApprovalDispatchOutcome(
+            kind="tool", status="executed", detail="Event created: Standup 9am",
+            success=True, thread_id="web:master",
+        )
+
+    monkeypatch.setattr("app.agent.approval_dispatch.resolve_and_dispatch", fake_rad)
+    row = _Row()
+    row.action_type, row.thread_id = "calendar_create", "web:master"
+    events = await _collect(
+        runner._resolve_presented_decision(_judgment("approve", row=row), speak=False)
+    )
+    assert rec["call"] == ("uuid-1", "approve")
+    assert _resolved(events) == "approved"
+    assert any("Event created: Standup 9am" in str(e.get("content", "")) for e in events)
+
+
+async def test_text_reject_marks_no_send(monkeypatch):
     rec = _wire_decision(monkeypatch)
     events = await _collect(runner._resolve_presented_decision(_judgment("reject"), speak=False))
-    assert "dispatch" not in rec and _resolved(events) == "rejected"
+    assert rec["call"][1] == "reject"  # claimed + dispatched as a reject (no send side effect)
+    assert _resolved(events) == "rejected"
+    assert any("Discarded" in str(e.get("content", "")) for e in events)
 
 
 async def test_text_approve_lost_claim_no_double_send(monkeypatch):
     rec = _wire_decision(monkeypatch, claimed=False)
     events = await _collect(runner._resolve_presented_decision(_judgment("approve"), speak=False))
-    assert "dispatch" not in rec  # B1: claim lost → no second send
-    assert _resolved(events) is None
+    assert rec["call"][1] == "approve"  # the gate was asked, but it lost the claim
+    assert _resolved(events) is None  # not_claimed → no card flip, no second send
     assert events[-1]["type"] == "done"
 
 
 async def test_text_edit_keeps_pending(monkeypatch):
     rec = _wire_decision(monkeypatch)
     events = await _collect(runner._resolve_presented_decision(_judgment("edit"), speak=False))
-    assert "dispatch" not in rec and _resolved(events) is None  # unsupported → stays pending
+    assert "call" not in rec and _resolved(events) is None  # edit never claims → stays pending
     assert events[-1]["type"] == "done"
 
 

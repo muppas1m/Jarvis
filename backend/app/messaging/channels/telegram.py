@@ -331,8 +331,7 @@ class TelegramChannel(Channel):
             await self.handle_photo(update.message)
 
         async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            from app.api.approvals import resolve_approval
-            from app.messaging.router import route_approval_decision
+            from app.agent.approval_dispatch import alert_text_for, resolve_and_dispatch
 
             query = update.callback_query
             if not query or not query.data:
@@ -354,23 +353,22 @@ class TelegramChannel(Channel):
             if action == "reject":
                 decision["reason"] = "rejected via Telegram"
 
-            # Acknowledge the button + edit the message so the master sees
-            # the action took. The actual graph resume is below.
-            # `action` is "approve" | "reject" — past-tense rendering can't
-            # use a simple +"ed" suffix (would produce "Approveed").
+            # Acknowledge the button + edit the message so the master sees the
+            # action took. `action` is "approve" | "reject" — past-tense rendering
+            # can't use a simple +"ed" suffix (would produce "Approveed").
             past_tense = "Approved" if action == "approve" else "Rejected"
             await query.answer(text=f"{past_tense}.")
             await query.edit_message_text(
                 text=f"{'✅' if action == 'approve' else '❌'} {past_tense}."
             )
 
-            thread_id = await resolve_approval(
-                approval_id=approval_id,
-                action=action,
-                resolved_via="telegram",
-            )
-            if thread_id:
-                await route_approval_decision(thread_id, "telegram", decision)
+            # The single claim-then-dispatch gate (Phase 3): atomically claims +
+            # executes out-of-band (email/calendar/whatsapp/…). Then surface the
+            # outcome (the send result) as a follow-up alert.
+            outcome = await resolve_and_dispatch(approval_id, action, "telegram", decision)
+            alert = alert_text_for(outcome)
+            if alert:
+                await self.send_alert(alert)
 
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
         app.add_handler(MessageHandler(filters.Document.ALL, _on_document))

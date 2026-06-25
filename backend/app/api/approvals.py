@@ -30,15 +30,9 @@ from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select, update
 
-from app.agent.runner import resume_turn
 from app.db.engine import async_session
 from app.db.models import PendingApproval
-from app.email.approval_handler import (
-    EMAIL_THREAD_PREFIXES,
-    EmailApprovalOutcome,
-    dispatch_email_approval,
-    is_email_approval,
-)
+from app.email.approval_handler import EMAIL_THREAD_PREFIXES, EmailApprovalOutcome
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -275,44 +269,49 @@ async def decide_approval(
     body: DecideRequest,
     approval_id: str = Path(..., description="PendingApproval row UUID"),
 ) -> dict[str, Any]:
-    """Record the master's decision, then resolve it — by origin.
+    """Record the master's decision and resolve it through the ONE claim-then-
+    dispatch gate (``resolve_and_dispatch``), unified across every approval origin
+    (Phase 3). The gate atomically claims the row and executes ONLY if this call
+    won the claim — chat-queued tool calls and inbound-email replies both resolve
+    here, executing out-of-band (no graph resume, no interrupt).
 
-    A conversation approval (web:/telegram:) is a real LangGraph interrupt →
-    resume the paused graph. An inbound-email approval (email:<provider>:<id>)
-    has no graph to resume → dispatch the action directly (send the drafted
-    reply). The dashboard previously called resume_turn unconditionally, which
-    fails for such a thread (no checkpoint) — the same origin-dispatch the
-    Telegram button already does, now shared via email.approval_handler.
+    Returns the TurnEnvelope shape /api/chat returns: status="complete" on a clean
+    resolution (the deterministic outcome text in `response`), "error" on a
+    failure. A lost claim (already resolved / expired) → 404."""
+    from app.agent.approval_dispatch import resolve_and_dispatch
 
-    Returns the same TurnEnvelope shape /api/chat returns. status="complete"
-    means the chain finished cleanly (or the reply sent). status="interrupted"
-    means a resumed chain hit ANOTHER interrupt() — the response carries the new
-    approval payload and the dashboard renders the next decision UI."""
     action = "approve" if body.approved else "reject"
-    thread_id = await resolve_approval(
-        approval_id=approval_id,
-        action=action,
-        resolved_via="web",
-    )
-    if thread_id is None:
-        # Either bad UUID or row not found. Both surface as 404 — the
-        # caller's job is to refresh /pending; we don't differentiate
-        # because both states tell them the same thing ("this approval
-        # is no longer actionable").
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="approval not found or already resolved",
-        )
-
     decision: dict[str, Any] = {"approved": body.approved}
     if not body.approved and body.reason:
         decision["reason"] = body.reason
 
-    if is_email_approval(thread_id):
-        outcome = await dispatch_email_approval(thread_id, decision)
-        return _email_decide_envelope(thread_id, outcome)
+    outcome = await resolve_and_dispatch(approval_id, action, "web", decision)
+    if outcome.status == "not_claimed":
+        # Lost claim: bad UUID / not found / already resolved / EXPIRED. All
+        # surface as 404 — the caller refreshes /pending; the tool NEVER ran.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="approval not found or already resolved",
+        )
+    if outcome.kind == "email":
+        return _email_decide_envelope(outcome.thread_id, outcome.email_outcome)
+    return _tool_decide_envelope(outcome.thread_id, outcome)
 
-    return await resume_turn(thread_id=thread_id, decision=decision)
+
+def _tool_decide_envelope(thread_id: str, outcome: Any) -> dict[str, Any]:
+    """Render a tool-call execute-on-approve outcome into the dashboard's
+    TurnEnvelope fields. The tool's own result string is the deterministic
+    confirmation (e.g. "Email sent to X", "Event created …", or a [QUEUED]-class
+    failure marker)."""
+    if outcome.status == "executed":
+        return _decide_envelope(
+            thread_id, "complete" if outcome.success else "error", outcome.detail
+        )
+    if outcome.status == "rejected":
+        return _decide_envelope(thread_id, "complete", "Discarded, Sir.")
+    if outcome.status == "blocked":
+        return _decide_envelope(thread_id, "error", "That action isn't permitted.")
+    return _decide_envelope(thread_id, "error", "That approval is no longer actionable.")
 
 
 def _email_decide_envelope(thread_id: str, outcome: EmailApprovalOutcome) -> dict[str, Any]:
