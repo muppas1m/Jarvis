@@ -49,6 +49,9 @@ def register_all_tools() -> None:
     from app.agent.tools.readiness_tool import register as register_readiness
     register_readiness()
 
+    from app.agent.tools.briefing_tool import register as register_briefing
+    register_briefing()
+
     # Phase 2 / Phase 3 / Phase 4 tool registrations land below as each
     # tool module ships. Keep them commented until their underlying module
     # exists, so this function never raises ImportError on a fresh build.

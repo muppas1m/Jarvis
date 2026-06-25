@@ -4,10 +4,11 @@
 
 # Tools & Safety Tiers
 
-13 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
+14 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
 
 | Tool | Safety tier | Always-loaded | Backing module | Summary |
 |---|---|---|---|---|
+| `briefing` | SAFE |  | `app.agent.tools.briefing_tool` | Brief the master on incoming items (FYI emails today; news later) for a scope |
 | `calendar_create` | APPROVE |  | `app.agent.tools.calendar_tool` | Create a new event on the master's Google Calendar |
 | `calendar_delete` | APPROVE |  | `app.agent.tools.calendar_tool` | Delete / cancel an existing calendar event by event_id |
 | `calendar_read` | SAFE |  | `app.agent.tools.calendar_tool` | Read upcoming events from the master's Google Calendar — what's scheduled, meetings, what'… |

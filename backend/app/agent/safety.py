@@ -55,6 +55,7 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "web_research":     SafetyLevel.SAFE,
     "task_list":        SafetyLevel.SAFE,
     "readiness_check":  SafetyLevel.SAFE,
+    "briefing":         SafetyLevel.SAFE,  # read + an internal HWM advance; no external side effect
 
     # --- own-task management (no external side effect) -----------------------
     "task_add":         SafetyLevel.SAFE,

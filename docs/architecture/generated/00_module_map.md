@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (110 modules)
+## `app/` — the system (111 modules)
 
 ```
 app/
@@ -14,6 +14,7 @@ app/
 │   ├── tools/
 │   │   ├── __init__.py — Tool registration entry point.
 │   │   ├── actionable_tool.py — Actionable-memory tools (Phase 4.1) — the master's task list.
+│   │   ├── briefing_tool.py — Briefing scope behaviors + the conversational tool (Phase 5.2).
 │   │   ├── builtin_memory.py — memory_search — built-in tool, always loaded.
 │   │   ├── calendar_tool.py — Google Calendar tool — read, create, update, delete events (+ conflict check).
 │   │   ├── document_search.py — document_search — agent-facing RAG tool over ingested documents.
