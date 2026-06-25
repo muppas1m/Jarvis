@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (106 modules)
+## `app/` — the system (107 modules)
 
 ```
 app/
@@ -21,6 +21,7 @@ app/
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
 │   ├── approval_dispatch.py — Generic execute-on-approve dispatcher (Phase 3 — Step 1).
+│   ├── approval_drain.py — Deploy-time drain of pre-cutover paused-at-interrupt() checkpoints (Phase 3).
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
 │   ├── decision_resolver.py — Natural-language resolution of a pending decision (A2 Piece 2).
 │   ├── graph.py — StateGraph wiring + AsyncPostgresSaver checkpointer.
