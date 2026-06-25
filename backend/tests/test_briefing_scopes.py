@@ -56,7 +56,18 @@ def test_today_null_hwm_earlier_window_floors():
 def test_yesterday_window_no_advance():
     sw = resolve_scope("yesterday", datetime(2026, 6, 20, tzinfo=UTC), NOW, NY)
     assert sw.start == Y_START - EPS  # inclusive of yesterday's midnight
-    assert (sw.end, sw.advances) == (TODAY_START, False)  # ends at today-start (exclusive)
+    assert (sw.end, sw.advances) == (TODAY_START - EPS, False)  # today-midnight EXCLUDED
+
+
+def test_today_midnight_item_is_today_only_not_yesterday():
+    """A today-local-midnight item must land in today, not double-attributed to
+    yesterday (the (start, end] primitive is inclusive at end)."""
+    sw_y = resolve_scope("yesterday", None, NOW, NY)
+    sw_t = resolve_scope("today", datetime(2026, 6, 20, tzinfo=UTC), NOW, NY)
+    at_midnight = TODAY_START  # exactly today's local midnight
+    in_window = lambda sw: sw.start < at_midnight <= sw.end  # noqa: E731 — the (start, end] test
+    assert not in_window(sw_y)  # NOT yesterday
+    assert in_window(sw_t)      # IS today
 
 
 def test_tomorrow_and_unknown_resolve_to_none():

@@ -77,7 +77,10 @@ def resolve_scope(scope: str, hwm: datetime | None, now: datetime, tz: str) -> S
     if scope == "yesterday":
         today_start = _local_midnight_utc(today, zone)
         y_start = _local_midnight_utc(today - timedelta(days=1), zone)
-        return ScopeWindow("yesterday", y_start - eps, today_start, advances=False)
+        # End at today_start − eps so a today-midnight-exact item belongs to TODAY
+        # only — the (start, end] primitive is inclusive at end, so a plain today_start
+        # would double-attribute it to both yesterday and today.
+        return ScopeWindow("yesterday", y_start - eps, today_start - eps, advances=False)
     return None
 
 
