@@ -73,7 +73,7 @@ async def _cleanup(mid: str):
 async def test_spam_archives_via_provider_interface(monkeypatch):
     mid = f"pipe-spam-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr("app.email.inbound.classify_email", AsyncMock(return_value=_triage("spam")))
-    monkeypatch.setattr("app.email.inbound.add_to_digest", AsyncMock())
+    monkeypatch.setattr("app.email.inbound.record_briefing_item", AsyncMock())
     p = _FakeProvider()
     try:
         await _process_message(p, _msg(mid))
@@ -117,11 +117,11 @@ async def test_low_confidence_spam_downgrades_to_digest_not_archive(monkeypatch)
         "app.email.inbound.classify_email", AsyncMock(return_value=_triage("spam", confidence=0.1))
     )
     digest = AsyncMock()
-    monkeypatch.setattr("app.email.inbound.add_to_digest", digest)
+    monkeypatch.setattr("app.email.inbound.record_briefing_item", digest)
     p = _FakeProvider()
     try:
         await _process_message(p, _msg(mid))
         assert p.archived == []  # low-confidence spam is NOT archived
-        assert digest.await_count == 1  # routed to digest so a misclassified real email stays visible
+        assert digest.await_count == 1  # routed to the briefing so a misclassified real email stays visible
     finally:
         await _cleanup(mid)

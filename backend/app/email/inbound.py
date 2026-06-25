@@ -19,16 +19,16 @@ UNIQUE(gmail_message_id) constraint — exactly one wins, the rest abort.
 """
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.briefing import record_briefing_item
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import EmailLog
 from app.email.classifier import classify_email
-from app.email.digest import add_to_digest
 from app.email.provider import EmailProvider, InboundMessage, get_email_provider
 from app.email.responder import generate_draft
 from app.messaging.failure_alerter import send_approval_request_to_master, send_system_alert
@@ -119,10 +119,18 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
         await provider.archive(msg.message_id)
         logger.info("email_archived_spam", provider=provider.name, subject=msg.subject)
     elif route == "fyi":
-        await add_to_digest(
-            subject=msg.subject, sender=msg.sender, body_preview=msg.body[:300], urgency=triage.urgency
+        # Durable briefing item (5.3) — windowable by the HWM, replacing the
+        # clear-on-build Redis digest. occurred_at = arrival time.
+        await record_briefing_item(
+            kind="email",
+            title=msg.subject or "",
+            source=msg.sender or "",
+            preview=(msg.body or "")[:300],
+            urgency=triage.urgency,
+            occurred_at=datetime.now(UTC),
+            meta={"provider": provider.name, "message_id": msg.message_id},
         )
-        logger.info("email_added_to_digest", subject=msg.subject, urgency=triage.urgency)
+        logger.info("email_recorded_to_briefing", subject=msg.subject, urgency=triage.urgency)
     elif route == "action_required":
         if draft["complexity"] == "simple":
             await _queue_email_approval(provider.name, msg, draft["response"])

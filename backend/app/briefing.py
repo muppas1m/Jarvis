@@ -17,7 +17,7 @@ TZ resolution reuses 4.2's resolver (app/agent/tools/calendar_tool._resolve_time
 — the same arg → profile → flagged-default path; no duplicated TZ logic.
 """
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
@@ -107,3 +107,52 @@ async def advance_hwm(now: datetime) -> datetime | None:
         )
         await session.commit()
     return await read_hwm()
+
+
+# --------------------------------------------------------------------------- #
+# Ingestion + the proactive 7am push (5.3).                                   #
+# --------------------------------------------------------------------------- #
+async def record_briefing_item(
+    *, kind: str, title: str, source: str, preview: str, urgency: str,
+    occurred_at: datetime, meta: dict | None = None,
+) -> None:
+    """Durably record one briefing item — the FYI-mail ingestion (replacing the
+    clear-on-build Redis digest) and the future news seam (kind='news'). The caller
+    owns fail-soft (it raises on a real DB error)."""
+    async with async_session() as session:
+        session.add(BriefingItem(
+            kind=kind, title=title, source=source, preview=preview,
+            urgency=urgency, occurred_at=occurred_at, meta=meta or {},
+        ))
+        await session.commit()
+
+
+async def build_push_digest(now: datetime, *, cap_days: int) -> DigestWindow:
+    """The proactive 7am push window: (max(HWM-or-24h-floor, now − cap_days), now].
+    NO advance — the push must NOT consume (a missed push must still surface under
+    'latest'; the caller never advances on this path). The cap stops an unread HWM
+    from growing the window unbounded; the NULL-HWM 24h floor holds here too."""
+    hwm = await read_hwm()
+    floor = now - timedelta(hours=24)                        # NULL-HWM first-run floor
+    effective = hwm if hwm is not None else floor
+    start = max(effective, now - timedelta(days=cap_days))   # cap on an unread HWM
+    return await digest_window(start, now)                   # tz resolves from profile
+
+
+def render_push(win: DigestWindow) -> str:
+    """The 7am push text — day-segmented, urgency-tagged. Returns a 'nothing new'
+    line when empty (the morning brief still greets the master). Chronological with
+    inline urgency tags supersedes the old digest's urgency-first sort — the
+    time-windowed model carries the date context the sort used to compensate for."""
+    if win.total == 0:
+        return "📬 *Email Digest:* nothing new."
+    lines = [f"📬 *Email Digest* — {win.total} new:"]
+    multi = len(win.days) > 1
+    for d in win.days:
+        if multi:
+            lines.append(f"_{d.day.strftime('%A %Y-%m-%d')}_:")
+        for it in d.items:
+            tag = f"[{it.urgency}] " if it.urgency and it.urgency != "none" else ""
+            src = f" — {it.source}" if it.source else ""
+            lines.append(f"  • {tag}{it.title or '(no subject)'}{src}")
+    return "\n".join(lines)

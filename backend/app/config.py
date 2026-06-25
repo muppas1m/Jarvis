@@ -187,6 +187,10 @@ class Settings(BaseSettings):
     READINESS_LOOKAHEAD_HIGH_DAYS: int = 30
     READINESS_LOOKAHEAD_MEDIUM_DAYS: int = 7
     READINESS_LOOKAHEAD_LOW_DAYS: int = 0
+    # Briefing 7am push (5.3): the push windows (HWM, now] but caps the start at
+    # now − this, so an unread HWM can't grow the digest unbounded. The push never
+    # advances the HWM (a missed push must still surface under "what's the latest").
+    BRIEFING_PUSH_CAP_DAYS: int = 7
     # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
     # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
     # surfaced, never blind-retried (a read-timeout may have already delivered).
