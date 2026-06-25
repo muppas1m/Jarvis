@@ -414,6 +414,15 @@ export function useJarvis() {
                 );
                 break;
               }
+              case "presented_nav": {
+                // A voice/text "skip/next" — grey THIS card via the SAME markSkipped
+                // the skip button calls, so the next queued card surfaces identically
+                // (the pending→none effect + poll advance). DB-inert, like the button.
+                if (ev.content.action === "skip") {
+                  setItems((m) => markSkipped(m, ev.content.approval_id));
+                }
+                break;
+              }
               case "done":
                 patch(ev.content.response || acc);
                 if (ev.content.context) {

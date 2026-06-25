@@ -81,6 +81,14 @@ export type StreamEvent =
       content: { approval_id: string; status: string };
     }
   | {
+      // Client-side queue navigation driven by a voice/text decision (skip/next) —
+      // the backend judged the utterance as "skip" and signals the client to do the
+      // SAME markSkipped the button does (grey the card, surface the next).
+      type: "presented_nav";
+      thread_id: string;
+      content: { action: "skip"; approval_id: string };
+    }
+  | {
       type: "done";
       content: {
         status: string;
