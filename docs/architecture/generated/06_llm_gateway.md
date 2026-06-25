@@ -14,6 +14,7 @@ Every chat completion routes through `app/llm/gateway.py:LLMGateway.complete()`.
 | `fast` | `groq/llama-3.1-8b-instant` | groq |
 | `fallback` | `openai/gpt-4o-mini` | openai |
 | `contextualizer` | `gemini/gemini-2.5-flash-lite` | google |
+| `extractor` | `gemini/gemini-2.5-flash-lite` | google |
 
 ## `task_type` → slot (`TASK_ROUTING`)
 

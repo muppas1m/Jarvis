@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (110 modules)
+## `app/` — the system (111 modules)
 
 ```
 app/
@@ -90,6 +90,7 @@ app/
 │   └── stream_mode.py — Token-stream flag — turns on internal LLM streaming for the agent's chat
 ├── memory/
 │   ├── __init__.py — —
+│   ├── extraction.py — Owned fact-extraction — replaces Mem0's built-in extractor on the write path.
 │   ├── manager.py — MemoryManager — the single entry point the rest of the codebase uses to read
 │   ├── mem0_client.py — Mem0 self-hosted wrapper.
 │   ├── session.py — Tier 2 — Session analytics view.

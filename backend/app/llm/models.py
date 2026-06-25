@@ -36,7 +36,10 @@ KNOWN_COSTS: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.0025, 0.01),
     "gpt-4o-mini": (0.00015, 0.0006),
     "gpt-5": (0.005, 0.015),
-    # Groq + Ollama + Gemini free tier → not listed → $0
+    # Gemini (paid tier — see project_mem0_extraction_gemini_swap). Listed so the
+    # memory-extraction + contextualizer slots attribute real $ instead of $0.
+    "gemini-2.5-flash-lite": (0.0001, 0.0004),
+    # Groq + Ollama → free/local → not listed → $0
 }
 
 
@@ -80,6 +83,9 @@ def get_models() -> dict[str, ModelConfig]:
         # Dedicated slot for document contextualization — the paid Gemini, OFF
         # the agent's saturating Groq. Routed via force_model="contextualizer".
         "contextualizer": _build_model(settings.CONTEXTUALIZER_MODEL),
+        # Dedicated slot for owned memory fact-extraction — same paid Gemini, off
+        # the agent's Groq. Routed via force_model="extractor" (app.memory.extraction).
+        "extractor": _build_model(settings.MEMORY_EXTRACTION_MODEL),
     }
 
 
