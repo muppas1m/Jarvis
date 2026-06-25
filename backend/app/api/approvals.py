@@ -28,15 +28,11 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import select, update
 
 from app.db.engine import async_session
 from app.db.models import PendingApproval
-from app.email.approval_handler import (
-    EMAIL_THREAD_PREFIXES,
-    EmailApprovalOutcome,
-    is_email_approval,
-)
+from app.email.approval_handler import EmailApprovalOutcome, is_email_approval
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -161,29 +157,6 @@ class DecideRequest(BaseModel):
     )
 
 
-class InboundApprovalCard(BaseModel):
-    """A channel-origin (inbound-email) approval shaped to render with the SAME
-    in-chat ApprovalCard the conversation cards use — the structured action shown
-    field-by-field, never an LLM re-summary."""
-
-    approval_id: str
-    thread_id: str
-    action_type: str
-    tool_name: str
-    tool_args: dict
-    description: str
-    status: str
-    created_at: str
-
-
-class InboundNextResponse(BaseModel):
-    """The ONE next inbound approval to present, or null. The server returns at
-    most one so the HUD never floods the chat — the next surfaces only after this
-    one is resolved (the 'one at a time' primitive)."""
-
-    approval: InboundApprovalCard | None = None
-
-
 class UnifiedApprovalCard(BaseModel):
     """One pending approval, normalized across BOTH origins for the unified queue.
 
@@ -199,9 +172,9 @@ class UnifiedApprovalCard(BaseModel):
       - ``created_at`` — the stable oldest-first sort key (carried so the consumer
         can reason about ordering without a second read).
 
-    Origin fields ride in ``tool_args`` exactly as /inbound/next shapes them: an
-    email card is {to, subject, body}; a tool card is the real tool args. So the
-    existing ApprovalCard renders both with no special-casing."""
+    Origin fields ride in ``tool_args``: an email card is {to, subject, body}
+    (from the row's payload); a tool card is the real tool args. So the existing
+    ApprovalCard renders both with no special-casing."""
 
     approval_id: str
     kind: Literal["email", "tool"]
@@ -221,56 +194,6 @@ class ApprovalQueueResponse(BaseModel):
 
     approvals: list[UnifiedApprovalCard]
     count: int
-
-
-@router.get("/inbound/next", response_model=InboundNextResponse)
-async def next_inbound_approval() -> InboundNextResponse:
-    """The single oldest pending CHANNEL-ORIGIN (gmail:) approval, as a card — or
-    null. This is the surface for inbound auto-drafted email replies, which live
-    on their own `gmail:<msg_id>` threads (not the conversation thread) so the
-    conversation history query never sees them.
-
-    Returns at most one (oldest first, expired filtered) — the dashboard presents
-    inbound approvals one at a time. Conversation approvals (web:/telegram:) are
-    deliberately excluded; they already surface in the turn stream / history."""
-    now = datetime.now(UTC)
-    # Match any inbound-email origin prefix ("email:<provider>:" + legacy "gmail:").
-    origin_match = or_(
-        *[PendingApproval.thread_id.startswith(p) for p in EMAIL_THREAD_PREFIXES]
-    )
-    async with async_session() as session:
-        result = await session.execute(
-            select(PendingApproval)
-            .where(PendingApproval.status == "pending")
-            .where(PendingApproval.expires_at > now)
-            .where(origin_match)
-            .order_by(PendingApproval.created_at.asc())
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-
-    if row is None:
-        return InboundNextResponse(approval=None)
-
-    payload = row.payload or {}
-    return InboundNextResponse(
-        approval=InboundApprovalCard(
-            approval_id=str(row.id),
-            thread_id=row.thread_id,
-            action_type=row.action_type,
-            # The action_type IS the tool identity for a synthetic approval;
-            # the card renders the recipient / subject / draft from the payload.
-            tool_name=row.action_type,
-            tool_args={
-                "to": payload.get("sender", ""),
-                "subject": payload.get("subject", ""),
-                "body": payload.get("draft", ""),
-            },
-            description=row.description,
-            status=row.status,
-            created_at=row.created_at.isoformat() if row.created_at else "",
-        )
-    )
 
 
 @router.get("/pending", response_model=list[PendingApprovalView])
@@ -311,8 +234,8 @@ def _unified_card(row: PendingApproval) -> UnifiedApprovalCard:
     """Normalize a PendingApproval row into the unified card. The kind predicate is
     the SAME compound check dispatch_approval uses (action_type=="email_reply" OR
     an email-origin thread_id) so a card never claims a kind dispatch would route
-    differently. Origin fields go into tool_args identically to /inbound/next (email)
-    and dispatch (tool), so the renderer needs no per-kind branch."""
+    differently. Origin fields go into tool_args — email → {to, subject, body} from
+    the payload; tool → the real tool args — so the renderer needs no per-kind branch."""
     payload = row.payload or {}
     is_email = row.action_type == "email_reply" or is_email_approval(row.thread_id)
     if is_email:

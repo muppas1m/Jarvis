@@ -95,12 +95,11 @@ class AnnounceApprovalResponse(BaseModel):
     mime: str
 
 
-async def _load_pending_email_approval(approval_id: str):
-    """The PendingApproval row for `approval_id` IFF it's a still-pending
-    channel-origin (gmail:) approval — else None (gone / resolved / wrong type)."""
+async def _load_pending_approval(approval_id: str):
+    """The PendingApproval row for `approval_id` IFF it's still pending — else None
+    (gone / already resolved). Origin-agnostic: announces any surfaced card."""
     from app.db.engine import async_session
     from app.db.models import PendingApproval
-    from app.email.approval_handler import is_email_approval
 
     try:
         aid = uuid.UUID(approval_id)
@@ -110,24 +109,35 @@ async def _load_pending_email_approval(approval_id: str):
         row = (
             await session.execute(select(PendingApproval).where(PendingApproval.id == aid))
         ).scalar_one_or_none()
-    if row is None or row.status != "pending" or not is_email_approval(row.thread_id):
+    if row is None or row.status != "pending":
         return None
     return row
 
 
 def _announce_text(row, *, first: bool) -> str:
-    """Concise spoken intro for a freshly-surfaced inbound reply card — names the
-    sender + subject so the master can decide by ear, then asks to send."""
+    """Concise spoken intro for a freshly-surfaced approval card so the master can
+    decide by ear. Reads sensibly per origin: an email reply names sender +
+    subject; a tool action speaks its description — then asks to go ahead."""
+    from app.email.approval_handler import is_email_approval
+
     h = settings.MASTER_HONORIFIC
-    payload = row.payload or {}
-    name, addr = parseaddr(payload.get("sender", ""))
-    who = name or addr or "someone"
-    subject = payload.get("subject") or "your message"
+    if is_email_approval(row.thread_id):
+        payload = row.payload or {}
+        name, addr = parseaddr(payload.get("sender", ""))
+        who = name or addr or "someone"
+        subject = payload.get("subject") or "your message"
+        lead = (
+            f"{h}, I've drafted a reply" if first
+            else f"Here's another I've drafted, {h} — a reply"
+        )
+        return f"{lead} to {who}, about '{subject}'. Shall I send it?"
+    # Tool action — the row's description is the human action summary.
+    action = (row.description or "an action").rstrip(".")
     lead = (
-        f"{h}, I've drafted a reply" if first
-        else f"Here's another I've drafted, {h} — a reply"
+        f"{h}, I've queued an action for your approval" if first
+        else f"Here's another awaiting you, {h}"
     )
-    return f"{lead} to {who}, about '{subject}'. Shall I send it?"
+    return f"{lead} — {action}. Shall I go ahead?"
 
 
 @router.post("/announce-approval", response_model=AnnounceApprovalResponse)
@@ -135,16 +145,16 @@ async def announce_approval(
     payload: AnnounceApprovalRequest,
     user: UserContext = Depends(get_current_user),
 ) -> AnnounceApprovalResponse:
-    """Speak a freshly-surfaced inbound approval card aloud (voice mode). The HUD
-    calls this when it presents an inbound email-reply card so Jarvis reads it;
-    the master then resolves by voice (→ /voice/stream with presented_approval_id)
-    or by button. Returns the spoken text + its audio, in the same shape the
-    stream's `audio` events carry, so the client plays it through the same path."""
-    row = await _load_pending_email_approval(payload.approval_id)
+    """Speak a freshly-surfaced approval card aloud (voice mode) — an inbound email
+    reply OR a chat-queued tool action. The HUD calls this when it presents a card
+    so Jarvis reads it; the master then resolves by voice (→ /voice/stream with
+    presented_approval_id) or by button. Returns the spoken text + its audio, in
+    the same shape the stream's `audio` events carry (one playback path)."""
+    row = await _load_pending_approval(payload.approval_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="approval not found, already resolved, or not an inbound approval",
+            detail="approval not found or already resolved",
         )
     text = _announce_text(row, first=payload.first)
     content = await synth_line(text)
