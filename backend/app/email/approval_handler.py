@@ -73,10 +73,17 @@ def _read_payload(payload: dict[str, Any]) -> dict[str, str]:
 
 
 async def dispatch_email_approval(
-    thread_id: str, decision: dict[str, Any]
+    thread_id: str, decision: dict[str, Any], *, approval_id: str | None = None
 ) -> EmailApprovalOutcome:
     """Resolve an inbound-email approval. The transport-agnostic core shared by
     Telegram / dashboard / voice.
+
+    Row resolution: by ``approval_id`` (the row's UNIQUE id) when given — this is
+    REQUIRED after a REVISE, where the discarded original and the new card share a
+    ``thread_id``, so a thread_id query would match both (MultipleResultsFound).
+    Falls back to the thread_id query when no approval_id is supplied (the single-row
+    inbound / legacy path). The live caller (``dispatch_approval``) always passes the
+    claimed approval_id, so it sends EXACTLY the row that was approved.
 
     On approve: recover the draft + recipient + threading refs from the payload,
     fetch missing headers via the provider if needed (legacy rows), and send via
@@ -85,15 +92,24 @@ async def dispatch_email_approval(
         logger.info("email_approval_rejected", thread_id=thread_id)
         return EmailApprovalOutcome(status="rejected")
 
+    import uuid as _uuid
+
     from sqlalchemy import select
 
     from app.db.engine import async_session
     from app.db.models import PendingApproval
 
     async with async_session() as session:
-        result = await session.execute(
-            select(PendingApproval).where(PendingApproval.thread_id == thread_id)
-        )
+        if approval_id:
+            try:
+                aid = _uuid.UUID(approval_id)
+            except ValueError:
+                logger.warning("email_approval_bad_uuid", approval_id=approval_id)
+                return EmailApprovalOutcome(status="row_missing")
+            query = select(PendingApproval).where(PendingApproval.id == aid)
+        else:
+            query = select(PendingApproval).where(PendingApproval.thread_id == thread_id)
+        result = await session.execute(query)
         row = result.scalar_one_or_none()
 
     if row is None:

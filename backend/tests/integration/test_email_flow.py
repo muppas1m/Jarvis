@@ -157,3 +157,77 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
             await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == f"email:gmail:{msg_id}"))
             await s.execute(delete(EmailLog).where(EmailLog.gmail_message_id == msg_id))
             await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_revise_then_approve_sends_only_the_revised_row(_rebind_async_state) -> None:
+    """REGRESSION (REVISE): after an edit, the discarded ORIGINAL and the new card
+    share a thread_id. Approving the new card through the REAL production path
+    (decide_approval → resolve_and_dispatch → dispatch_approval → dispatch_email_approval)
+    must send EXACTLY the revised body, ONCE, with NO MultipleResultsFound — the row
+    is resolved by approval_id, not thread_id. The discarded original sits harmless."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import MagicMock, patch
+
+    from app.api.approvals import DecideRequest, decide_approval
+    from app.email.provider import SendResult
+
+    msg_id = f"revtest-{uuid.uuid4().hex[:12]}"
+    thread_id = f"email:gmail:{msg_id}"
+    base = {
+        "provider": "gmail", "message_id": msg_id, "thread_ref": "t-rev",
+        "rfc822_message_id": f"<{msg_id}@mail>", "subject": "Q3 numbers",
+        "sender": "Priya <priya@example.com>",
+    }
+
+    sent: list[dict] = []
+
+    async def fake_send(to, subject, body, reply_to=None, *, source_message_id="", provider_name=""):  # noqa: ARG001
+        sent.append({"to": to, "subject": subject, "body": body})
+        return SendResult(provider=provider_name or "gmail", sent_message_id="sent-rev-1")
+
+    try:
+        # Seed the exact post-revise state: discarded ORIGINAL + new PENDING, same thread_id.
+        async with async_session() as s:
+            original = PendingApproval(
+                thread_id=thread_id, interrupt_id=thread_id, action_type="email_reply",
+                description="Reply (original)", status="discarded",
+                payload={**base, "draft": "Original long-winded reply."},
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            revised = PendingApproval(
+                thread_id=thread_id, interrupt_id=thread_id, action_type="email_reply",
+                description="Reply (revised)", status="pending",
+                payload={**base, "draft": "Shorter reply."},
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            s.add_all([original, revised])
+            await s.commit()
+            await s.refresh(original)
+            await s.refresh(revised)
+            original_id, revised_id = str(original.id), str(revised.id)
+
+        with patch("app.email.approval_handler.send_email", fake_send), \
+             patch("app.email.approval_handler.get_email_provider", return_value=MagicMock()):
+            env = await decide_approval(DecideRequest(approved=True), revised_id)
+
+        # exactly ONE send, of the REVISED body — no MultipleResultsFound raised
+        assert len(sent) == 1, f"expected exactly one send, got {len(sent)}"
+        assert sent[0]["body"] == "Shorter reply.", "must send the REVISED draft, not the original"
+        assert sent[0]["to"] == "priya@example.com"
+        assert env["status"] == "complete" and "priya@example.com" in env["response"]
+
+        # the discarded original is untouched; the revised one was claimed + sent
+        async with async_session() as s:
+            o = (await s.execute(
+                select(PendingApproval).where(PendingApproval.id == uuid.UUID(original_id))
+            )).scalar_one()
+            r = (await s.execute(
+                select(PendingApproval).where(PendingApproval.id == uuid.UUID(revised_id))
+            )).scalar_one()
+        assert o.status == "discarded", "the discarded original must sit harmlessly untouched"
+        assert r.status == "approved", "the revised card must be the one resolved"
+    finally:
+        async with async_session() as s:
+            await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == thread_id))
+            await s.commit()

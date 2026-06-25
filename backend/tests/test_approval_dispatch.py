@@ -122,8 +122,9 @@ async def test_dispatch_email_row_routes_to_email_handler_untouched(monkeypatch)
     rec: dict = {}
     _mock_exec(monkeypatch, rec)
 
-    async def fake_email(thread_id, decision):
+    async def fake_email(thread_id, decision, *, approval_id=None):
         routed["thread_id"] = thread_id
+        routed["approval_id"] = approval_id
         return EmailApprovalOutcome(status="sent", recipient="b@x.com", subject="Re: Hi", detail="id=1")
 
     monkeypatch.setattr("app.agent.approval_dispatch.dispatch_email_approval", fake_email)
@@ -132,6 +133,7 @@ async def test_dispatch_email_row_routes_to_email_handler_untouched(monkeypatch)
         assert outcome.kind == "email" and outcome.status == "sent"
         assert outcome.email_outcome is not None  # carries the taxonomy outcome (Step 2 renders it)
         assert routed["thread_id"].startswith("email:gmail:")
+        assert routed["approval_id"] == aid  # the SPECIFIC row is passed (revise-safe, not thread_id)
         assert "n" not in rec  # the TOOL path was NOT taken — email handler untouched
     finally:
         await _cleanup(aid)

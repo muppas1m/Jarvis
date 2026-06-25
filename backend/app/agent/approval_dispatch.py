@@ -123,8 +123,11 @@ async def dispatch_approval(approval_id: str, decision: dict[str, Any]) -> Appro
         return ApprovalDispatchOutcome(kind="tool", status="row_missing")
 
     # Inbound email → the untouched handler (its own approve/reject + taxonomy).
+    # Pass the claimed approval_id so the SPECIFIC row sends — after a REVISE the
+    # discarded original + the new card share a thread_id (a thread_id query would
+    # match both). row.id == this approval_id (we loaded it by id above).
     if row.action_type == "email_reply" or is_email_approval(row.thread_id):
-        outcome = await dispatch_email_approval(row.thread_id, decision)
+        outcome = await dispatch_email_approval(row.thread_id, decision, approval_id=approval_id)
         return ApprovalDispatchOutcome(
             kind="email",
             status=outcome.status,
