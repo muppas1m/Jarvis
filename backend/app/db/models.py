@@ -6,8 +6,9 @@ What we DON'T own:
     `checkpoint_migrations` — created by AsyncPostgresSaver.setup() inside the
     `002_langgraph_checkpoints` migration. These store the full graph state and
     message history per thread. We never read or write them directly.
-  - Mem0's `mem0_memories` table — managed by the Mem0 SDK. Our `MemoryEpisode`
-    table is a parallel custom-query table, not a mirror.
+  - Mem0's `mem0_memories` table — managed by the Mem0 SDK. It is the live
+    episodic store. Our `MemoryEpisode` table is UNUSED (never wired — see its
+    docstring); query `mem0_memories` directly for maintenance.
 
 Naming gotcha:
   SQLAlchemy reserves `metadata` as an attribute on `DeclarativeBase`. Every
@@ -103,9 +104,15 @@ class ConversationAnalytics(Base):
 # Tier 3 — Episodic memory (parallel to Mem0's own table)                     #
 # --------------------------------------------------------------------------- #
 class MemoryEpisode(Base):
-    """Custom-query view over episodic/semantic memories. Mem0's pgvector backend
-    creates its own `mem0_memories` table; this one mirrors entries we want for
-    future corpus-analysis / maintenance use."""
+    """UNUSED (as of 2026-06-25). Created in 001_initial_schema, never wired —
+    0 rows, no readers or writers anywhere in the codebase across all phases. Was
+    intended as a custom-query mirror over episodic/semantic memories for "future
+    corpus-analysis / maintenance use", but Mem0's `mem0_memories` is the live
+    episodic store and all maintenance (get_all, the 2026-06-25 corpus wipe) queries
+    it directly. Kept rather than dropped only because the DEFERRED consolidation/
+    supersession engine might want a native table — drop via migration if that
+    engine ships against mem0_memories instead, or is abandoned. See memory note
+    project_mem0_dead_memory_episodes_table."""
     __tablename__ = "memory_episodes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
