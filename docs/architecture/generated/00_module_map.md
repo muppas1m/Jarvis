@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (109 modules)
+## `app/` — the system (110 modules)
 
 ```
 app/
@@ -134,6 +134,7 @@ app/
 │   ├── tts.py — Streaming TTS — provider-pluggable, sentence-at-a-time.
 │   └── wakeword.py — Server-side wake-word — openWakeWord "hey jarvis" (Phase 4.2).
 ├── __init__.py — —
+├── briefing.py — Read-state briefing engine (Phase 5.1) — the foundation.
 ├── config.py — Settings — single source of truth for runtime configuration.
 └── main.py — FastAPI app factory + lifespan.
 ```

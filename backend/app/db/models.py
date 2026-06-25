@@ -65,6 +65,12 @@ class UserProfile(Base):
     #           "preferences_long": {...}}
     on_demand = Column(JSONB, nullable=False, default=dict)
 
+    # Read-state briefing (Phase 5): the per-master "heard-up-to" high-water mark.
+    # "Latest" = briefing_items in (briefing_hwm, now], then advance it. NULL until
+    # the first briefing (5.2 floors a NULL HWM at now−24h). A plain column, NOT in
+    # always_on/on_demand, so it never enters the prompt.
+    briefing_hwm = Column(DateTime(timezone=True), nullable=True)
+
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -156,6 +162,27 @@ class ActionableItem(Base):
     )
     resolved_at = Column(DateTime(timezone=True), nullable=True)  # set on done/dropped
     meta = Column(JSONB, nullable=False, default=dict)        # owner_id seam + source thread_id
+
+
+class BriefingItem(Base):
+    """A durable, windowable briefing item — the read-state briefing's backing store
+    (Phase 5.1). Windowed by ``occurred_at`` against the master's heard-up-to mark
+    (UserProfile.briefing_hwm): "latest" = items in (hwm, now]. ``kind`` discriminates
+    email from the future news-on-subscribed-topics seam (kind="news" + meta.topic);
+    the window engine is kind-agnostic so email + news unify with no engine change.
+    Distinct from EmailLog (email-only audit, no preview) — this is the unified,
+    preview-bearing digest store the HWM windows over."""
+    __tablename__ = "briefing_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind = Column(String(10), nullable=False)                 # email | news
+    occurred_at = Column(DateTime(timezone=True), nullable=False, index=True)  # the WINDOW key
+    title = Column(String(500), nullable=True)                # subject / headline
+    source = Column(String(255), nullable=True)               # sender / news source
+    preview = Column(Text, nullable=True)                     # body preview (EmailLog has none)
+    urgency = Column(String(20), nullable=True)               # reuse the triage urgency_rank ordering
+    meta = Column(JSONB, nullable=False, default=dict)        # topic (news), provider msg id, owner_id seam
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,4 +381,9 @@ Index(
     "ix_actionable_items_status_priority",  # readiness: open tasks by priority (look-ahead)
     ActionableItem.status,
     ActionableItem.priority,
+)
+Index(
+    "ix_briefing_items_kind_occurred",  # briefing: window by occurred_at, optionally per kind
+    BriefingItem.kind,
+    BriefingItem.occurred_at,
 )
