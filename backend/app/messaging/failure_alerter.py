@@ -47,11 +47,15 @@ async def send_approval_request_to_master(
     approval_id: str,
     tool_name: str,
     description: str,
+    needs_drafting: bool = False,
 ) -> None:
-    """APPROVE-tier — push the inline approve/reject prompt to master."""
+    """APPROVE-tier — push the inline approve/reject prompt to master. ``needs_drafting``
+    renders the heads-up affordances ("Draft it / Leave it") for a complex-email card."""
     try:
         ch = channel_registry.get(PRIMARY_ALERT_CHANNEL)
-        await ch.send_approval_request(approval_id=approval_id, description=description)
+        await ch.send_approval_request(
+            approval_id=approval_id, description=description, needs_drafting=needs_drafting
+        )
     except Exception as exc:
         logger.error(
             "send_approval_request_failed",

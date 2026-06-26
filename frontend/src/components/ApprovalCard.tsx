@@ -1,5 +1,6 @@
 "use client";
 
+import { cardButtonLabels } from "@/lib/approvalQueue";
 import type { ApprovalRequest } from "@/lib/types";
 
 /**
@@ -70,12 +71,7 @@ export function ApprovalCard({
   // so approving DRAFTS (it re-queues a normal card to approve-to-send), not sends.
   const needsDrafting = !!approval.needs_drafting;
   const actionLabel = needsDrafting ? "Email — needs drafting" : kind === "email" ? "Email reply" : tool_name;
-  const approveLabel = needsDrafting ? "Draft it" : "Approve";
-  const rejectLabel = needsDrafting ? "Leave it" : "Reject";
-  const badge = needsDrafting ? "✎ Draft" : "⚠ Approve";
-  const helper = needsDrafting
-    ? "…or say the word and I'll draft it."
-    : "…or just tell me what to change.";
+  const { approve: approveLabel, reject: rejectLabel, badge, helper } = cardButtonLabels(needsDrafting);
   const entries = Object.entries(tool_args ?? {}).filter(([, v]) => !isEmptyValue(v));
   const showCount = !resolved && queueCount > 1; // "1 of N" only on the live card
 

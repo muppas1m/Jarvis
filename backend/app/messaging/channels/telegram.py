@@ -60,6 +60,21 @@ def _format_ingest_reply(filename: str, result: dict) -> str:
     )
 
 
+def _telegram_decision_label(action: str, outcome: Any) -> str:
+    """The persistent message edit after a Telegram approve/reject — rendered from the
+    dispatch OUTCOME so it is accurate per kind: a heads-up "go" DRAFTS (not sends), a
+    lost claim was already handled. Pure (testable). The send RESULT (sent / couldn't
+    confirm) still rides the follow-up alert (alert_text_for)."""
+    if outcome.status == "not_claimed":
+        return "• Already handled."
+    if outcome.kind == "draft_request":
+        return {
+            "drafted": "✎ Drafted — queued for your approval.",
+            "left": "🗑 Left in your inbox.",
+        }.get(outcome.status, "⚠ I couldn't draft that one — try again.")
+    return "✅ Approved." if action == "approve" else "❌ Rejected."
+
+
 class TelegramChannel(Channel):
     platform = "telegram"
 
@@ -149,16 +164,21 @@ class TelegramChannel(Channel):
             parse_mode="Markdown",
         )
 
-    async def send_approval_request(self, approval_id: str, description: str) -> None:
+    async def send_approval_request(
+        self, approval_id: str, description: str, needs_drafting: bool = False
+    ) -> None:
+        # A heads-up card (needs_drafting): approving DRAFTS, not sends — so the buttons
+        # read "Draft it / Leave it" (the callback_data action stays approve/reject; the
+        # dispatcher drafts-on-approve). The HUD already does this; Telegram now matches.
+        approve_label = "✎ Draft it" if needs_drafting else "✅ Approve"
+        reject_label = "🗑 Leave it" if needs_drafting else "❌ Reject"
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "✅ Approve",
-                    callback_data=json.dumps({"a": "approve", "id": approval_id}),
+                    approve_label, callback_data=json.dumps({"a": "approve", "id": approval_id}),
                 ),
                 InlineKeyboardButton(
-                    "❌ Reject",
-                    callback_data=json.dumps({"a": "reject", "id": approval_id}),
+                    reject_label, callback_data=json.dumps({"a": "reject", "id": approval_id}),
                 ),
             ]
         ])
@@ -354,19 +374,13 @@ class TelegramChannel(Channel):
             if action == "reject":
                 decision["reason"] = "rejected via Telegram"
 
-            # Acknowledge the button + edit the message so the master sees the
-            # action took. `action` is "approve" | "reject" — past-tense rendering
-            # can't use a simple +"ed" suffix (would produce "Approveed").
-            past_tense = "Approved" if action == "approve" else "Rejected"
-            await query.answer(text=f"{past_tense}.")
-            await query.edit_message_text(
-                text=f"{'✅' if action == 'approve' else '❌'} {past_tense}."
-            )
-
-            # The single claim-then-dispatch gate (Phase 3): atomically claims +
-            # executes out-of-band (email/calendar/whatsapp/…). Then surface the
-            # outcome (the send result) as a follow-up alert.
+            # Ack the press (stop the button spinner) immediately, but render the
+            # CONFIRMATION from the dispatch OUTCOME, not optimistically — a needs_drafting
+            # card approves into a DRAFT, not a send, so "Approved." would lie. The single
+            # claim-then-dispatch gate (Phase 3) atomically claims + executes out-of-band.
+            await query.answer()
             outcome = await resolve_and_dispatch(approval_id, action, "telegram", decision)
+            await query.edit_message_text(text=_telegram_decision_label(action, outcome))
             alert = alert_text_for(outcome)
             if alert:
                 await self.send_alert(alert)

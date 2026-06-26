@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  cardButtonLabels,
   cardToApproval,
   inferKind,
   leadInFor,
@@ -15,6 +16,26 @@ import {
   type UnifiedApprovalCard,
 } from "./approvalQueue";
 import type { StreamItem } from "./types";
+
+test("cardButtonLabels — a heads-up reads Draft it / Leave it, else Approve / Reject", () => {
+  const headsUp = cardButtonLabels(true);
+  assert.equal(headsUp.approve, "Draft it");
+  assert.equal(headsUp.reject, "Leave it");
+  assert.match(headsUp.badge, /Draft/);
+  assert.match(headsUp.helper, /draft it/i);
+
+  const simple = cardButtonLabels(false);
+  assert.equal(simple.approve, "Approve");
+  assert.equal(simple.reject, "Reject");
+  assert.match(simple.badge, /Approve/);
+});
+
+test("leadInFor — a needs_drafting email card reads as a heads-up, not 'I've drafted'", () => {
+  const headsUp: UnifiedApprovalCard = { ...card("e1", "email"), needs_drafting: true };
+  assert.match(leadInFor(headsUp, true), /say the word and I'll draft it/i);
+  const simple: UnifiedApprovalCard = { ...card("e2", "email"), needs_drafting: false };
+  assert.match(leadInFor(simple, true), /drafted a reply/i);
+});
 
 function card(id: string, kind: "email" | "tool" = "tool"): UnifiedApprovalCard {
   return {

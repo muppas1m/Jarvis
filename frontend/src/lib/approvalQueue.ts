@@ -88,6 +88,20 @@ export function inferKind(toolName: string): ApprovalKind {
   return toolName === "email_reply" ? "email" : "tool";
 }
 
+/** The card's button + helper copy. A COMPLEX-email heads-up (no draft yet) approves
+ *  into a DRAFT, not a send — so it reads "Draft it / Leave it", matching Telegram +
+ *  voice. Pure so the runner can test it without rendering the component. */
+export function cardButtonLabels(needsDrafting: boolean): {
+  approve: string;
+  reject: string;
+  badge: string;
+  helper: string;
+} {
+  return needsDrafting
+    ? { approve: "Draft it", reject: "Leave it", badge: "✎ Draft", helper: "…or say the word and I'll draft it." }
+    : { approve: "Approve", reject: "Reject", badge: "⚠ Approve", helper: "…or just tell me what to change." };
+}
+
 /**
  * Skip (3D) = grey the pending card to "skipped" — a PURE, DB-INERT transform.
  * It returns new timeline items with only the target pending card flipped; the

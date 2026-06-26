@@ -314,9 +314,8 @@ async def stream_turn(
     if presented_approval_id:
         # A card is presented and the master TYPED something. Judge it against the card
         # (context-aware), then take the UNIFIED disposition (same for voice + text):
-        # resolve an actionable intent; re-ask an ambiguous one; otherwise FALL THROUGH
-        # to a normal turn (answer the message) — adding a "still pending" reminder when
-        # the card is live (off-topic), none when it's stale/gone.
+        # resolve an actionable intent; re-ask an ambiguous one; ACK a stale/gone card;
+        # otherwise (off-topic) FALL THROUGH to a normal turn + a once-per-card reminder.
         recent_context = await _recent_context(thread_id)
         disp, judged = await _presented_disposition(presented_approval_id, user_message, recent_context)
         logger.info(
@@ -333,9 +332,13 @@ async def stream_turn(
             async for ev in _reask_presented(judged, speak=False):
                 yield ev
             return
-        if disp == "remind":
-            card_reminder = _card_reminder(judged)
-        # remind / plain → no return; answer the message in the normal turn below.
+        if disp == "plain":  # stale/gone card → brief ack, never answer it as a turn
+            async for ev in _stale_ack(speak=False):
+                yield ev
+            return
+        if disp == "remind":  # off-topic → answer below + remind ONCE per card
+            card_reminder = await _reminder_for(judged)
+        # only 'remind' reaches here now → answer the message in the normal turn below.
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
@@ -625,6 +628,16 @@ async def _load_approval_by_id(approval_id: str):
         return result.scalar_one_or_none()
 
 
+def _is_email_row(row: Any) -> bool:
+    """True for an inbound-email reply approval row (vs a chat-queued tool card). The
+    ONE predicate — used by the judgment, the card framing, and the context line."""
+    from app.email.approval_handler import is_email_approval
+
+    return bool(row) and (
+        is_email_approval(row.thread_id) or row.action_type in ("email_reply", "gmail_reply")
+    )
+
+
 @dataclass
 class _PresentedJudgment:
     """The classification of a typed/spoken message against a PRESENTED card.
@@ -649,13 +662,7 @@ class _PresentedJudgment:
         """True for an inbound-email reply card (re-draftable) vs a chat-queued tool
         card. Edit (re-draft) is email-only; approve/reject/skip/show_others are
         kind-agnostic."""
-        from app.email.approval_handler import is_email_approval
-
-        if self.row is None:
-            return False
-        return is_email_approval(self.row.thread_id) or self.row.action_type in (
-            "email_reply", "gmail_reply",
-        )
+        return _is_email_row(self.row)
 
     @property
     def needs_drafting(self) -> bool:
@@ -671,9 +678,11 @@ async def _judge_presented(
     context-aware ``resolve_decision`` (ambiguous → unclear/unrelated, NEVER approve).
     Works for BOTH card kinds — an inbound-email reply (tool_args = the draft) and a
     chat-queued tool call (tool_args = the real args) — so every action has voice/text
-    parity regardless of origin. ``recent_context`` is the conversation's recent turns,
-    so the judge can tell "responding to the card" from "a new topic". Returns None if
-    the card is stale / gone — the caller answers the message as a normal turn.
+    parity regardless of origin. ``recent_context`` is the conversation's recent turns;
+    we ALSO append the card's own framing (``_card_context_line``) so the judge sees "I
+    just raised this with you" UNIFORMLY — including for an inbound card, which is
+    surfaced via the poll/announce and never lands in the conversation thread. Returns
+    None if the card is stale / gone — the caller acks ("already taken care of").
 
     FAILS OPEN: the load is a DB call and resolve_decision is an LLM call, either of
     which can raise. The guard lives HERE (not at each caller) because this is the ONE
@@ -682,14 +691,12 @@ async def _judge_presented(
     is NEVER a decision that sends") is enforced in a single auditable spot. A failure
     returns ``unrelated`` with ``row=None``: the caller answers the message normally and
     (row=None) adds no card reminder — never errors, never sends."""
-    from app.email.approval_handler import is_email_approval
-
     try:
         row = await _load_approval_by_id(approval_id)
         if row is None or row.status != "pending":
             return None
         payload = row.payload or {}
-        if is_email_approval(row.thread_id) or row.action_type in ("email_reply", "gmail_reply"):
+        if _is_email_row(row):
             tool_name = row.action_type
             if payload.get("needs_drafting"):
                 # Heads-up card: the pending action is "draft a reply" (no draft yet) —
@@ -709,7 +716,10 @@ async def _judge_presented(
         else:  # chat-queued tool card — judge against the REAL tool + args
             tool_name = payload.get("tool_name") or row.action_type
             tool_args = payload.get("tool_args") or {}
-        res = await resolve_decision(tool_name, tool_args, row.description, message, recent_context)
+        # The judge's context = the recent conversation + the card's OWN surfacing line
+        # (last = most recent). This makes the context-awareness fire for inbound cards.
+        context = "\n".join(c for c in (recent_context.strip(), _card_context_line(row)) if c)
+        res = await resolve_decision(tool_name, tool_args, row.description, message, context)
         return _PresentedJudgment(
             approval_id=approval_id, row=row, intent=res.intent, change=res.change
         )
@@ -831,6 +841,27 @@ def _card_phrase(judged: "_PresentedJudgment | None") -> str:
     return "that pending action"
 
 
+def _card_context_line(row: Any) -> str:
+    """Synthesize the assistant's OWN framing of a just-surfaced card, as a context line
+    for the judge — "Assistant: I've drafted a reply to Priya about 'Q3' — shall I send
+    it?". An inbound card is surfaced via the poll/announce and never written to the
+    conversation thread, so without this the judge would have no "I just raised this"
+    signal for inbound mail; adding it uniformly (inbound + chat) makes context-awareness
+    fire everywhere. Mirrors the announce/lead-in copy."""
+    payload = row.payload or {}
+    if _is_email_row(row):
+        from email.utils import parseaddr
+
+        name, addr = parseaddr(payload.get("sender", ""))
+        who = name.strip() or (addr.split("@")[0] if addr else "someone")
+        subject = payload.get("subject") or "your message"
+        if payload.get("needs_drafting"):
+            return f"Assistant: You've got a more involved email from {who} about '{subject}' — shall I draft a reply?"
+        return f"Assistant: I've drafted a reply to {who} about '{subject}' — shall I send it?"
+    action = (row.description or "an action").rstrip(".")
+    return f"Assistant: I've queued this for your approval — {action}. Shall I go ahead?"
+
+
 def _card_reminder(judged: "_PresentedJudgment | None") -> str:
     """A brief "still pending" tail appended when an OFF-TOPIC message is answered
     while a card is pending — answer the master, then a one-line reminder (never block).
@@ -838,6 +869,53 @@ def _card_reminder(judged: "_PresentedJudgment | None") -> str:
     if judged is None or judged.row is None:
         return ""
     return f"By the way, {_card_phrase(judged)} is still pending your approval, {settings.MASTER_HONORIFIC}."
+
+
+async def _mark_reminded(approval_id: str) -> bool:
+    """Atomically claim the FIRST off-topic reminder for a card. Returns True only to the
+    call that flips the durable per-card ``reminded`` flag from unset → set (the same
+    conditional-UPDATE claim idiom as approvals), so a reload / a later off-topic turn /
+    a concurrent turn never re-nags. False if already reminded, already acted on
+    (status flipped out of 'pending' — "silent until acted on"), gone, or a bad id."""
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.db.engine import async_session
+
+    try:
+        aid = uuid.UUID(approval_id)
+    except ValueError:
+        return False
+    try:
+        async with async_session() as session:
+            res = await session.execute(
+                text(
+                    "UPDATE pending_approvals "
+                    "SET payload = payload || '{\"reminded\": true}'::jsonb "
+                    "WHERE id = :id AND status = 'pending' "
+                    "AND COALESCE((payload->>'reminded')::boolean, false) = false "
+                    "RETURNING id"
+                ),
+                {"id": aid},
+            )
+            claimed = res.first() is not None
+            await session.commit()
+        return claimed
+    except Exception as exc:  # noqa: BLE001 — reminder is a nicety; never break the turn
+        logger.warning("mark_reminded_failed", approval_id=approval_id, error=str(exc))
+        return False
+
+
+async def _reminder_for(judged: "_PresentedJudgment | None") -> str:
+    """The once-then-quiet reminder: the line on the FIRST off-topic turn after a card
+    appears (claiming the durable flag), then "" forever for that card. "" when there's
+    no live card to reference (failed-open judge / no row)."""
+    if judged is None or judged.row is None:
+        return ""
+    if not await _mark_reminded(judged.approval_id):
+        return ""  # already reminded once for this card → stay quiet
+    return _card_reminder(judged)
 
 
 async def _reask_presented(
@@ -860,6 +938,20 @@ async def _reask_presented(
     )}
 
 
+async def _stale_ack(*, speak: bool) -> AsyncIterator[dict[str, Any]]:
+    """A card the master speaks/types to was already resolved elsewhere (stale/gone):
+    a brief ack, IDENTICAL voice + text, then stop — never answer it as a normal turn
+    ('send what?'). The plain disposition."""
+    ack = f"That one's already taken care of, {settings.MASTER_HONORIFIC}."
+    if speak:
+        ev = await _speak_text(ack)
+        if ev:
+            yield ev
+    yield {"type": "done", "content": _terminal_payload(
+        {"thread_id": "", "status": "complete", "response": ack}
+    )}
+
+
 async def _presented_disposition(
     approval_id: str, message: str, recent_context: str
 ) -> tuple[str, "_PresentedJudgment | None"]:
@@ -867,10 +959,10 @@ async def _presented_disposition(
     decide the UNIFIED disposition — IDENTICAL for voice and text:
       'resolve' → an actionable intent (approve/reject/edit/skip/show_others).
       'reask'   → the reply engages the card but is ambiguous → re-ask to clarify.
-      'remind'  → off-topic → answer it normally + remind the card is still pending.
-      'plain'   → stale/gone card → answer it normally (nothing to remind).
-    The caller dispatches resolve/reask itself, or falls through to a normal turn for
-    remind/plain (appending the reminder on 'remind')."""
+      'remind'  → off-topic → answer it normally + remind the card is still pending (once).
+      'plain'   → stale/gone card → a brief ack ("already taken care of"), then stop.
+    The caller dispatches resolve / reask / plain-ack itself, or (only 'remind') falls
+    through to a normal turn, appending the once-per-card reminder."""
     judged = await _judge_presented(approval_id, message, recent_context)
     if judged is None:
         return "plain", None
@@ -1163,13 +1255,12 @@ async def voice_turn(
 
     card_reminder = ""   # set when an off-topic utterance is answered with a card pending
     if presented_approval_id:
-        # A card is presented and the master SPOKE. Identical disposition to text
-        # (one shared judge + classifier): resolve an actionable intent; re-ask an
-        # ambiguous one; otherwise FALL THROUGH to a normal spoken turn (answer it) —
-        # adding a spoken "still pending" reminder when the card is live (off-topic).
-        # This replaces the old voice-only nudge-and-block: voice now answers off-topic
-        # exactly like text. Checked AFTER the conversation interrupt so a live in-thread
-        # approval always wins.
+        # A card is presented and the master SPOKE. Identical disposition to text (one
+        # shared judge + classifier): resolve an actionable intent; re-ask an ambiguous
+        # one; ACK a stale/gone card; otherwise (off-topic) FALL THROUGH to a normal
+        # spoken turn (answer it) + a once-per-card spoken reminder. This replaces the
+        # old voice-only nudge-and-block: voice now answers off-topic exactly like text.
+        # Checked AFTER the conversation interrupt so a live in-thread approval wins.
         recent_context = await _recent_context(thread_id)
         disp, judged = await _presented_disposition(presented_approval_id, user_message, recent_context)
         logger.info(
@@ -1186,9 +1277,13 @@ async def voice_turn(
             async for ev in _reask_presented(judged, speak=True):
                 yield ev
             return
-        if disp == "remind":
-            card_reminder = _card_reminder(judged)
-        # remind / plain → no return; answer the utterance in the normal voice turn below.
+        if disp == "plain":  # stale/gone card → brief spoken ack, never answer it as a turn
+            async for ev in _stale_ack(speak=True):
+                yield ev
+            return
+        if disp == "remind":  # off-topic → answer below + remind ONCE per card
+            card_reminder = await _reminder_for(judged)
+        # only 'remind' reaches here now → answer the utterance in the normal voice turn below.
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)

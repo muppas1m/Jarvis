@@ -202,6 +202,7 @@ async def _queue_email_approval(
         approval_id=str(approval.id),
         tool_name="email_reply",
         description=approval.description,
+        needs_drafting=needs_drafting,   # heads-up → "Draft it / Leave it" on Telegram too
     )
 
 

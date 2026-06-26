@@ -71,13 +71,19 @@ class Channel(ABC):
         """Send a system alert (failure notice, system notification) to the master."""
 
     @abstractmethod
-    async def send_approval_request(self, approval_id: str, description: str) -> None:
+    async def send_approval_request(
+        self, approval_id: str, description: str, needs_drafting: bool = False
+    ) -> None:
         """Send an interactive approval prompt to the master.
 
         On platforms with rich UI (Telegram inline buttons, WhatsApp quick
         replies) this should render approve/reject affordances. On
         text-only platforms, the channel may fall back to text + ask the
         master to reply with `/approve <id>` / `/reject <id>`.
+
+        ``needs_drafting`` flags a COMPLEX-email heads-up (no draft yet): approving
+        DRAFTS rather than sends, so the affordances should read "Draft it / Leave it"
+        and the confirmation "Drafted." — never "Approve / Approved".
         """
 
     @abstractmethod
