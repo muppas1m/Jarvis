@@ -37,9 +37,13 @@ class AgentState(TypedDict, total=False):
     user_profile_always_on: dict
     user_profile_on_demand: list[dict]
     relevant_memories: list[dict]
-    # Proactive-briefing check-in directive (5.4) — the deterministic per-turn
-    # facts+guidance, computed once in memory_load_node, injected by agent_node.
+    # Proactive-briefing check-in (5.4) — computed once in memory_load_node. directive =
+    # the model guidance (injected by agent_node); proactive = the deterministic mode
+    # (suppress / surface_single / surface_multiday) + offer = the code-owned OFFER line,
+    # both read by the runner post-turn to CODE-render the brief/offer into the reply.
     briefing_directive: str
+    briefing_proactive: str
+    briefing_offer: str
 
     # --- per-turn metadata --------------------------------------------------
     thread_id: str

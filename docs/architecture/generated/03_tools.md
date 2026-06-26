@@ -4,7 +4,7 @@
 
 # Tools & Safety Tiers
 
-14 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
+15 registered tools. Safety tier from `app/agent/safety.py:TOOL_SAFETY_MAP` (SAFE = silent · NOTIFY = run+inform · APPROVE = pause for the master · BLOCKED = never). Backing module is the handler's `__module__`.
 
 | Tool | Safety tier | Always-loaded | Backing module | Summary |
 |---|---|---|---|---|
@@ -13,6 +13,7 @@
 | `calendar_delete` | APPROVE |  | `app.agent.tools.calendar_tool` | Delete / cancel an existing calendar event by event_id |
 | `calendar_read` | SAFE |  | `app.agent.tools.calendar_tool` | Read upcoming events from the master's Google Calendar — what's scheduled, meetings, what'… |
 | `calendar_update` | APPROVE |  | `app.agent.tools.calendar_tool` | Update / reschedule an existing calendar event — change its title, time, description, or l… |
+| `deliver_briefing` | SAFE |  | `app.agent.tools.briefing_tool` | Signal that the master is CHECKING IN and their pending briefing should be presented |
 | `document_search` | SAFE |  | `app.agent.tools.document_search` | Search the master's ingested documents (PDFs, Word/Excel files, notes, markdown) for passa… |
 | `email_history_search` | SAFE |  | `app.agent.tools.email_history` | Search the master's email history — what messages came in, who sent them, were they replie… |
 | `email_send` | APPROVE |  | `app.agent.tools.email_send` | Send an email via the master's account |

@@ -181,6 +181,18 @@ class _BriefingArgs(BaseModel):
     )
 
 
+async def deliver_briefing() -> str:
+    """SIGNAL ONLY (Phase 5.4) — the agent calls this to tell the SYSTEM the master is
+    checking in and a pending briefing should be presented. The system fetches and attaches
+    the actual brief to the reply (text + voice); the agent NEVER writes the briefing itself.
+    Returns a confirmation so the agent simply finishes its natural greeting."""
+    return "Acknowledged — presenting the master's briefing now."
+
+
+class _DeliverBriefingArgs(BaseModel):
+    pass  # signal only — no arguments
+
+
 def register() -> None:
     tool_registry.register(
         name="briefing",
@@ -195,4 +207,18 @@ def register() -> None:
             "Does NOT check tasks/calendar/approvals (use readiness_check for 'am I all set')."
         ),
         args_schema=_BriefingArgs,
+    )
+    tool_registry.register(
+        name="deliver_briefing",
+        handler=deliver_briefing,
+        description=(
+            "Signal that the master is CHECKING IN and their pending briefing should be "
+            "presented. Call this (no arguments) ONLY when the <check_in> context says a "
+            "briefing is pending AND the master's message is a check-in/greeting ('good "
+            "morning', 'hey', 'what's up', 'what's new', 'how are things'). The SYSTEM then "
+            "attaches the briefing to your reply — you do NOT write the briefing yourself. "
+            "Do NOT call it for a specific request (the system offers the briefing as a tail), "
+            "and never to deliver a scoped recall (use 'briefing' for 'what came in today')."
+        ),
+        args_schema=_DeliverBriefingArgs,
     )

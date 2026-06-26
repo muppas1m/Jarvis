@@ -88,15 +88,23 @@ async def memory_load_node(state: AgentState) -> dict:
     _t0 = time.monotonic()
     context = await get_memory().build_context(user_message=user_message)
 
-    # Proactive-briefing check-in (5.4): ONE cheap read → a deterministic directive that
-    # rides THIS turn (no new node, no extra LLM call). Read the gap/cooldown from the
-    # CURRENT state, then advance last_seen. Fully fail-soft — the briefing intelligence
-    # must never break a turn (a DB hiccup just means no proactive brief this turn).
-    directive = ""
+    # Proactive-briefing check-in (5.4): ONE cheap read at turn START → the deterministic
+    # directive (model guidance) + the proactive MODE and OFFER text the runner renders
+    # post-turn (code guarantees the output; the model only writes the wrapper + the
+    # deliver_briefing() signal). Read the gap/cooldown from the CURRENT state, then advance
+    # last_seen. Fully fail-soft — the briefing intelligence must never break a turn.
+    directive, proactive, offer = "", "suppress", ""
     try:
-        from app.agent.briefing_state import briefing_directive, load_live_state, touch_last_seen
+        from app.agent.briefing_state import (
+            briefing_directive,
+            load_live_state,
+            proactive_mode,
+            render_offer,
+            touch_last_seen,
+        )
         now = datetime.now(UTC)
-        directive = briefing_directive(await load_live_state(now))
+        live = await load_live_state(now)
+        directive, proactive, offer = briefing_directive(live), proactive_mode(live), render_offer(live)
         await touch_last_seen(now)
     except Exception as exc:  # noqa: BLE001 — never fail a turn on the briefing read
         logger.warning("briefing_checkin_state_failed", error=str(exc))
@@ -107,6 +115,8 @@ async def memory_load_node(state: AgentState) -> dict:
         "user_profile_on_demand": context["user_profile_on_demand"],
         "relevant_memories": context["relevant_memories"],
         "briefing_directive": directive,
+        "briefing_proactive": proactive,
+        "briefing_offer": offer,
     }
 
 

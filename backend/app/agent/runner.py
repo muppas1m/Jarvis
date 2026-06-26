@@ -259,6 +259,10 @@ async def run_turn(
             1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
         ),
     )
+    if envelope.get("status") != "interrupted":
+        attach = await _briefing_attach(result)  # 5.4 — code-guaranteed brief/offer
+        if attach:
+            envelope["response"] = _append_block(envelope.get("response", ""), attach)
     return envelope  # context already on the envelope (set in _build_envelope)
 
 
@@ -420,7 +424,13 @@ async def stream_turn(
     if envelope["status"] == "interrupted":
         yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
     else:
-        yield {"type": "done", "content": _with_reminder(_terminal_payload(envelope), card_reminder)}
+        attach = await _briefing_attach(result)  # 5.4 — code-guaranteed brief/offer
+        if attach:
+            yield {"type": "token", "content": "\n\n" + attach}  # stream it live
+        payload = _with_reminder(_terminal_payload(envelope), card_reminder)
+        if attach:
+            payload["response"] = _append_block(payload.get("response", ""), attach)
+        yield {"type": "done", "content": payload}
 
 
 def _chunk_text(chunk: Any) -> str:
@@ -466,6 +476,32 @@ def _with_reminder(payload: dict[str, Any], reminder: str) -> dict[str, Any]:
     base = (payload.get("response") or "").rstrip()
     payload["response"] = f"{base} {reminder}".strip() if base else reminder
     return payload
+
+
+def _append_block(base: str, block: str) -> str:
+    """Append a code-attached block (briefing / offer) as its own paragraph — the model's
+    wrapper, then the system-guaranteed content."""
+    base = (base or "").rstrip()
+    return f"{base}\n\n{block}".strip() if base else block
+
+
+async def _briefing_attach(result: dict[str, Any]) -> str:
+    """Phase 5.4 — CODE-render the proactive briefing into the reply (the model wrote only
+    the wrapper + the deliver_briefing() signal). Reads the turn-START mode + offer (stored
+    in state by memory_load_node) and the model's signal (a tool call in the final messages);
+    returns the brief (deliver) or the offer line (floor), or "" for suppress/already-done.
+    Fail-soft — a hiccup here must never break the reply."""
+    try:
+        from app.agent.briefing_state import render_attach
+        text, _delivered = await render_attach(
+            result.get("briefing_proactive") or "suppress",
+            result.get("briefing_offer") or "",
+            result.get("messages") or [],
+        )
+        return text
+    except Exception as exc:  # noqa: BLE001 — never break the reply on the briefing attach
+        logger.warning("briefing_attach_failed", error=str(exc))
+        return ""
 
 
 async def _queued_approval_event(thread_id: str, message: Any) -> dict[str, Any] | None:
@@ -1445,7 +1481,18 @@ async def voice_turn(
             ev = await _speak(card_reminder)
             if ev:
                 yield ev
-        yield {"type": "done", "content": _with_reminder(_terminal_payload(envelope), card_reminder)}
+        # 5.4 proactive briefing: code-attach the brief/offer — SPOKEN (voice parity) and
+        # captioned (live token), exactly like the rest of the reply.
+        attach = await _briefing_attach(result)
+        if attach:
+            yield {"type": "token", "content": "\n\n" + attach}
+            ev = await _speak(attach)
+            if ev:
+                yield ev
+        payload = _with_reminder(_terminal_payload(envelope), card_reminder)
+        if attach:
+            payload["response"] = _append_block(payload.get("response", ""), attach)
+        yield {"type": "done", "content": payload}
 
 
 # --------------------------------------------------------------------------- #

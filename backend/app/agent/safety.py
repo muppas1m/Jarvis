@@ -56,6 +56,7 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "task_list":        SafetyLevel.SAFE,
     "readiness_check":  SafetyLevel.SAFE,
     "briefing":         SafetyLevel.SAFE,  # read + an internal HWM advance; no external side effect
+    "deliver_briefing": SafetyLevel.SAFE,  # 5.4 signal only — the runner renders the brief, no side effect
 
     # --- own-task management (no external side effect) -----------------------
     "task_add":         SafetyLevel.SAFE,

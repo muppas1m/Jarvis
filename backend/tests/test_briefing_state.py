@@ -1,13 +1,16 @@
 """Proactive-briefing check-in intelligence (5.4).
 
-The DETERMINISTIC decision that rides the turn: briefing_directive (pure) — deliver /
-offer / suppress per the facts, with the cooldown gate decided IN CODE; the cheap reads
-(count_unheard, load_live_state); and the single delivery seam (mark_briefed advances the
-HWM AND stamps last_briefed_at). Single-row profile state is saved/restored like the HWM
-tests. Far-future item dates avoid colliding with any real data.
+The DETERMINISTIC engine: proactive_mode (suppress / surface_single / surface_multiday,
+cooldown + caught-up decided IN CODE) and — the key BEHAVIOR-level seam — render_attach,
+which returns the actual text the runner appends to the reply: the real brief when the
+model SIGNALLED a check-in (deliver_briefing tool call), else the code-owned OFFER floor.
+Asserting render_attach (not just the directive string) is what catches an offer that
+under-fires. Plus the cheap reads and the mark_briefed delivery seam. Single-row profile
+state is saved/restored like the HWM tests; far-future item dates avoid real-data collision.
 """
 from datetime import UTC, datetime, timedelta
 
+from langchain_core.messages import AIMessage
 from sqlalchemy import delete, select, update
 
 import app.agent.briefing_state as bs
@@ -27,66 +30,103 @@ def _state(last_briefed=None, last_seen=None, unheard=0, now=_NOW):
 
 
 # --------------------------------------------------------------------------- #
-# briefing_directive — the deterministic deliver / offer / suppress decision.  #
+# proactive_mode — the deterministic deliver-window / suppress decision.       #
 # --------------------------------------------------------------------------- #
-def test_first_of_day_delivers():
-    # First interaction today + unheard items → DELIVER on a check-in (call the tool, not a
-    # bare one-liner). Offer only if the message is genuinely ambiguous.
+def test_mode_first_of_day_surfaces():
+    assert bs.proactive_mode(_state(last_seen=_NOW - timedelta(days=1), unheard=2)) == bs.SURFACE_SINGLE
+
+
+def test_mode_regreet_with_fresh_delta_surfaces():
+    # Item 2: seen earlier today, PAST the cooldown, with fresh items → SURFACE (not silent).
+    m = bs.proactive_mode(_state(last_briefed=_NOW - timedelta(hours=3),
+                                 last_seen=_NOW - timedelta(hours=2), unheard=2))
+    assert m == bs.SURFACE_SINGLE
+
+
+def test_mode_cooldown_suppresses_even_with_unheard():
+    m = bs.proactive_mode(_state(last_briefed=_NOW - timedelta(minutes=9),
+                                 last_seen=_NOW - timedelta(days=1), unheard=9))
+    assert m == bs.SUPPRESS
+
+
+def test_mode_caught_up_suppresses():
+    assert bs.proactive_mode(_state(last_briefed=_NOW - timedelta(hours=5),
+                                    last_seen=_NOW - timedelta(hours=5), unheard=0)) == bs.SUPPRESS
+
+
+def test_mode_multiday():
+    assert bs.proactive_mode(_state(last_seen=_NOW - timedelta(days=3), unheard=5)) == bs.SURFACE_MULTIDAY
+
+
+def test_mode_cooldown_boundary_is_deterministic():
+    cd = settings.BRIEFING_COOLDOWN_MINUTES
+    inside = _state(last_briefed=_NOW - timedelta(minutes=cd - 1), last_seen=_NOW - timedelta(days=1), unheard=2)
+    outside = _state(last_briefed=_NOW - timedelta(minutes=cd + 1), last_seen=_NOW - timedelta(days=1), unheard=2)
+    assert bs.proactive_mode(inside) == bs.SUPPRESS
+    assert bs.proactive_mode(outside) == bs.SURFACE_SINGLE
+
+
+def test_render_offer_per_mode():
+    assert "latest" in bs.render_offer(_state(last_seen=_NOW - timedelta(days=1), unheard=2)).lower()
+    multi = bs.render_offer(_state(last_seen=_NOW - timedelta(days=3), unheard=5))
+    assert "away 3 days" in multi and "catch you up" in multi
+
+
+def test_directive_surface_single_tells_model_to_signal():
     d = bs.briefing_directive(_state(last_seen=_NOW - timedelta(days=1), unheard=2))
-    assert "first interaction today" in d                 # the facts line
-    assert "DELIVER the briefing" in d and "briefing('latest')" in d
-    assert "NOT a trivial" in d                            # overrides the one-liner steering
-    assert "2 unheard" in d
+    assert "deliver_briefing()" in d and "do NOT write the briefing" in d
+    assert "mode=surface_single" in d
 
 
-def test_cooldown_suppresses_proactive_but_allows_explicit():
-    # Briefed 9 min ago → do NOT proactively brief; an explicit ask still answers.
+def test_directive_suppress_only_on_explicit():
     d = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(minutes=9),
                                      last_seen=_NOW - timedelta(minutes=9), unheard=3))
-    assert "do NOT proactively brief" in d
-    assert "EXPLICITLY asks" in d
-    assert "9 minutes ago" in d
+    assert "Do NOT proactively brief or offer" in d and "cooldown" in d
 
 
-def test_cooldown_takes_precedence_over_unheard():
-    # Even with unheard items, within the cooldown the decision is SUPPRESS (not deliver).
-    d = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(minutes=1),
-                                     last_seen=_NOW - timedelta(days=1), unheard=9))
-    assert "do NOT proactively brief" in d
-    assert "deliver it now" not in d
+# --------------------------------------------------------------------------- #
+# render_attach — BEHAVIOR-LEVEL: the actual text the runner appends (the brief #
+# on a deliver SIGNAL, the offer line otherwise). This is what reaches the     #
+# master — asserting it, not just the directive string (the gap last time).    #
+# --------------------------------------------------------------------------- #
+def _ai_calling(tool_name):
+    return AIMessage(content="Good morning, Sir.", tool_calls=[{"name": tool_name, "args": {}, "id": "x"}])
 
 
-def test_multi_day_gap_offers_catchup_not_dump():
-    d = bs.briefing_directive(_state(last_seen=_NOW - timedelta(days=3), unheard=5))
-    assert "away 3 days" in d
-    assert "catch-up OFFER" in d and "do NOT dump" in d
-    assert "after Sir says yes" in d  # never call the tool / dump unprompted
+async def test_render_attach_delivers_the_brief_on_signal(monkeypatch):
+    async def fake_briefing(scope="latest"):
+        return "Here's the latest, Sir — 2 new: ..."
+    monkeypatch.setattr("app.agent.tools.briefing_tool.briefing", fake_briefing)
+    text, delivered = await bs.render_attach(bs.SURFACE_SINGLE, "OFFER LINE", [_ai_calling("deliver_briefing")])
+    assert delivered and "the latest" in text and "OFFER LINE" not in text
 
 
-def test_caught_up_says_nothing_new():
-    d = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(hours=5),
-                                     last_seen=_NOW - timedelta(hours=5), unheard=0))
-    assert "Nothing new" in d and "do NOT proactively brief" in d
-    assert "all caught up" in d
+async def test_render_attach_offers_the_floor_without_signal():
+    # No deliver_briefing signal (a task turn) → the code-owned OFFER floor, NOT silence.
+    text, delivered = await bs.render_attach(bs.SURFACE_SINGLE, "OFFER FLOOR", [_ai_calling("calendar_read")])
+    assert not delivered and text == "OFFER FLOOR"
 
 
-def test_unheard_but_seen_today_stays_quiet():
-    # Seen earlier today (not first-of-day), not in cooldown, unheard waiting → the morning
-    # check-in window has passed, so do NOT re-offer (anti-spam); explicit asks still answer.
-    d = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(hours=3),
-                                     last_seen=_NOW - timedelta(hours=2), unheard=1))
-    assert "already interacted today" in d
-    assert "do NOT proactively brief or offer" in d and "EXPLICITLY asks" in d
+async def test_render_attach_multiday_always_offers_never_dumps():
+    # Even if the model erroneously signalled deliver, multi-day NEVER auto-delivers.
+    text, delivered = await bs.render_attach(bs.SURFACE_MULTIDAY, "CATCHUP OFFER", [_ai_calling("deliver_briefing")])
+    assert not delivered and text == "CATCHUP OFFER"
 
 
-def test_cooldown_boundary_is_deterministic():
-    cd = settings.BRIEFING_COOLDOWN_MINUTES
-    inside = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(minutes=cd - 1),
-                                          last_seen=_NOW - timedelta(days=1), unheard=2))
-    outside = bs.briefing_directive(_state(last_briefed=_NOW - timedelta(minutes=cd + 1),
-                                           last_seen=_NOW - timedelta(days=1), unheard=2))
-    assert "do NOT proactively brief" in inside        # just inside → suppressed
-    assert "do NOT proactively brief" not in outside    # just outside → free to deliver/offer
+async def test_render_attach_suppress_is_silent():
+    text, delivered = await bs.render_attach(bs.SUPPRESS, "OFFER", [_ai_calling("deliver_briefing")])
+    assert text == "" and not delivered
+
+
+async def test_render_attach_no_double_when_explicit_briefing_ran(monkeypatch):
+    # The master explicitly asked → the briefing() tool already delivered this turn. The
+    # proactive attach must NOT fire again (no double-brief).
+    async def fake_briefing(scope="latest"):
+        return "should not be called"
+    monkeypatch.setattr("app.agent.tools.briefing_tool.briefing", fake_briefing)
+    msgs = [_ai_calling("briefing"), _ai_calling("deliver_briefing")]
+    text, delivered = await bs.render_attach(bs.SURFACE_SINGLE, "OFFER", msgs)
+    assert text == "" and not delivered
 
 
 def test_ago_phrasing():

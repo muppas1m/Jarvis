@@ -8,18 +8,22 @@ agent's existing turn (memory_load_node computes it once; no new node, no new LL
     last_seen_at, briefing_hwm) + the unheard count (an indexed COUNT over briefing_items
     above the watermark). The efficiency lever: precise FACTS so the agent decides on
     facts, not by guessing from history.
-  - briefing_directive(state): PURE — the facts + the deterministic decision (deliver /
-    offer / suppress) the agent follows this turn. The COOLDOWN is decided HERE in code
-    (keyed on last_briefed_at), not asked of the model — when it's active the directive
-    says "do not proactively brief". An EXPLICIT ask bypasses all of this (the agent calls
-    the briefing tool directly, which always answers).
+  - proactive_mode(state): PURE — the deterministic mode (suppress / surface_single /
+    surface_multiday). The cooldown + caught-up gates are decided HERE in code, never asked
+    of the model. The runner renders the OUTPUT post-turn from this mode, so the brief/offer
+    is code-GUARANTEED (the model only writes the wrapper + the deliver_briefing() signal).
+  - briefing_directive(state): PURE — the per-turn guidance. The model's only job: respond
+    naturally, and on a single-day surface SIGNAL a clear check-in via deliver_briefing().
+  - render_offer(state) / render_attach(mode, offer, messages): the code-rendered output —
+    the offer line (the safe floor), or the actual brief when the model signalled deliver
+    (fetched via briefing('latest'), which fires the mark_briefed seam). No double if a brief
+    already went out this turn.
   - touch_last_seen(now): advance the per-turn sighting (monotonic) AFTER the gap was read.
   - mark_briefed(now): THE single 'brief was delivered' seam — advance the HWM AND stamp
     last_briefed_at together (the briefing tool calls this in place of a bare advance_hwm).
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 
@@ -101,77 +105,122 @@ def _ago(then: datetime | None, now: datetime) -> str:
     return f"{round(secs / 86400)} days ago"
 
 
-# How to actually brief — force the tool call, kill the describe-instead-of-call + the
-# "queued for approval" hallucination (briefing is a SAFE read), and stop the agent reciting
-# the surfaced count in place of delivering. Shared by every branch that may brief.
-_HOW = (
-    "call the briefing('latest') tool and present what it returns. It is a normal READ — NOT an "
-    "approval-tier action: never say you 'queued', 'prepared', or 'will' brief it. You do NOT know "
-    "the items until the tool returns, so never invent them or recite the count in place of calling it."
-)
+# ---- the deterministic mode (the engine decides; the OUTPUT is code-rendered) ----
+SUPPRESS = "suppress"              # cooldown active OR caught-up → no proactive attach
+SURFACE_SINGLE = "surface_single" # unheard waiting, a same-day check-in window → deliver-or-offer
+SURFACE_MULTIDAY = "surface_multiday"  # away ≥ BRIEFING_AWAY_DAYS → always OFFER the catch-up
+
+
+def _assess(state: BriefingLiveState) -> tuple[str, int, bool]:
+    """PURE: (mode, away_days, cooldown_active). The cooldown + caught-up gates are decided
+    HERE in code, never asked of the model. 'surface_single' deliberately covers BOTH the
+    first-interaction-of-the-day case AND a later re-greet with FRESH items since the last
+    brief (unheard>0, past the cooldown) — a fresh delta surfaces, it doesn't go silent."""
+    now = state.now
+    lb, ls, unheard = state.last_briefed_at, state.last_seen_at, state.unheard
+    cooldown = lb is not None and (now - lb) < timedelta(minutes=settings.BRIEFING_COOLDOWN_MINUTES)
+    away_days = (now - ls).days if ls is not None else 0
+    if cooldown or unheard == 0:
+        mode = SUPPRESS
+    elif away_days >= settings.BRIEFING_AWAY_DAYS:
+        mode = SURFACE_MULTIDAY
+    else:
+        mode = SURFACE_SINGLE
+    return mode, away_days, cooldown
+
+
+def proactive_mode(state: BriefingLiveState) -> str:
+    """The deterministic proactive mode the runner code renders post-turn."""
+    return _assess(state)[0]
+
+
+def render_offer(state: BriefingLiveState) -> str:
+    """The code-owned OFFER line (the safe floor) — attached by the runner when the turn is
+    a proactive moment but the model didn't signal a clear check-in (or it's multi-day)."""
+    mode, away_days, _ = _assess(state)
+    h = settings.MASTER_HONORIFIC
+    if mode == SURFACE_MULTIDAY:
+        return f"By the way, {h} — you've been away {away_days} days. Shall I catch you up on what came in?"
+    return f"Oh — and there's fresh news in, {h}. Shall I give you the latest?"
 
 
 def briefing_directive(state: BriefingLiveState) -> str:
-    """PURE: the per-turn `<check_in>` guidance — precise facts + the deterministic
-    deliver/offer/suppress decision the agent applies WITHIN this turn. Reads 'check-in'
-    is left to the model (broad — "good morning", "what's going on", "long time no see");
-    WHETHER a proactive brief may fire at all is decided HERE (cooldown / caught-up)."""
+    """PURE: the per-turn `<check_in>` guidance. The model's ONLY job is to (a) respond
+    naturally to the master's message and (b) on a single-day surface, SIGNAL a clear
+    check-in by calling deliver_briefing() — the system renders the brief/offer itself, so
+    the model never writes (or hallucinates) the briefing content. Suppress/caught-up/
+    multi-day are decided in code; the model just answers normally there."""
     h = settings.MASTER_HONORIFIC
-    now, zone = state.now, ZoneInfo(state.timezone)
-    last_briefed, last_seen, unheard = state.last_briefed_at, state.last_seen_at, state.unheard
-
-    cooldown_active = (
-        last_briefed is not None
-        and (now - last_briefed) < timedelta(minutes=settings.BRIEFING_COOLDOWN_MINUTES)
-    )
-    away_days = (now - last_seen).days if last_seen is not None else 0
-    multi_day = away_days >= settings.BRIEFING_AWAY_DAYS
-    first_of_day = last_seen is None or last_seen.astimezone(zone).date() < now.astimezone(zone).date()
-
-    seen = f"away {away_days} days" if multi_day else (
-        "first interaction today" if first_of_day else f"last seen {_ago(last_seen, now)}"
-    )
+    mode, away_days, cooldown = _assess(state)
     facts = (
-        f"PROACTIVE-BRIEFING STATE (deterministic — decide within THIS turn, no extra call): "
-        f"last briefed {_ago(last_briefed, now)}; {seen}; {unheard} unheard item(s)."
+        f"PROACTIVE-BRIEFING STATE (deterministic): last briefed {_ago(state.last_briefed_at, state.now)}; "
+        f"{state.unheard} unheard item(s); mode={mode}."
     )
-
-    if cooldown_active:
-        d = (
-            f"You briefed {h} {_ago(last_briefed, now)} — do NOT proactively brief, offer, or even mention a "
-            f"briefing. ONLY if {h} EXPLICITLY asks ('what's the latest', 'anything new'). {_HOW} "
-            f"Otherwise answer their message normally, as if no briefing were pending."
+    if mode == SUPPRESS:
+        why = (
+            f"you briefed {h} {_ago(state.last_briefed_at, state.now)} (cooldown)" if cooldown
+            else "nothing new is waiting"
         )
-    elif unheard == 0:
         d = (
-            f"Nothing new is waiting — do NOT proactively brief or offer. ONLY if {h} explicitly asks what's "
-            f"new, {_HOW} (it will confirm they're all caught up — keep it to one line)."
+            f"Do NOT proactively brief or offer — {why}. Answer the master's message normally. ONLY if {h} "
+            f"EXPLICITLY asks ('what's the latest', 'anything new') call briefing('latest') and relay it "
+            f"(it may simply confirm they're all caught up — keep that to one line)."
         )
-    elif multi_day:
+    elif mode == SURFACE_MULTIDAY:
         d = (
-            f"{h} has been away {away_days} days — {unheard} item(s) are unheard. A greeting here is a "
-            f"check-in, NOT a trivial one-liner to brush off: OPEN your reply with the catch-up OFFER (do "
-            f"NOT dump it, do NOT call the tool yet) — e.g. 'Welcome back, {h} — shall I catch you up on the "
-            f"last {away_days} days?' ONLY after {h} says yes, {_HOW} If the message is a specific request, "
-            f"handle that first, then make the offer."
+            f"{h} has been away {away_days} days with {state.unheard} unheard. Just respond NATURALLY to their "
+            f"message — do NOT write a briefing or an offer yourself, and do NOT call any briefing tool; the "
+            f"system attaches a catch-up offer for you (we never dump a multi-day catch-up unprompted)."
         )
-    elif first_of_day:
+    else:  # SURFACE_SINGLE
         d = (
-            f"This is {h}'s FIRST interaction today and {unheard} item(s) are unheard. Read 'check-in' BROADLY "
-            f"— 'good morning' / 'hey' / 'what's up' all count, and such a greeting here is NOT a trivial "
-            f"one-liner to brush off. On a check-in, DELIVER the briefing now (don't merely offer): {_HOW} "
-            f"Keep it tight and offer the next action ('shall I read it?'). ONLY if the message is a SPECIFIC "
-            f"request (e.g. 'morning — cancel my 3pm') do THAT first, then offer the briefing as a short tail; "
-            f"ONLY if it's genuinely unclear they're checking in, OFFER ('Shall I give you today's briefing, {h}?')."
-        )
-    else:
-        # Seen earlier today already (not first-of-day) and not in cooldown: the morning check-in window
-        # has passed — stay quiet so repeated greetings don't re-offer. Explicit asks still answer.
-        d = (
-            f"{h} has already interacted today, so do NOT proactively brief or offer again — that would nag. "
-            f"ONLY if {h} EXPLICITLY asks ('what's new', 'the latest'), {_HOW} Otherwise answer normally."
+            f"{state.unheard} item(s) are new since {h} last heard. Respond NATURALLY to their message — but do "
+            f"NOT write the briefing or an offer yourself; the system attaches it. The ONE thing to decide: is "
+            f"this message a CHECK-IN (read broadly — 'good morning', 'hey', 'what's up', 'what's new', 'how are "
+            f"things')? If YES, call deliver_briefing() — the system then presents the brief (you don't write it). "
+            f"If it's a SPECIFIC request (e.g. 'cancel my 3pm'), handle THAT and do NOT call deliver_briefing — the "
+            f"system offers the briefing as a tail. Never narrate a briefing; deliver_briefing() is the only way to brief."
         )
     return facts + " " + d
+
+
+# --------------------------------------------------------------------------- #
+# Post-turn render — CODE guarantees the output (text + voice); the model only  #
+# wrote the wrapper. Reads the turn-start mode (stored in state) + the model's  #
+# deliver signal (a tool call in the final messages).                           #
+# --------------------------------------------------------------------------- #
+def _called_tool(messages, name: str) -> bool:
+    from langchain_core.messages import AIMessage
+    for m in messages or []:
+        if isinstance(m, AIMessage):
+            for tc in getattr(m, "tool_calls", None) or []:
+                tc_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                if tc_name == name:
+                    return True
+    return False
+
+
+def deliver_requested(messages) -> bool:
+    """The model SIGNALLED a clear check-in by calling deliver_briefing() this turn."""
+    return _called_tool(messages, "deliver_briefing")
+
+
+def brief_already_delivered(messages) -> bool:
+    """A brief already went out this turn via the explicit briefing() tool — don't double."""
+    return _called_tool(messages, "briefing")
+
+
+async def render_attach(mode: str, offer: str, messages) -> tuple[str, bool]:
+    """The post-turn attach: (text, delivered). SUPPRESS or an already-delivered brief → no
+    attach. A single-day surface WHERE the model signalled a check-in → fetch + attach the
+    real brief (briefing('latest') advances the HWM + stamps last_briefed — the existing
+    seam). Otherwise (multi-day, or single-day with no signal) → the code-owned OFFER floor."""
+    if mode == SUPPRESS or brief_already_delivered(messages):
+        return "", False
+    if mode == SURFACE_SINGLE and deliver_requested(messages):
+        from app.agent.tools.briefing_tool import briefing as _briefing
+        return await _briefing("latest"), True   # fetch + advance (mark_briefed)
+    return offer, False
 
 
 # --------------------------------------------------------------------------- #
