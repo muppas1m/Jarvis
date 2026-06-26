@@ -18,13 +18,14 @@ TELEGRAM_BOT_TOKEN is unset, and we don't want that crash to fire at
 module-import time (it'd happen before lifespan can guard).
 """
 import asyncio
+import contextlib
 import json
 import os
 import tempfile
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -189,6 +190,74 @@ class TelegramChannel(Channel):
             reply_markup=keyboard,
         )
 
+    @staticmethod
+    async def _edit_callback(query: Any, text: str) -> bool:
+        """Edit the approval message to ``text``, DROPPING the inline keyboard (an edit
+        with no ``reply_markup`` removes it) so the master can't double-press or stare at
+        stale buttons. Returns True on success; swallows a Telegram edit error (message
+        gone / too old / identical) and returns False so the caller can fall back to a
+        fresh alert rather than leave the master in silence."""
+        try:
+            await query.edit_message_text(text=text)
+            return True
+        except TelegramError as exc:
+            logger.warning("telegram_callback_edit_failed", text=text, error=str(exc))
+            return False
+
+    async def _handle_approval_callback(self, query: Any) -> None:
+        """Resolve a tapped approval button — for EVERY card kind (fast send/calendar
+        AND the multi-second heads-up draft). The flow is: parse → answer (stop the
+        spinner) → INSTANT feedback (edit to a neutral "⏳ Working…" that also clears the
+        buttons) → dispatch → edit to the ACCURATE outcome. The dispatch+outcome-edit is
+        wrapped so ANY failure (a raised dispatch OR a failed edit) still leaves the
+        master a clear message — never a silent dead-end with live, still-pressable
+        buttons (the regression the optimistic pre-dispatch edit used to mask). Split out
+        of the polling closure so this slow/error path is unit-testable."""
+        from app.agent.approval_dispatch import alert_text_for, resolve_and_dispatch
+
+        if not query.data:
+            return
+        try:
+            data = json.loads(query.data)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("telegram_callback_bad_json", data=query.data)
+            return
+        action = data.get("a")              # "approve" | "reject"
+        approval_id = data.get("id")
+        if action not in ("approve", "reject") or not approval_id:
+            logger.warning("telegram_callback_malformed", data=data)
+            return
+
+        decision: dict[str, Any] = {"approved": action == "approve"}
+        if action == "reject":
+            decision["reason"] = "rejected via Telegram"
+
+        # Instant feedback BEFORE the (possibly multi-second) dispatch: stop the spinner,
+        # then replace the buttons with a neutral "working" state. The CONFIRMATION is
+        # rendered from the dispatch OUTCOME (not optimistically) — a needs_drafting card
+        # approves into a DRAFT, not a send, so "Approved." would lie.
+        await query.answer()
+        await self._edit_callback(query, "⏳ Working…")
+
+        # Dispatch + render the accurate outcome. A failure here must STILL confirm —
+        # never silence, never a live dead-end button.
+        try:
+            outcome = await resolve_and_dispatch(approval_id, action, "telegram", decision)
+            await self._edit_callback(query, _telegram_decision_label(action, outcome))
+            alert = alert_text_for(outcome)
+            if alert:
+                await self.send_alert(alert)
+        except Exception as exc:  # noqa: BLE001 — a silent dead-end on error was the regression
+            logger.error(
+                "telegram_callback_dispatch_failed",
+                approval_id=approval_id, action=action, error=str(exc),
+            )
+            if not await self._edit_callback(query, "⚠ Something went wrong — check the dashboard."):
+                # The edit failed too → a fresh alert so the master is never left in silence.
+                await self.send_alert(
+                    "⚠ Something went wrong resolving that approval — check the dashboard."
+                )
+
     async def show_typing(self, msg: NormalizedMessage) -> None:
         # Defensive — a failed typing indicator must never block the reply path.
         try:
@@ -268,10 +337,8 @@ class TelegramChannel(Channel):
         """Download + ingest detached from the poller, then reply with the outcome.
         Never raises (it's a fire-and-forget task); a failure replies instead of
         silently dropping."""
-        try:
+        with contextlib.suppress(Exception):
             await self.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception:
-            pass
 
         tmp_path: str | None = None
         try:
@@ -352,38 +419,12 @@ class TelegramChannel(Channel):
             await self.handle_photo(update.message)
 
         async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            from app.agent.approval_dispatch import alert_text_for, resolve_and_dispatch
-
+            # The claim-then-dispatch + feedback flow lives on the channel
+            # (_handle_approval_callback) so the slow/error path is unit-testable.
             query = update.callback_query
             if not query or not query.data:
                 return
-
-            try:
-                data = json.loads(query.data)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("telegram_callback_bad_json", data=query.data)
-                return
-
-            action = data.get("a")              # "approve" | "reject"
-            approval_id = data.get("id")
-            if action not in ("approve", "reject") or not approval_id:
-                logger.warning("telegram_callback_malformed", data=data)
-                return
-
-            decision: dict[str, Any] = {"approved": action == "approve"}
-            if action == "reject":
-                decision["reason"] = "rejected via Telegram"
-
-            # Ack the press (stop the button spinner) immediately, but render the
-            # CONFIRMATION from the dispatch OUTCOME, not optimistically — a needs_drafting
-            # card approves into a DRAFT, not a send, so "Approved." would lie. The single
-            # claim-then-dispatch gate (Phase 3) atomically claims + executes out-of-band.
-            await query.answer()
-            outcome = await resolve_and_dispatch(approval_id, action, "telegram", decision)
-            await query.edit_message_text(text=_telegram_decision_label(action, outcome))
-            alert = alert_text_for(outcome)
-            if alert:
-                await self.send_alert(alert)
+            await self._handle_approval_callback(query)
 
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
         app.add_handler(MessageHandler(filters.Document.ALL, _on_document))

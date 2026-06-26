@@ -23,7 +23,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 PlatformName = Literal["telegram", "whatsapp", "imessage", "discord", "signal", "web"]
 
 
