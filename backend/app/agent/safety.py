@@ -23,7 +23,7 @@ The classifier never bumps levels DOWN. APPROVE never becomes NOTIFY based on
 args; if you want auto-approval rules they belong in a separate trust-
 accumulation layer (Phase 2).
 """
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from app.utils.logging import get_logger
@@ -31,7 +31,7 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class SafetyLevel(str, Enum):
+class SafetyLevel(StrEnum):
     SAFE = "safe"
     NOTIFY = "notify"
     APPROVE = "approve"
@@ -83,35 +83,6 @@ TOOL_SAFETY_MAP: dict[str, SafetyLevel] = {
     "delete_account":       SafetyLevel.BLOCKED,
     "share_credentials":    SafetyLevel.BLOCKED,
 }
-
-
-# Consent tier for an APPROVE-tier tool — consulted by the DECISION JUDGE
-# (decision_resolver), NOT this classifier. The classifier decides WHETHER to ask;
-# this decides HOW STRONG the master's confirmation must be once asked.
-#
-# SOFT-CONSENT-OK: a soft affirmation OF THE ACTION ("that works", "okay sure") in
-# direct response to the surfaced card counts as consent → approve. Restricted to the
-# reversible SENDS the master accepted (2026-06-25) plus the heads-up draft action
-# (approving it only DRAFTS — nothing irreversible).
-#
-# Everything else — destructive / irreversible / money (calendar_create/update/delete,
-# bookings, form-submit, flight search) AND every unlisted/unknown tool — is
-# EXPLICIT-REQUIRED: a soft affirmation is NOT enough (the judge returns "unclear" and
-# the caller re-asks); ONLY an explicit, unambiguous command ("delete it", "yes, book
-# it") approves. Default-explicit is fail-safe: a tool is soft ONLY by being named here.
-SOFT_CONSENT_TOOLS: frozenset[str] = frozenset({
-    "email_send",
-    "email_reply",
-    "whatsapp_send",
-    "draft_email_reply",   # heads-up synthetic action — approving only DRAFTS (reversible)
-})
-
-
-def consent_tier(tool_name: str) -> str:
-    """'soft'  → a soft affirmation ("that works") is consent (reversible sends).
-    'explicit' → only an explicit command approves (destructive / irreversible / money).
-    Defaults to 'explicit' for any unlisted/unknown tool — fail-safe."""
-    return "soft" if tool_name in SOFT_CONSENT_TOOLS else "explicit"
 
 
 class SafetyClassifier:

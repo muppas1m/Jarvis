@@ -58,7 +58,7 @@ PENDING ACTION
   tool: {tool_name}
   details:
 {details}
-{consent_clause}
+
 RECENT CONVERSATION (context — use it to tell whether the reply is RESPONDING to this pending action or starting a NEW topic)
 {recent_context}
 
@@ -66,47 +66,23 @@ MASTER'S REPLY
   "{user_message}"
 
 Choose exactly ONE intent:
-- "approve": the master gives an EXPLICIT, ACTIVE instruction to proceed with THIS action AS-IS — e.g. "yes send it", "go ahead", "do it", "send the reply", "ship it", "approved", "yes, send that". Approving runs a REAL, IRREVERSIBLE action, so choose it ONLY for an unmistakable command to GO.
+- "approve": a CLEAR confirmation to proceed with THIS action AS-IS — anything a person plainly reads as "yes, do this": "yes", "go ahead", "do it", "approved", "accepted", "confirmed", "confirm", "that works", "sounds good", "go for it", "proceed", or an action-named form ("send it", "delete it", "book it"). This bar is the SAME for EVERY action — a clear confirmation approves a delete, a booking, or a calendar change EXACTLY as it approves a send. Do NOT downgrade a clear confirmation to "unclear" because the action is destructive. (But a bare "yeah", "ok", or "okay" ALONE is NOT clear enough — those are fillers, see "unclear". "yes" approves; a lone "yeah"/"ok" does not.)
 - "reject": the master clearly wants it cancelled / abandoned — e.g. "no", "cancel", "don't send", "forget it", "scrap it", "stop".
 - "edit": the master wants THIS action CHANGED before it proceeds — e.g. "make it shorter", "use her name Priya", "change the recipient to X", "add that we'll be late", "more formal". Put the requested change in "change".
 - "skip": the master wants to DEFER this specific pending action for now and move on, WITHOUT cancelling it — e.g. "skip", "skip this", "next", "not now", "later", "come back to this". (Different from reject — skip leaves it pending; reject abandons it.)
 - "show_others": the master wants to know what OTHER pending approvals are waiting — e.g. "what else is pending?", "show me the other pending emails", "anything else waiting for me?". About the approval QUEUE specifically — NOT a general "show me my emails / calendar" request.
-- "unclear": the reply is engaging with THIS pending action but is NOT a clear approve / reject / edit / skip — an ambiguous acknowledgment, a topic echo, or a soft / passive yes. Use the RECENT CONVERSATION: if the assistant just raised this action and the reply vaguely responds to it ("right, the Q3 numbers", "yeah", "I guess so", "mm okay", "the Priya one"), it is "unclear" — you must NOT guess "approve". (The caller will RE-ASK the master to clarify.)
+- "unclear": the reply engages THIS action but is a GENUINELY AMBIGUOUS filler that could mean anything and is NOT plainly a yes to it. A bare "yeah", "ok", or "okay" on its own counts as this — it SOUNDS affirmative but is too loose to fire a real action, so it is "unclear", NOT "approve" (only when built into a command — "ok, send it", "yeah do it" — is it approve). Also: "mm", "I guess so", "whatever you think", a hedged "sure" / "fine", or a vague topic echo that names the subject but commands nothing ("right, the Q3 numbers", "the Priya one"). When a reply could go either way, prefer "unclear" — the caller RE-ASKS the master to clarify.
 - "unrelated": the reply is about something ELSE entirely — a new question or topic not about this pending action (e.g. "what's on my calendar?", "show me my unread emails", "what's the weather?"). (The caller will ANSWER it and remind the master the action is still pending.)
 
-CRITICAL — NEVER choose "approve" unless the master gave an EXPLICIT, ACTIVE command to GO ("send it", "do it", "go ahead", "yes send it", "approved"). The following are NOT approve and must NEVER send:
-- Echoing or confirming the TOPIC instead of commanding the action — "right, the Q3 numbers", "yes, that's the budget one", "Q3, exactly".
+CRITICAL — these are NOT confirmations and must NEVER approve (this has nothing to do with how reversible the action is):
+- Echoing or naming the TOPIC instead of confirming the action — "right, the Q3 numbers", "yes, that's the budget one", "Q3, exactly", "oh right, that one".
 - Acknowledging you've heard of or seen it — "yeah she emailed me about that earlier", "I saw that", "I know the one".
-- A passive, hedged, or uncertain reply — "I guess so", "whatever you think", "mm, fine", "sure, I suppose", "okay then".
-Merely repeating the subject, naming the recipient, or vaguely assenting is NOT a command to send. Classify it "unclear" (it is about this action but ambiguous) or "unrelated" (a different topic) — when in ANY doubt, one of those, NEVER "approve".
+- A bare ambiguous filler — "yeah", "ok", "okay", "mm", "mm fine", a lone "fine" or "sure". (Only when built into a command — "fine, do it", "sure, send it" — does it approve.)
+- A PASSIVE, HEDGED, DEFERRING, or uncertain reply — "I guess so", "whatever you think", "if you think it's right", "sure, I suppose", "up to you", "your call". Handing the decision back to YOU is not a yes.
+Classify these "unclear" (re-ask), or a different topic "unrelated"; when genuinely in doubt, "unclear" — NEVER "approve". This bar is about AMBIGUITY ONLY — a DIRECT, clear confirmation ("that works", "sounds good", "approved", "confirmed", "go ahead") IS "approve" for every action alike, destructive or not.
 
 Respond with JSON only:
 {{"intent": "approve|reject|edit|skip|show_others|unclear|unrelated", "change": "<the requested change, or empty unless intent is edit>"}}"""
-
-
-# Tier-specific consent bar, injected per the pending tool's consent_tier (safety.py).
-# Only the EXPLICIT tier injects a clause — it NARROWS "approve" for a destructive action so
-# a soft affirmation is not enough. A reversible SEND injects NOTHING: the existing prompt +
-# the surfacing card-line already produce the soft-affirmation→approve the master accepted, so
-# adding any SOFT clause only destabilizes that locked behavior. Default tier is EXPLICIT.
-_CONSENT_EXPLICIT = (
-    'CONSENT BAR — this pending action is DESTRUCTIVE / IRREVERSIBLE or spends money, so the '
-    'bar for "approve" is HIGHER than usual. A soft or vague affirmation is NOT consent here: '
-    '"that works", "okay sure", "that\'s fine", "sounds good", "fine", a bare "go ahead" → '
-    '"unclear" (the caller RE-ASKS for an explicit command). ONLY an explicit, unambiguous '
-    'command to perform THIS specific action approves — e.g. "delete it", "yes, delete it", '
-    '"go ahead and book it", "submit it", "yes, cancel that".'
-)
-
-
-def _consent_clause(tool_name: str) -> str:
-    """The EXPLICIT-tier restriction for a destructive tool, wrapped in its own blank lines;
-    "" for a reversible send — so a send's prompt is BYTE-IDENTICAL to the pre-tiering email
-    prompt (the `{consent_clause}` slot sits between single newlines), leaving the locked
-    email behavior untouched. No SOFT clause exists to destabilize that near-boundary path."""
-    from app.agent.safety import consent_tier
-
-    return "" if consent_tier(tool_name) == "soft" else f"\n{_CONSENT_EXPLICIT}\n"
 
 
 def _details(tool_args: dict, description: str | None) -> str:
@@ -123,15 +99,15 @@ async def resolve_decision(
 ) -> DecisionResolution:
     """Classify the master's reply against the pending action on the strong
     ``decision`` slot (never the fast tier), using the recent conversation for
-    context. The approve bar is TIERED by the tool's ``consent_tier`` (safety.py): a
-    reversible send takes a soft affirmation ("that works"); a destructive / irreversible
-    action takes ONLY an explicit command ("delete it") — a soft affirmation there →
-    ``unclear`` (re-ask). A different topic → ``unrelated`` (answer + remind). Any
-    failure degrades to ``unrelated`` (never an auto-approve)."""
+    context. ONE consent bar for EVERY action (no harm tier): a CLEAR confirmation
+    ("go ahead", "approved", "confirmed", "that works", "delete it") → ``approve``,
+    identically for a send or a delete; a genuinely-ambiguous filler ("yeah", "ok",
+    "I guess so") → ``unclear`` (re-ask); a topic echo / different topic → never
+    approves (``unclear`` / ``unrelated``). Any failure degrades to ``unrelated``
+    (never an auto-approve)."""
     prompt = _RESOLVER_PROMPT.format(
         tool_name=tool_name,
         details=_details(tool_args, description),
-        consent_clause=_consent_clause(tool_name),
         recent_context=recent_context.strip() or "(no recent conversation)",
         user_message=user_message.strip(),
     )

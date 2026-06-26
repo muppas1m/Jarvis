@@ -146,3 +146,31 @@ def test_telegram_decision_label():
     assert _telegram_decision_label("approve", outcome("email", "sent")) == "✅ Approved."
     assert _telegram_decision_label("reject", outcome("email", "rejected")) == "❌ Rejected."
     assert "already handled" in _telegram_decision_label("approve", outcome("none", "not_claimed")).lower()
+
+
+# --- the synthesized card-line actually REACHES the judge (deterministic, no live LLM) ------
+async def test_card_context_line_reaches_the_judge(monkeypatch):
+    # Under the unified consent bar a clear "yes" approves via the pending action itself, so the
+    # card-line no longer flips the APPROVE decision — but it must still REACH the judge so an
+    # inbound card (which has no conversation thread) carries "the assistant just raised this".
+    # Prove it white-box: _judge_presented must feed _card_context_line(row) into resolve_decision.
+    row = SimpleNamespace(
+        thread_id="email:gmail:x", action_type="email_reply", status="pending",
+        description="Reply to 'Q3' from Priya",
+        payload={"sender": "Priya <p@x.com>", "subject": "Q3", "body": "o", "draft": "d",
+                 "needs_drafting": False},
+    )
+    captured = {}
+
+    async def _fake_resolve(tool_name, tool_args, description, message, context):
+        captured["context"] = context
+        return SimpleNamespace(intent="unclear", change="")
+
+    monkeypatch.setattr(runner, "_load_approval_by_id", AsyncMock(return_value=row))
+    monkeypatch.setattr(runner, "resolve_decision", _fake_resolve)
+
+    judged = await runner._judge_presented("approval-id", "did she say when?", recent_context="")
+
+    assert judged is not None and judged.intent == "unclear"
+    assert runner._card_context_line(row) in captured["context"]   # the synthesized line reached it
+    assert "drafted a reply" in captured["context"].lower()         # inbound framing, despite no thread
