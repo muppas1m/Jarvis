@@ -1,12 +1,10 @@
-"""resolve_decision parsing/validation + the APPROVE verification gate.
+"""resolve_decision parsing/validation — the context-aware judge (no runtime gate).
 
-The new skip / show_others intents validate through; off-vocabulary, an empty-change
-edit, or an LLM failure degrade to the SAFE 'unrelated'. And the defence-in-depth on
-the highest-harm path: an approve from the multi-class judge is downgraded to
-'unrelated' unless the STRICT verify gate also confirms an explicit command — and the
-gate fails CLOSED (a verify error → not approved). An ambiguous ack NEVER reaches
-approve.
-"""
+skip / show_others / unclear validate through; off-vocabulary or an LLM failure
+degrade to the SAFE 'unrelated'; an empty-change edit → 'unclear' (ambiguous about the
+card). The recent conversation is passed into the prompt. There is NO second 'verify'
+call — the strong model + negatives + context hold the approve boundary on their own
+(locked by the live regression test_decision_judge_live)."""
 import json
 
 import pytest
@@ -15,25 +13,26 @@ import app.agent.decision_resolver as dr
 from app.agent.decision_resolver import resolve_decision
 
 
-def _wire_gateway(monkeypatch, payload, *, verify=True):
-    """Mock the gateway. resolve_decision makes TWO calls on the approve path: the
-    multi-class classify, then the strict verify gate (its prompt contains
-    'explicit_go'). `verify` controls the gate's answer so approve is exercisable both
-    ways; non-approve intents make only the one classify call."""
+def _wire_gateway(monkeypatch, payload):
+    """Mock the single gateway call + record the prompt sent (to assert context flows in
+    and that only ONE call is made — the verify gate is gone)."""
+    rec = {"calls": 0, "prompt": ""}
+
     async def fake_complete(messages, **kwargs):
-        content = messages[0]["content"]
-        if "explicit_go" in content:  # the verify gate
-            return {"choices": [{"message": {"content": json.dumps({"explicit_go": verify})}}]}
+        rec["calls"] += 1
+        rec["prompt"] = messages[0]["content"]
         return {"choices": [{"message": {"content": json.dumps(payload)}}]}
 
     monkeypatch.setattr(dr.llm_gateway, "complete", fake_complete)
+    return rec
 
 
-@pytest.mark.parametrize("intent", ["approve", "reject", "skip", "show_others", "unrelated"])
+@pytest.mark.parametrize("intent", ["approve", "reject", "skip", "show_others", "unclear", "unrelated"])
 async def test_resolve_parses_valid_intents(monkeypatch, intent):
-    _wire_gateway(monkeypatch, {"intent": intent, "change": ""})  # verify confirms by default
+    rec = _wire_gateway(monkeypatch, {"intent": intent, "change": ""})
     res = await resolve_decision("email_reply", {}, "d", "msg")
     assert res.intent == intent
+    assert rec["calls"] == 1  # ONE call — no verify gate
 
 
 async def test_resolve_edit_with_change(monkeypatch):
@@ -42,11 +41,11 @@ async def test_resolve_edit_with_change(monkeypatch):
     assert res.intent == "edit" and res.change == "make it shorter"
 
 
-async def test_resolve_edit_without_change_degrades_to_unrelated(monkeypatch):
-    # An edit with no concrete change isn't actionable → ambiguous → unrelated.
+async def test_resolve_edit_without_change_degrades_to_unclear(monkeypatch):
+    # An edit with no concrete change isn't actionable → ambiguous about the card → re-ask.
     _wire_gateway(monkeypatch, {"intent": "edit", "change": ""})
-    res = await resolve_decision("email_reply", {}, "d", "hmm")
-    assert res.intent == "unrelated"
+    res = await resolve_decision("email_reply", {}, "d", "hmm change it")
+    assert res.intent == "unclear"
 
 
 async def test_resolve_offvocab_degrades_to_unrelated(monkeypatch):
@@ -64,42 +63,17 @@ async def test_resolve_llm_failure_degrades_to_unrelated(monkeypatch):
     assert res.intent == "unrelated"  # NEVER auto-approve on a resolver failure
 
 
-# --- the approve verification gate (defence-in-depth) ------------------------
-async def test_approve_downgraded_when_verify_says_no(monkeypatch):
-    """The judge says approve but the STRICT gate says NO (a topic echo / soft yes
-    that slipped the first pass) → downgraded to unrelated. The whole point."""
-    _wire_gateway(monkeypatch, {"intent": "approve", "change": ""}, verify=False)
-    res = await resolve_decision("email_reply", {}, "d", "right, the Q3 numbers")
-    assert res.intent == "unrelated"
+async def test_recent_context_is_passed_into_the_prompt(monkeypatch):
+    rec = _wire_gateway(monkeypatch, {"intent": "unclear", "change": ""})
+    await resolve_decision(
+        "email_reply", {}, "d", "right, the Q3 numbers",
+        "Assistant: Shall I send the Priya reply about Q3, Sir?",
+    )
+    assert "Shall I send the Priya reply" in rec["prompt"]  # context reached the judge
+    assert "RECENT CONVERSATION" in rec["prompt"]
 
 
-async def test_approve_passes_only_when_verify_confirms(monkeypatch):
-    _wire_gateway(monkeypatch, {"intent": "approve", "change": ""}, verify=True)
-    res = await resolve_decision("email_reply", {}, "d", "send it")
-    assert res.intent == "approve"
-
-
-async def test_verify_gate_fails_closed_on_error(monkeypatch):
-    """The classify says approve; the verify CALL raises → fail closed → unrelated.
-    A gateway hiccup on the gate must never let an approve through."""
-    async def fake_complete(messages, **kwargs):
-        if "explicit_go" in messages[0]["content"]:
-            raise RuntimeError("verify gateway down")
-        return {"choices": [{"message": {"content": json.dumps({"intent": "approve"})}}]}
-
-    monkeypatch.setattr(dr.llm_gateway, "complete", fake_complete)
-    res = await resolve_decision("email_reply", {}, "d", "send it")
-    assert res.intent == "unrelated"  # verify failed closed → never approve
-
-
-async def test_non_approve_intents_skip_the_verify_gate(monkeypatch):
-    """The verify gate runs ONLY on approve — a reject/skip never triggers a second
-    call (asserted by raising if the verify prompt is ever sent)."""
-    async def fake_complete(messages, **kwargs):
-        if "explicit_go" in messages[0]["content"]:
-            raise AssertionError("verify gate must NOT run for non-approve intents")
-        return {"choices": [{"message": {"content": json.dumps({"intent": "reject"})}}]}
-
-    monkeypatch.setattr(dr.llm_gateway, "complete", fake_complete)
-    res = await resolve_decision("email_reply", {}, "d", "no, cancel that")
-    assert res.intent == "reject"
+async def test_empty_context_renders_a_placeholder(monkeypatch):
+    rec = _wire_gateway(monkeypatch, {"intent": "approve", "change": ""})
+    await resolve_decision("email_reply", {}, "d", "send it")  # no context
+    assert "(no recent conversation)" in rec["prompt"]

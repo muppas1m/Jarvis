@@ -70,7 +70,7 @@ async def test_judge_now_handles_tool_card_not_just_email(monkeypatch):
     async def fake_load(_id):
         return row
 
-    async def fake_decide(tool_name, tool_args, description, message):
+    async def fake_decide(tool_name, tool_args, description, message, recent_context=""):
         seen["args"] = (tool_name, tool_args)
         return DecisionResolution(intent="approve", change="")
 
@@ -358,6 +358,62 @@ def test_summarize_pending_bounds_to_five_with_overflow():
     rows = [_prow(str(i), f"s{i}@x.com", f"sub{i}") for i in range(8)]
     out = runner._summarize_pending(rows, "none-presented", "Sir")  # all 8 are "others"
     assert "8 others pending" in out and "and 3 more" in out
+
+
+# --- the unified presented disposition (context-aware; voice == text) ---------
+def _fake_decide(intent, change=""):
+    async def f(*a, **k):
+        return DecisionResolution(intent=intent, change=change)
+    return f
+
+
+async def test_disposition_maps_resolve_reask_remind(monkeypatch):
+    async def fake_load(_id):
+        return _Row()
+    monkeypatch.setattr(runner, "_load_approval_by_id", fake_load)
+
+    monkeypatch.setattr(runner, "resolve_decision", _fake_decide("approve"))
+    assert (await runner._presented_disposition("uuid-1", "send it", ""))[0] == "resolve"
+
+    monkeypatch.setattr(runner, "resolve_decision", _fake_decide("unclear"))
+    assert (await runner._presented_disposition("uuid-1", "mm okay", ""))[0] == "reask"
+
+    monkeypatch.setattr(runner, "resolve_decision", _fake_decide("unrelated"))
+    disp, judged = await runner._presented_disposition("uuid-1", "what's the weather?", "")
+    assert disp == "remind" and judged is not None  # off-topic → answer + remind
+
+
+async def test_disposition_stale_card_is_plain(monkeypatch):
+    async def gone(_id):
+        return None
+    monkeypatch.setattr(runner, "_load_approval_by_id", gone)
+    disp, judged = await runner._presented_disposition("uuid-1", "anything", "")
+    assert disp == "plain" and judged is None  # gone card → answer normally, no reminder
+
+
+def test_card_phrase_and_reminder_for_email():
+    j = _judgment("unrelated")
+    assert "Priya" in runner._card_phrase(j)
+    rem = runner._card_reminder(j)
+    assert "Priya" in rem and "still pending" in rem
+
+
+def test_card_reminder_empty_when_no_row():
+    j = runner._PresentedJudgment(approval_id="x", row=None, intent="unrelated", change="")
+    assert runner._card_reminder(j) == ""  # failed-open judge → no reminder (nothing to name)
+
+
+def test_with_reminder_appends_and_noops():
+    assert runner._with_reminder({"response": "Done."}, "Card pending.")["response"] == "Done. Card pending."
+    assert runner._with_reminder({"response": "Done."}, "")["response"] == "Done."  # no-op
+    assert runner._with_reminder({"response": ""}, "Card pending.")["response"] == "Card pending."
+
+
+async def test_reask_presented_text_names_card_no_audio():
+    events = await _collect(runner._reask_presented(_judgment("unclear"), speak=False))
+    assert not any(e["type"] == "audio" for e in events)  # TEXT → no audio
+    done = [e for e in events if e["type"] == "done"][-1]
+    assert "Priya" in done["content"]["response"] and done["content"]["response"].endswith("?")
 
 
 # --- the spoken/typed outcome line (3rd transport) distinguishes the cases ----
