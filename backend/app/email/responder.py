@@ -3,7 +3,8 @@ from app.memory.manager import get_memory
 
 DRAFT_PROMPT = """You are drafting an email reply on behalf of your master ({master_name}).
 
-Write a professional, concise reply. Match the tone of the original email.
+Write a professional, concise reply. Match the tone of the original email. (Whether
+a reply is worth drafting was already decided upstream — your job is only to write it.)
 
 ## Critical: do not fabricate facts
 - Use ONLY information explicitly present in the email above, the master's
@@ -18,21 +19,8 @@ Write a professional, concise reply. Match the tone of the original email.
   "I'll attend on <date>" are forbidden unless X / Y / Z / <date> appears
   verbatim in the email or profile.
 
-## Complexity classification
-Mark as "complex" if ANY of the following:
-- The reply requires factual information not in the email or profile (per
-  the rule above — you're asking the sender for missing info).
-- The reply involves a non-trivial decision, sensitive communication, or
-  multi-step coordination.
-- You are NOT confident a one-line acknowledgment is appropriate.
-
-Otherwise mark as "simple" — true acknowledgments only ("thanks, will do",
-"got it", "sounds good", a literal yes/no the email itself answers from
-context).
-
 Respond in this exact JSON format:
 {{
-    "complexity": "simple" or "complex",
     "response": "Your drafted email reply here"
 }}
 
@@ -47,8 +35,10 @@ Master's communication style: {comm_style}
 """
 
 
-async def generate_draft(subject: str, sender: str, body: str) -> dict:
-    """Generate a draft reply and assess complexity."""
+async def generate_draft(subject: str, sender: str, body: str) -> str:
+    """Generate a draft reply (the simple/complex decision is the classifier's job
+    now — see EmailTriageResult.reply_effort). Returns the draft body string; on a
+    parse failure, returns the raw model content (never empty-silently)."""
     import json
 
     profile = await get_memory().profile_mgr.get_full()
@@ -69,15 +59,10 @@ async def generate_draft(subject: str, sender: str, body: str) -> dict:
     )
 
     content = response["choices"][0]["message"]["content"]
-
     try:
-        result = json.loads(content)
-        return {
-            "complexity": result.get("complexity", "complex"),
-            "response": result.get("response", ""),
-        }
+        return json.loads(content).get("response", "") or content
     except json.JSONDecodeError:
-        return {"complexity": "complex", "response": content}
+        return content
 
 
 REVISE_PROMPT = """You are revising a draft email reply on behalf of your master ({master_name}).

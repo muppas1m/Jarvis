@@ -186,6 +186,9 @@ class UnifiedApprovalCard(BaseModel):
     description: str
     status: str
     created_at: str
+    # True for a COMPLEX inbound email surfaced as a heads-up (no draft yet) — the card
+    # renders "say go and I'll draft it" + "Draft it"/"Leave it" instead of Approve/Send.
+    needs_drafting: bool = False
 
 
 class ApprovalQueueResponse(BaseModel):
@@ -240,13 +243,18 @@ def _unified_card(row: PendingApproval) -> UnifiedApprovalCard:
     the payload; tool → the real tool args — so the renderer needs no per-kind branch."""
     payload = row.payload or {}
     is_email = row.action_type == "email_reply" or is_email_approval(row.thread_id)
+    needs_drafting = bool(payload.get("needs_drafting"))
     if is_email:
         tool_name = row.action_type
+        # "original" = the email being replied to (always shown); "body" = the draft
+        # (omitted until drafted, so the card shows just the email + the heads-up).
         tool_args = {
             "to": payload.get("sender", ""),
             "subject": payload.get("subject", ""),
-            "body": payload.get("draft", ""),
+            "original": payload.get("body", ""),
         }
+        if not needs_drafting:
+            tool_args["body"] = payload.get("draft", "")
     else:
         tool_name = payload.get("tool_name") or row.action_type
         tool_args = payload.get("tool_args") or {}
@@ -259,6 +267,7 @@ def _unified_card(row: PendingApproval) -> UnifiedApprovalCard:
         description=row.description,
         status=row.status,
         created_at=row.created_at.isoformat() if row.created_at else "",
+        needs_drafting=needs_drafting,
     )
 
 
@@ -324,6 +333,10 @@ async def decide_approval(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="approval not found or already resolved",
         )
+    if outcome.kind == "draft_request":
+        # Heads-up "go"→draft / "leave it" — not a send; surface the drafted/left line.
+        ok = outcome.status in ("drafted", "left")
+        return _decide_envelope(outcome.thread_id, "complete" if ok else "error", outcome.detail)
     if outcome.kind == "email":
         return _email_decide_envelope(outcome.thread_id, outcome.email_outcome)
     return _tool_decide_envelope(outcome.thread_id, outcome)

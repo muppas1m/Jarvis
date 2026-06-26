@@ -54,8 +54,8 @@ class ApprovalDispatchOutcome:
     regression). ``kind="none"`` + ``status="not_claimed"`` means the claim was
     lost (already resolved / expired / gone) — the caller must NOT dispatch."""
 
-    kind: Literal["email", "tool", "none"]
-    status: str  # tool: DispatchStatus ; email: the EmailApprovalOutcome.status
+    kind: Literal["email", "tool", "none", "draft_request"]
+    status: str  # tool: DispatchStatus ; email: EmailApprovalOutcome.status ; draft_request: drafted|left|draft_failed
     detail: str = ""  # the tool result string / a short rendered detail
     success: bool = False
     thread_id: str = ""
@@ -86,6 +86,44 @@ async def resolve_and_dispatch(
     return await dispatch_approval(approval_id, decision)
 
 
+async def _dispatch_email_draft_request(
+    row: PendingApproval, decision: dict[str, Any]
+) -> ApprovalDispatchOutcome:
+    """Resolve a needs_drafting (complex-email heads-up) card. The row is already
+    CLAIMED. Approve = DRAFT the reply now + re-queue a normal simple card (which the
+    master approves to send); reject = leave it in the inbox. Drafting failure leaves
+    no new card (the master re-asks) — never a send, never a half-state."""
+    if not decision.get("approved"):
+        logger.info("email_draft_request_left", approval_id=str(row.id))
+        return ApprovalDispatchOutcome(
+            kind="draft_request", status="left", thread_id=row.thread_id,
+            detail="Left in your inbox.",
+        )
+    payload = row.payload or {}
+    try:
+        from app.email.inbound import requeue_drafted_email_card
+        from app.email.responder import generate_draft
+
+        draft = await generate_draft(
+            subject=payload.get("subject", ""), sender=payload.get("sender", ""),
+            body=payload.get("body", ""),
+        )
+        if not (draft or "").strip():
+            raise ValueError("empty draft")
+        await requeue_drafted_email_card(row, draft)
+    except Exception as exc:  # noqa: BLE001 — never error the turn / never send
+        logger.warning("email_draft_request_failed", approval_id=str(row.id), error=str(exc))
+        return ApprovalDispatchOutcome(
+            kind="draft_request", status="draft_failed", thread_id=row.thread_id,
+            detail="I couldn't draft that one just now — ask me again and I'll redo it.",
+        )
+    logger.info("email_draft_request_drafted", approval_id=str(row.id))
+    return ApprovalDispatchOutcome(
+        kind="draft_request", status="drafted", success=True, thread_id=row.thread_id,
+        detail="I've drafted it — it's queued for your approval.",
+    )
+
+
 def alert_text_for(outcome: ApprovalDispatchOutcome) -> str | None:
     """Master-facing Telegram alert text for a resolved outcome — None when there
     is nothing to announce (a lost claim, or a plain reject already shown by the
@@ -94,6 +132,8 @@ def alert_text_for(outcome: ApprovalDispatchOutcome) -> str | None:
     if outcome.kind == "email" and outcome.email_outcome is not None:
         from app.email.approval_handler import channel_alert_for
         return channel_alert_for(outcome.email_outcome, outcome.thread_id)
+    if outcome.kind == "draft_request":
+        return outcome.detail or None  # "drafted / left / couldn't draft"
     if outcome.kind == "tool":
         if outcome.status == "executed":
             return outcome.detail if outcome.success else f"❌ {outcome.detail}"
@@ -122,11 +162,20 @@ async def dispatch_approval(approval_id: str, decision: dict[str, Any]) -> Appro
         logger.warning("dispatch_approval_row_missing", approval_id=approval_id)
         return ApprovalDispatchOutcome(kind="tool", status="row_missing")
 
-    # Inbound email → the untouched handler (its own approve/reject + taxonomy).
-    # Pass the claimed approval_id so the SPECIFIC row sends — after a REVISE the
-    # discarded original + the new card share a thread_id (a thread_id query would
+    payload = row.payload or {}
+    is_email = row.action_type == "email_reply" or is_email_approval(row.thread_id)
+
+    # Complex inbound email surfaced as a HEADS-UP (needs_drafting): "go" (approve) =
+    # DRAFT it, not send. Draft + re-queue a normal simple card (the master approves
+    # THAT to send); reject = leave it in the inbox. Nothing is sent here either way.
+    if is_email and payload.get("needs_drafting"):
+        return await _dispatch_email_draft_request(row, decision)
+
+    # Inbound email (with a draft) → the untouched handler (its own approve/reject +
+    # taxonomy). Pass the claimed approval_id so the SPECIFIC row sends — after a REVISE
+    # the discarded original + the new card share a thread_id (a thread_id query would
     # match both). row.id == this approval_id (we loaded it by id above).
-    if row.action_type == "email_reply" or is_email_approval(row.thread_id):
+    if is_email:
         outcome = await dispatch_email_approval(row.thread_id, decision, approval_id=approval_id)
         return ApprovalDispatchOutcome(
             kind="email",

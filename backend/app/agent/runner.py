@@ -657,6 +657,12 @@ class _PresentedJudgment:
             "email_reply", "gmail_reply",
         )
 
+    @property
+    def needs_drafting(self) -> bool:
+        """True for a COMPLEX-email heads-up card (no draft yet) — "go"/approve DRAFTS
+        it (handled by the dispatcher), and there's no draft to edit (edit → nudge)."""
+        return bool(self.row and (self.row.payload or {}).get("needs_drafting"))
+
 
 async def _judge_presented(
     approval_id: str, message: str, recent_context: str = ""
@@ -685,11 +691,21 @@ async def _judge_presented(
         payload = row.payload or {}
         if is_email_approval(row.thread_id) or row.action_type in ("email_reply", "gmail_reply"):
             tool_name = row.action_type
-            tool_args = {
-                "to": payload.get("sender", ""),
-                "subject": payload.get("subject", ""),
-                "body": payload.get("draft", ""),
-            }
+            if payload.get("needs_drafting"):
+                # Heads-up card: the pending action is "draft a reply" (no draft yet) —
+                # present the ORIGINAL email so "go"/"draft it"/"yes" reads as approve.
+                tool_name = "draft_email_reply"
+                tool_args = {
+                    "to": payload.get("sender", ""),
+                    "subject": payload.get("subject", ""),
+                    "original_email": (payload.get("body", "") or "")[:600],
+                }
+            else:
+                tool_args = {
+                    "to": payload.get("sender", ""),
+                    "subject": payload.get("subject", ""),
+                    "body": payload.get("draft", ""),
+                }
         else:  # chat-queued tool card — judge against the REAL tool + args
             tool_name = payload.get("tool_name") or row.action_type
             tool_args = payload.get("tool_args") or {}
@@ -943,9 +959,15 @@ async def _resolve_presented_decision(
             yield ev
         return
 
-    # edit (REVISE) — email cards re-draft (text AND voice); the re-queued card is
-    # re-approved before anything sends, so a mis-heard voice edit is caught there.
-    # A tool card (can't re-draft) or missing context → the safe nudge.
+    # edit (REVISE). A HEADS-UP card has no draft to revise yet → nudge to "go" first.
+    if judged.needs_drafting:
+        async for ev in _emit(
+            f"I haven't drafted that one yet, {h} — say the word and I'll draft it, then you can tweak it."
+        ):
+            yield ev
+        return
+    # email cards re-draft (text AND voice); the re-queued card is re-approved before
+    # anything sends, so a mis-heard voice edit is caught there. Tool / no-context → nudge.
     if judged.is_email_card and message and conversation_thread_id:
         async for ev in _revise_presented_card(
             judged, message, conversation_thread_id, _emit, speak=speak
@@ -1074,9 +1096,13 @@ async def _revise_presented_card(
 
 
 def _presented_outcome_speech(outcome: Any, intent: str) -> str:
-    """The spoken/typed line for a resolved presented card: the inbound-email
-    taxonomy for an email outcome, the tool's deterministic result for a tool."""
+    """The spoken/typed line for a resolved presented card: the draft-on-"go" line for
+    a heads-up card, the inbound-email taxonomy for a send, the tool's result for a tool."""
     h = settings.MASTER_HONORIFIC
+    # Heads-up "go"→draft / "leave it" — its own copy ("I've drafted it…" / "Left in your
+    # inbox…"), not the send taxonomy (nothing was sent).
+    if outcome.kind == "draft_request":
+        return outcome.detail or f"Done, {h}."
     if intent == "reject":
         return f"Discarded, {h}."
     if outcome.kind == "email":

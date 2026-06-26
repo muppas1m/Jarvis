@@ -83,15 +83,13 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
 
     triage = EmailTriageResult(
         classification="action_required", urgency="today", intent="request",
-        confidence=0.9, suggested_action="reply",
+        confidence=0.9, suggested_action="reply", reply_effort="simple",
     )
 
     try:
         with patch("app.email.inbound.classify_email", AsyncMock(return_value=triage)), \
-             patch("app.email.inbound.generate_draft",
-                   AsyncMock(return_value={"complexity": "simple", "response": draft_body})), \
+             patch("app.email.inbound.generate_draft", AsyncMock(return_value=draft_body)), \
              patch("app.email.inbound.send_approval_request_to_master", AsyncMock()) as mock_req, \
-             patch("app.email.inbound.send_system_alert", AsyncMock()) as mock_sys_alert, \
              patch("app.email.provider.gmail.GmailProvider._service", return_value=service):
 
             # ---- inbound: provider fetch → classify (mocked) → draft (mocked) →
@@ -119,7 +117,6 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
             assert approval.action_type == "email_reply"  # provider-tagged shape
             assert approval.payload["provider"] == "gmail"
             assert mock_req.await_count == 1, "master should have been asked to approve exactly once"
-            assert mock_sys_alert.await_count == 0, "simple-draft path must NOT emit a system alert"
 
             # ---- master approves via the LIVE dashboard endpoint → the claim-gated
             #      gate (resolve_and_dispatch) → dispatch_approval → dispatch_email_approval

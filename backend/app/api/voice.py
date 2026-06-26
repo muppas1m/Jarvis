@@ -126,6 +126,10 @@ def _announce_text(row, *, first: bool) -> str:
         name, addr = parseaddr(payload.get("sender", ""))
         who = name or addr or "someone"
         subject = payload.get("subject") or "your message"
+        if payload.get("needs_drafting"):
+            # Complex — NOT drafted yet; read the heads-up + the "say go" affordance.
+            lead = f"{h}, you've got a bigger one" if first else f"There's another bigger one, {h}"
+            return f"{lead} from {who}, about '{subject}' — say the word and I'll draft it."
         lead = (
             f"{h}, I've drafted a reply" if first
             else f"Here's another I've drafted, {h} — a reply"

@@ -39,10 +39,11 @@ Classification = Literal["spam", "fyi", "action_required"]
 Urgency = Literal["immediate", "today", "this_week", "none"]
 Intent = Literal["request", "question", "notification", "fyi", "spam"]
 SuggestedAction = Literal["reply", "archive", "forward", "schedule", "none"]
+ReplyEffort = Literal["simple", "complex"]
 
 
 class EmailTriageResult(BaseModel):
-    """Validated five-axis triage. Out-of-enum model output → ValidationError →
+    """Validated six-axis triage. Out-of-enum model output → ValidationError →
     caller falls back, so garbage never reaches ``EmailLog.meta``."""
 
     classification: Classification
@@ -50,6 +51,10 @@ class EmailTriageResult(BaseModel):
     intent: Intent
     confidence: float = Field(ge=0.0, le=1.0)
     suggested_action: SuggestedAction
+    # Reply effort decides routing for action_required mail BEFORE any drafting
+    # (so a complex one is never wastefully drafted). DEFAULT "complex" — the safe
+    # bias: on any uncertainty, don't auto-draft; surface a heads-up + draft on "go".
+    reply_effort: ReplyEffort = "complex"
 
 
 # Urgency sort ordinal — single source of truth for ordering. A plain TEXT sort
@@ -81,7 +86,7 @@ URGENCY_TAG: dict[str, str] = {
 
 TRIAGE_PROMPT = """You are an email triage classifier for a personal AI assistant.
 
-Classify the email below across five axes and respond with a JSON object ONLY
+Classify the email below across six axes and respond with a JSON object ONLY
 (no prose, no markdown fences):
 
 {{
@@ -89,7 +94,8 @@ Classify the email below across five axes and respond with a JSON object ONLY
   "urgency": one of "immediate" | "today" | "this_week" | "none",
   "intent": one of "request" | "question" | "notification" | "fyi" | "spam",
   "confidence": a number from 0.0 to 1.0 (how sure you are of the classification),
-  "suggested_action": one of "reply" | "archive" | "forward" | "schedule" | "none"
+  "suggested_action": one of "reply" | "archive" | "forward" | "schedule" | "none",
+  "reply_effort": one of "simple" | "complex"
 }}
 
 Guidance:
@@ -98,6 +104,7 @@ Guidance:
 - "action_required": a direct question, request, meeting ask, or personal message needing the master's response.
 - urgency reflects WHEN a response is expected, independent of classification.
 - confidence reflects how certain you are — use a low value when the email is ambiguous.
+- reply_effort (only meaningful for action_required): "simple" = you could confidently write a COMPLETE, appropriate reply right now from the email itself + the master's known profile (a proper reply, not a one-word "got it"). "complex" = it needs the master's input, a decision, sensitive judgement, or facts you don't have. WHEN UNSURE, choose "complex" — better to ask than to draft something that needs the master's input.
 
 ---
 From: {sender}

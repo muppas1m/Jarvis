@@ -56,10 +56,10 @@ def _msg(mid: str) -> InboundMessage:
     )
 
 
-def _triage(classification: str, confidence: float = 0.95) -> EmailTriageResult:
+def _triage(classification: str, confidence: float = 0.95, reply_effort: str = "simple") -> EmailTriageResult:
     return EmailTriageResult(
         classification=classification, urgency="none", intent="fyi",
-        confidence=confidence, suggested_action="none",
+        confidence=confidence, suggested_action="none", reply_effort=reply_effort,
     )
 
 
@@ -82,15 +82,14 @@ async def test_spam_archives_via_provider_interface(monkeypatch):
         await _cleanup(mid)
 
 
-async def test_action_required_mints_provider_tagged_approval(monkeypatch):
+async def test_simple_action_required_drafts_and_queues_with_original(monkeypatch):
     mid = f"pipe-act-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(
-        "app.email.inbound.classify_email", AsyncMock(return_value=_triage("action_required"))
+        "app.email.inbound.classify_email",
+        AsyncMock(return_value=_triage("action_required", reply_effort="simple")),
     )
-    monkeypatch.setattr(
-        "app.email.inbound.generate_draft",
-        AsyncMock(return_value={"complexity": "simple", "response": "Drafted reply."}),
-    )
+    gen = AsyncMock(return_value="Drafted reply.")  # generate_draft → a STRING now
+    monkeypatch.setattr("app.email.inbound.generate_draft", gen)
     monkeypatch.setattr("app.email.inbound.send_approval_request_to_master", AsyncMock())
     p = _FakeProvider()
     try:
@@ -99,14 +98,42 @@ async def test_action_required_mints_provider_tagged_approval(monkeypatch):
             approval = (await s.execute(
                 select(PendingApproval).where(PendingApproval.thread_id == f"email:fakemail:{mid}")
             )).scalar_one_or_none()
-        assert approval is not None
-        assert approval.action_type == "email_reply"
-        # neutral, provider-tagged payload — the approval handler reads THIS shape
+        assert approval is not None and approval.action_type == "email_reply"
         assert approval.payload["provider"] == "fakemail"
         assert approval.payload["message_id"] == mid
         assert approval.payload["rfc822_message_id"] == "<x@fakemail>"
         assert approval.payload["draft"] == "Drafted reply."
-        assert p.archived == []  # action_required is NOT archived
+        assert approval.payload["needs_drafting"] is False
+        assert approval.payload["body"] == "some text"  # the ORIGINAL email rides on the card
+        assert gen.await_count == 1                       # a simple one IS drafted
+        assert p.archived == []
+    finally:
+        await _cleanup(mid)
+
+
+async def test_complex_action_required_queues_headsup_without_drafting(monkeypatch):
+    mid = f"pipe-cplx-{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr(
+        "app.email.inbound.classify_email",
+        AsyncMock(return_value=_triage("action_required", reply_effort="complex")),
+    )
+    gen = AsyncMock(return_value="should NOT be called")
+    monkeypatch.setattr("app.email.inbound.generate_draft", gen)
+    monkeypatch.setattr("app.email.inbound.send_approval_request_to_master", AsyncMock())
+    p = _FakeProvider()
+    try:
+        await _process_message(p, _msg(mid))
+        async with async_session() as s:
+            approval = (await s.execute(
+                select(PendingApproval).where(PendingApproval.thread_id == f"email:fakemail:{mid}")
+            )).scalar_one_or_none()
+        assert approval is not None and approval.action_type == "email_reply"
+        assert approval.payload["needs_drafting"] is True   # a heads-up card
+        assert approval.payload["draft"] == ""              # NO draft
+        assert approval.payload["body"] == "some text"      # original carried for the on-go re-draft
+        assert "say the word and I'll draft it" in approval.description
+        assert gen.await_count == 0                          # NO wasted drafting on a complex one
+        assert p.archived == []
     finally:
         await _cleanup(mid)
 

@@ -47,6 +47,7 @@ async def test_queue_unifies_both_origins_ordered_with_kinds_and_exclusions():
             description="Reply to 'Q3' from Priya",
             payload={"provider": "gmail", "message_id": f"m-{tag}",
                      "sender": "Priya <priya@example.com>", "subject": "Q3 numbers",
+                     "body": "Does Thursday work for the Q3 review?",
                      "draft": "Confirmed for Thursday."},
             status="pending", created_at=base - timedelta(minutes=10), expires_at=soon,
         )
@@ -85,9 +86,12 @@ async def test_queue_unifies_both_origins_ordered_with_kinds_and_exclusions():
         # --- correct kind + origin-field normalization per row ---
         assert email_card.kind == "email"
         assert email_card.tool_name == "email_reply"
+        # email card carries the ORIGINAL email + the draft (a simple, drafted reply).
         assert email_card.tool_args == {
-            "to": "Priya <priya@example.com>", "subject": "Q3 numbers", "body": "Confirmed for Thursday."
+            "to": "Priya <priya@example.com>", "subject": "Q3 numbers",
+            "original": "Does Thursday work for the Q3 review?", "body": "Confirmed for Thursday."
         }
+        assert email_card.needs_drafting is False  # a drafted simple reply, not a heads-up
         assert tool_card.kind == "tool"
         assert tool_card.tool_name == "calendar_create"
         assert tool_card.tool_args == {"title": "Standup", "when": "9am"}

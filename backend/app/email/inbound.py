@@ -31,7 +31,7 @@ from app.db.models import EmailLog
 from app.email.classifier import classify_email
 from app.email.provider import EmailProvider, InboundMessage, get_email_provider
 from app.email.responder import generate_draft
-from app.messaging.failure_alerter import send_approval_request_to_master, send_system_alert
+from app.messaging.failure_alerter import send_approval_request_to_master
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -79,12 +79,16 @@ async def _new_message_ids(provider: EmailProvider, cursor: str | None) -> list[
 async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None:
     """Full pipeline for one message. Ordering is load-bearing — the EmailLog
     INSERT claims the message id (the race gate) BEFORE any side effect fires."""
-    # Step 1: five-axis triage (cheap classification on the fast model).
+    # Step 1: six-axis triage (cheap classification on the fast model) — incl. the
+    # simple/complex reply_effort, decided HERE before any drafting.
     triage = await classify_email(subject=msg.subject, sender=msg.sender, body=msg.body)
 
-    # Step 2: draft BEFORE the gate so the EmailLog row carries it on first INSERT.
+    # Step 2: draft ONLY a SIMPLE action_required reply (reply_effort decides, before
+    # drafting — a complex one is never wastefully drafted; it gets a heads-up card and
+    # is drafted on the master's "go"). Draft before the gate so the EmailLog row carries
+    # it on first INSERT.
     draft = None
-    if triage.classification == "action_required":
+    if triage.classification == "action_required" and triage.reply_effort == "simple":
         draft = await generate_draft(subject=msg.subject, sender=msg.sender, body=msg.body)
 
     # GATE: claim ownership of this message id via the EmailLog INSERT. The
@@ -98,8 +102,8 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
             sender=msg.sender,
             classification=triage.classification,
             meta=triage.model_dump(),
-            draft_response=draft["response"] if draft else None,
-            response_complexity=draft.get("complexity") if draft else None,
+            draft_response=draft,
+            response_complexity=triage.reply_effort,
         )
         session.add(log)
         try:
@@ -132,26 +136,30 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
         )
         logger.info("email_recorded_to_briefing", subject=msg.subject, urgency=triage.urgency)
     elif route == "action_required":
-        if draft["complexity"] == "simple":
-            await _queue_email_approval(provider.name, msg, draft["response"])
+        if triage.reply_effort == "simple":
+            # Simple — already drafted; queue the draft + the original email for approval.
+            await _queue_email_approval(provider.name, msg, draft=draft, needs_drafting=False)
         else:
-            # Complex — notify with full context. Capability-neutral copy (no
-            # "what happens next" footer): the conversational reply-to-edit path
-            # is deliberately not promised (project_email_action_capability_gap).
-            await send_system_alert(
-                f"📧 **Action Required** — agent needs your input\n\n"
-                f"**From:** {msg.sender}\n"
-                f"**Subject:** {msg.subject}\n\n"
-                f"**Draft for context (review before responding):**\n{draft['response']}"
-            )
+            # Complex — NO draft. Queue a heads-up card the master acts on (HUD + voice +
+            # Telegram, like everything else); on "go" it drafts + re-queues as a simple
+            # one. No wasted drafting; the master controls when the careful draft happens.
+            await _queue_email_approval(provider.name, msg, draft=None, needs_drafting=True)
 
 
-async def _queue_email_approval(provider_name: str, msg: InboundMessage, draft: str) -> None:
-    """Queue a drafted reply for the master's approval — provider-tagged.
+async def _queue_email_approval(
+    provider_name: str, msg: InboundMessage, *, draft: str | None, needs_drafting: bool
+) -> None:
+    """Queue an inbound email for the master — provider-tagged. Two shapes, ONE card
+    kind (``email_reply``) so the queue / voice / HUD plumbing is shared:
 
-    thread_id = ``email:<provider>:<message_id>`` (the approval handler resolves
-    the provider + opaque refs from the payload). interrupt_id mirrors thread_id
-    (no LangGraph token); expires_at uses APPROVAL_EXPIRY_HOURS."""
+      - SIMPLE (``needs_drafting=False``) — carries the ``draft`` + the ORIGINAL email
+        body; the master approves to SEND.
+      - COMPLEX (``needs_drafting=True``) — NO draft yet; a heads-up the master can act
+        on. On "go" (approve), the dispatcher drafts + re-queues a simple card; the
+        original body rides in the payload for both the heads-up and the re-draft.
+
+    thread_id = ``email:<provider>:<message_id>``; interrupt_id mirrors it (no LangGraph
+    token); expires_at uses APPROVAL_EXPIRY_HOURS."""
     from datetime import datetime, timedelta
 
     from app.db.models import PendingApproval
@@ -159,12 +167,20 @@ async def _queue_email_approval(provider_name: str, msg: InboundMessage, draft: 
     thread_id = f"email:{provider_name}:{msg.message_id}"
     expires_at = datetime.now(UTC) + timedelta(hours=settings.APPROVAL_EXPIRY_HOURS)
 
+    if needs_drafting:
+        description = (
+            f"📧 A reply to '{msg.subject}' from {msg.sender} needs your input — "
+            f"say the word and I'll draft it."
+        )
+    else:
+        description = f"Reply to '{msg.subject}' from {msg.sender}:\n\n{draft}"
+
     async with async_session() as session:
         approval = PendingApproval(
             thread_id=thread_id,
             interrupt_id=thread_id,
             action_type="email_reply",
-            description=f"Reply to '{msg.subject}' from {msg.sender}:\n\n{draft}",
+            description=description,
             payload={
                 "provider": provider_name,
                 "message_id": msg.message_id,
@@ -172,7 +188,9 @@ async def _queue_email_approval(provider_name: str, msg: InboundMessage, draft: 
                 "rfc822_message_id": msg.rfc822_message_id,
                 "subject": msg.subject,
                 "sender": msg.sender,
-                "draft": draft,
+                "body": msg.body or "",          # the ORIGINAL email — shown on the card
+                "draft": draft or "",            # the reply draft ("" until drafted)
+                "needs_drafting": needs_drafting,
             },
             expires_at=expires_at,
         )
@@ -184,4 +202,33 @@ async def _queue_email_approval(provider_name: str, msg: InboundMessage, draft: 
         approval_id=str(approval.id),
         tool_name="email_reply",
         description=approval.description,
+    )
+
+
+async def requeue_drafted_email_card(row, draft: str) -> None:
+    """Create a SIMPLE email_reply card from a needs_drafting row's payload + a freshly
+    generated draft — the master's "go" → draft path (called by the dispatcher). Same
+    shape + Telegram announce as a simple ingest; the new card then surfaces to the HUD
+    + voice via the unified /approvals/queue poll, exactly like an inbound simple card."""
+    from datetime import datetime, timedelta
+
+    from app.db.models import PendingApproval
+
+    p = dict(row.payload or {})
+    subject, sender = p.get("subject", ""), p.get("sender", "")
+    async with async_session() as session:
+        new = PendingApproval(
+            thread_id=row.thread_id,
+            interrupt_id=row.thread_id,
+            action_type="email_reply",
+            description=f"Reply to '{subject}' from {sender}:\n\n{draft}",
+            payload={**p, "draft": draft, "needs_drafting": False},  # carries the original body
+            expires_at=datetime.now(UTC) + timedelta(hours=settings.APPROVAL_EXPIRY_HOURS),
+        )
+        session.add(new)
+        await session.commit()
+        await session.refresh(new)
+
+    await send_approval_request_to_master(
+        approval_id=str(new.id), tool_name="email_reply", description=new.description,
     )
