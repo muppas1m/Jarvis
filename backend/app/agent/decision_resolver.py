@@ -58,7 +58,7 @@ PENDING ACTION
   tool: {tool_name}
   details:
 {details}
-
+{consent_clause}
 RECENT CONVERSATION (context — use it to tell whether the reply is RESPONDING to this pending action or starting a NEW topic)
 {recent_context}
 
@@ -84,6 +84,31 @@ Respond with JSON only:
 {{"intent": "approve|reject|edit|skip|show_others|unclear|unrelated", "change": "<the requested change, or empty unless intent is edit>"}}"""
 
 
+# Tier-specific consent bar, injected per the pending tool's consent_tier (safety.py).
+# Only the EXPLICIT tier injects a clause — it NARROWS "approve" for a destructive action so
+# a soft affirmation is not enough. A reversible SEND injects NOTHING: the existing prompt +
+# the surfacing card-line already produce the soft-affirmation→approve the master accepted, so
+# adding any SOFT clause only destabilizes that locked behavior. Default tier is EXPLICIT.
+_CONSENT_EXPLICIT = (
+    'CONSENT BAR — this pending action is DESTRUCTIVE / IRREVERSIBLE or spends money, so the '
+    'bar for "approve" is HIGHER than usual. A soft or vague affirmation is NOT consent here: '
+    '"that works", "okay sure", "that\'s fine", "sounds good", "fine", a bare "go ahead" → '
+    '"unclear" (the caller RE-ASKS for an explicit command). ONLY an explicit, unambiguous '
+    'command to perform THIS specific action approves — e.g. "delete it", "yes, delete it", '
+    '"go ahead and book it", "submit it", "yes, cancel that".'
+)
+
+
+def _consent_clause(tool_name: str) -> str:
+    """The EXPLICIT-tier restriction for a destructive tool, wrapped in its own blank lines;
+    "" for a reversible send — so a send's prompt is BYTE-IDENTICAL to the pre-tiering email
+    prompt (the `{consent_clause}` slot sits between single newlines), leaving the locked
+    email behavior untouched. No SOFT clause exists to destabilize that near-boundary path."""
+    from app.agent.safety import consent_tier
+
+    return "" if consent_tier(tool_name) == "soft" else f"\n{_CONSENT_EXPLICIT}\n"
+
+
 def _details(tool_args: dict, description: str | None) -> str:
     lines = [f"  - {k}: {v}" for k, v in (tool_args or {}).items()]
     return "\n".join(lines) if lines else (f"  {description}" if description else "  (no parameters)")
@@ -98,12 +123,15 @@ async def resolve_decision(
 ) -> DecisionResolution:
     """Classify the master's reply against the pending action on the strong
     ``decision`` slot (never the fast tier), using the recent conversation for
-    context. Conservative on approve (only an explicit command to GO); an ambiguous
-    reply about the card → ``unclear`` (re-ask), a different topic → ``unrelated``
-    (answer + remind). Any failure degrades to ``unrelated`` (never an auto-approve)."""
+    context. The approve bar is TIERED by the tool's ``consent_tier`` (safety.py): a
+    reversible send takes a soft affirmation ("that works"); a destructive / irreversible
+    action takes ONLY an explicit command ("delete it") — a soft affirmation there →
+    ``unclear`` (re-ask). A different topic → ``unrelated`` (answer + remind). Any
+    failure degrades to ``unrelated`` (never an auto-approve)."""
     prompt = _RESOLVER_PROMPT.format(
         tool_name=tool_name,
         details=_details(tool_args, description),
+        consent_clause=_consent_clause(tool_name),
         recent_context=recent_context.strip() or "(no recent conversation)",
         user_message=user_message.strip(),
     )
