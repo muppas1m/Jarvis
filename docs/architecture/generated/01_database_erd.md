@@ -165,6 +165,8 @@ erDiagram
         JSONB always_on
         JSONB on_demand
         DateTime briefing_hwm
+        DateTime last_briefed_at
+        DateTime last_seen_at
         DateTime updated_at
     }
 ```

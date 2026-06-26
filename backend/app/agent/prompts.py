@@ -137,7 +137,7 @@ VOLATILE_TEMPLATE = """## Master's Profile (always-on)
 - Platform: {platform}
 {date_context}
 </context>
-"""
+{check_in_block}"""
 
 
 def _date_context(current_datetime: str, tz_name: str) -> str:
@@ -151,7 +151,8 @@ def _date_context(current_datetime: str, tz_name: str) -> str:
 
     Falls back to the raw datetime if the timezone DB or the ISO string can't be
     resolved — never raise into prompt construction."""
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
 
     try:
         from zoneinfo import ZoneInfo
@@ -190,6 +191,7 @@ def build_system_prompt(
     platform: str,
     current_datetime: str,
     voice: bool = False,
+    briefing_directive: str = "",
 ) -> str:
     """Assemble the full system prompt.
 
@@ -234,6 +236,13 @@ def build_system_prompt(
 
     timezone = always_on.get("timezone", "UTC")
 
+    # Per-turn check-in directive (5.4) — volatile (changes every turn), so it lives in the
+    # VOLATILE suffix, never the cached stable prefix. Empty → no block at all.
+    check_in_block = (
+        f"\n<check_in>\n{briefing_directive.strip()}\n</check_in>\n"
+        if briefing_directive.strip() else ""
+    )
+
     volatile = VOLATILE_TEMPLATE.format(
         master_name=name,
         always_on_lines=always_on_lines,
@@ -241,6 +250,7 @@ def build_system_prompt(
         memories_section=memories_section,
         platform=platform,
         date_context=_date_context(current_datetime, timezone),
+        check_in_block=check_in_block,
     )
 
     # Voice turns get a brevity directive appended to the stable behavioral prefix

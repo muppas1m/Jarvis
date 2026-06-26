@@ -120,8 +120,8 @@ def _mock(monkeypatch, *, sw=None, total=0, days=None, earlier=0, tz=("UTC", Fal
     async def fake_read():
         return None
 
-    async def fake_advance(now):
-        advanced["now"] = now
+    async def fake_mark_briefed(now):
+        advanced["now"] = now  # the 'brief delivered' seam fired (advance HWM + stamp last_briefed)
         return now
 
     async def fake_dw(start, end, tz=""):
@@ -132,7 +132,7 @@ def _mock(monkeypatch, *, sw=None, total=0, days=None, earlier=0, tz=("UTC", Fal
 
     monkeypatch.setattr(BT, "_resolve_timezone", fake_resolve)
     monkeypatch.setattr(BT, "read_hwm", fake_read)
-    monkeypatch.setattr(BT, "advance_hwm", fake_advance)
+    monkeypatch.setattr(BT, "mark_briefed", fake_mark_briefed)
     monkeypatch.setattr(BT, "digest_window", fake_dw)
     monkeypatch.setattr(BT, "_earlier_unheard", fake_earlier)
     if sw is not None:

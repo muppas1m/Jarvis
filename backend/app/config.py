@@ -214,6 +214,13 @@ class Settings(BaseSettings):
     # window, then it ages off (the next daily run replaces it). 20h < 24h so the
     # prior day's brief is gone before the next one lands (no two-brief overlap).
     BRIEFING_HUD_TTL_HOURS: int = 20
+    # Proactive-briefing check-in (5.4): the deterministic "when to brief" decision that
+    # rides each turn. COOLDOWN — after a 'latest' brief, no PROACTIVE re-brief on repeated
+    # greetings within this window (an explicit "what's new" still answers honestly). From
+    # "5 greetings in an hour → brief once". AWAY_DAYS — a gap of this many local days since
+    # last-seen makes a check-in OFFER the multi-day catch-up rather than deliver-and-dump.
+    BRIEFING_COOLDOWN_MINUTES: int = 60
+    BRIEFING_AWAY_DAYS: int = 2
     # Send resilience: retry ONLY definitely-didn't-send failures (HTTP 429/503 —
     # rejected at the gateway before the send ran). Timeouts / 5xx / 4xx are
     # surfaced, never blind-retried (a read-timeout may have already delivered).

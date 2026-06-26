@@ -33,9 +33,10 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from app.agent.briefing_state import mark_briefed
 from app.agent.tools.calendar_tool import _resolve_timezone
 from app.agent.tools.registry import tool_registry
-from app.briefing import DigestWindow, advance_hwm, digest_window, read_hwm
+from app.briefing import DigestWindow, digest_window, read_hwm
 from app.config import settings
 
 _SCOPES = ("latest", "today", "yesterday", "tomorrow")
@@ -163,7 +164,10 @@ async def briefing(scope: str = "latest") -> str:
     )
     text = format_digest(sw, win, fallback=fallback, earlier_count=earlier)
     if sw.advances:
-        await advance_hwm(now)  # advance-on-return (see module docstring for the residual)
+        # The single 'brief was delivered' seam — advance the HWM AND stamp last_briefed_at
+        # together (briefing_state.mark_briefed). Advance-on-return (see module docstring for
+        # the residual); the cooldown reads the stamp set here.
+        await mark_briefed(now)
     return text
 
 

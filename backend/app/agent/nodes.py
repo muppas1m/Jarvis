@@ -87,11 +87,26 @@ async def memory_load_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     _t0 = time.monotonic()
     context = await get_memory().build_context(user_message=user_message)
+
+    # Proactive-briefing check-in (5.4): ONE cheap read → a deterministic directive that
+    # rides THIS turn (no new node, no extra LLM call). Read the gap/cooldown from the
+    # CURRENT state, then advance last_seen. Fully fail-soft — the briefing intelligence
+    # must never break a turn (a DB hiccup just means no proactive brief this turn).
+    directive = ""
+    try:
+        from app.agent.briefing_state import briefing_directive, load_live_state, touch_last_seen
+        now = datetime.now(UTC)
+        directive = briefing_directive(await load_live_state(now))
+        await touch_last_seen(now)
+    except Exception as exc:  # noqa: BLE001 — never fail a turn on the briefing read
+        logger.warning("briefing_checkin_state_failed", error=str(exc))
+
     logger.info("node_timing", node="memory_load", ms=int((time.monotonic() - _t0) * 1000))
     return {
         "user_profile_always_on": context["user_profile_always_on"],
         "user_profile_on_demand": context["user_profile_on_demand"],
         "relevant_memories": context["relevant_memories"],
+        "briefing_directive": directive,
     }
 
 
@@ -212,6 +227,7 @@ async def agent_node(state: AgentState) -> dict:
         platform=state["platform"],
         current_datetime=datetime.now(UTC).isoformat(),
         voice=is_voice,
+        briefing_directive=state.get("briefing_directive", ""),
     )
 
     msgs: list[BaseMessage] = [SystemMessage(content=system_prompt)]

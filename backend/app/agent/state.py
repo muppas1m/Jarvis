@@ -37,6 +37,9 @@ class AgentState(TypedDict, total=False):
     user_profile_always_on: dict
     user_profile_on_demand: list[dict]
     relevant_memories: list[dict]
+    # Proactive-briefing check-in directive (5.4) — the deterministic per-turn
+    # facts+guidance, computed once in memory_load_node, injected by agent_node.
+    briefing_directive: str
 
     # --- per-turn metadata --------------------------------------------------
     thread_id: str

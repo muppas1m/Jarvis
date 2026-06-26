@@ -72,6 +72,14 @@ class UserProfile(Base):
     # always_on/on_demand, so it never enters the prompt.
     briefing_hwm = Column(DateTime(timezone=True), nullable=True)
 
+    # Proactive-briefing check-in state (Phase 5.4) — drives the deterministic "when to
+    # brief" decision each turn (briefing_state.py). NOT in always_on/on_demand → never in
+    # the prompt. last_briefed_at = the COOLDOWN key (no proactive re-brief within the
+    # cooldown; an explicit ask still answers); last_seen_at = the previous sighting, for
+    # the away-gap + first-interaction-of-the-day signals. Both NULL until first brief/turn.
+    last_briefed_at = Column(DateTime(timezone=True), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
