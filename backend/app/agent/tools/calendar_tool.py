@@ -91,11 +91,12 @@ async def _blocking[T](fn: Callable[[], T], *, timeout: float | None = None) -> 
     the round-trip and a hung call would wedge it. Mirrors the Gmail adapter's
     ``_blocking`` idiom (to_thread + wait_for); ``fn`` builds the service AND
     executes inside the worker thread, so the OAuth ``build`` (discovery I/O) is
-    off-loop too. The READ paths (calendar_read + calendar_period) route through
-    here — fixing the adjacent sync-on-loop block. The APPROVE-tier write handlers
-    (create/update/delete/conflict) still call .execute() directly; routing them is
-    the same one-line wrap but they mutate the live calendar, so that follow-up is
-    left out of this readiness-focused step."""
+    off-loop too. BOTH the read paths (calendar_read + calendar_period) AND the
+    APPROVE-tier write handlers (create/update/delete/conflict) route through here, so
+    a hung Google call raises TimeoutError to the normal [ERROR] path instead of
+    wedging the backend. The two fail-open paths — the conflict check and delete's
+    cosmetic title fetch — catch that timeout and degrade gracefully (no warning /
+    "(unknown)" title); the mutations themselves let it propagate."""
     return await asyncio.wait_for(
         asyncio.to_thread(fn),
         timeout=timeout if timeout is not None else settings.CALENDAR_TIMEOUT_S,
@@ -165,8 +166,6 @@ async def calendar_create(
     Safety level APPROVE (safety.py), so the agent must request approval first.
     The approval prompt is enriched with a conflict warning by the tool_executor
     (see calendar_conflict_warning)."""
-    service = _service()
-
     body = {
         "summary": title,
         "description": description,
@@ -177,11 +176,14 @@ async def calendar_create(
     if attendees:
         body["attendees"] = [{"email": a} for a in attendees]
 
-    event = service.events().insert(
-        calendarId="primary",
-        body=body,
-        sendUpdates="all" if attendees else "none",
-    ).execute()
+    def _insert():
+        return _service().events().insert(
+            calendarId="primary",
+            body=body,
+            sendUpdates="all" if attendees else "none",
+        ).execute()
+
+    event = await _blocking(_insert)  # off-loop + bounded — a hung write → TimeoutError
 
     return (
         f"Created event '{title}' (event_id: {event['id']}). "
@@ -214,9 +216,12 @@ async def calendar_update(
     if not body:
         return "No changes specified — nothing to update."
 
-    event = _service().events().patch(
-        calendarId="primary", eventId=event_id, body=body,
-    ).execute()
+    def _patch():
+        return _service().events().patch(
+            calendarId="primary", eventId=event_id, body=body,
+        ).execute()
+
+    event = await _blocking(_patch)  # off-loop + bounded — a hung write → TimeoutError
     return (
         f"Updated event '{event.get('summary', '(untitled)')}' "
         f"(event_id: {event['id']}). View: {event.get('htmlLink', '(no link)')}"
@@ -227,13 +232,19 @@ async def calendar_delete(event_id: str) -> str:
     """Delete an event by id. Safety level APPROVE.
 
     Fetches the title first so the confirmation names what was removed."""
-    service = _service()
+    def _get():
+        return _service().events().get(calendarId="primary", eventId=event_id).execute()
+
     try:
-        ev = service.events().get(calendarId="primary", eventId=event_id).execute()
+        ev = await _blocking(_get)  # bounded; a hung/failed get is cosmetic → fall back
         title = ev.get("summary", "(untitled)")
     except Exception:  # noqa: BLE001 — title is cosmetic; proceed to delete
         title = "(unknown)"
-    service.events().delete(calendarId="primary", eventId=event_id).execute()
+
+    def _delete():
+        return _service().events().delete(calendarId="primary", eventId=event_id).execute()
+
+    await _blocking(_delete)  # off-loop + bounded — a hung delete → TimeoutError, not a wedge
     return f"Deleted event '{title}' (event_id: {event_id})."
 
 
@@ -250,8 +261,8 @@ async def calendar_conflict_warning(start_iso: str, end_iso: str) -> str | None:
     the agent from CLAIMING a conflict check it didn't run."""
     if not start_iso or not end_iso:
         return None
-    try:
-        res = _service().events().list(
+    def _list():
+        return _service().events().list(
             calendarId="primary",
             timeMin=start_iso,
             timeMax=end_iso,
@@ -259,8 +270,11 @@ async def calendar_conflict_warning(start_iso: str, end_iso: str) -> str | None:
             orderBy="startTime",
             maxResults=10,
         ).execute()
+
+    try:
+        res = await _blocking(_list)  # off-loop + bounded; a timeout fails open (no warning)
         items = res.get("items", [])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — incl. TimeoutError; a check failure never blocks approval
         logger.warning("calendar_conflict_check_failed", error=str(exc))
         return None
 

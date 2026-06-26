@@ -122,3 +122,61 @@ async def test_delete_names_event():
         out = await cal.calendar_delete("E9")
     assert "Duplicate Gym" in out
     assert events.delete.call_args.kwargs["eventId"] == "E9"
+
+
+# --------------------------------------------------------------------------- #
+# create — happy path (the write returns the new event_id + link)             #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_create_happy_returns_event_id():
+    svc, events = _mock_service()
+    with patch.object(cal, "_service", return_value=svc):
+        out = await cal.calendar_create(
+            "Sync", "2026-06-14T14:00:00-04:00", "2026-06-14T15:00:00-04:00",
+        )
+    assert "NEW" in out and "http://x" in out
+    assert events.insert.call_args.kwargs["calendarId"] == "primary"
+
+
+# --------------------------------------------------------------------------- #
+# writes are bounded — a hung Google call surfaces TimeoutError, never a wedge #
+# --------------------------------------------------------------------------- #
+async def _blocking_timeout(*_a, **_k):
+    """Stand-in for _blocking when the Google round-trip exceeds CALENDAR_TIMEOUT_S."""
+    raise TimeoutError("calendar round-trip exceeded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [
+    lambda: cal.calendar_create("S", "2026-06-14T14:00:00-04:00", "2026-06-14T15:00:00-04:00"),
+    lambda: cal.calendar_update(event_id="E1", title="X"),
+    lambda: cal.calendar_delete("E9"),
+])
+async def test_write_surfaces_timeout_not_hang(monkeypatch, call):
+    # A hung write must raise TimeoutError out to the normal [ERROR] path — not block forever.
+    monkeypatch.setattr(cal, "_blocking", _blocking_timeout)
+    with patch.object(cal, "_service", return_value=MagicMock()), pytest.raises(TimeoutError):
+        await call()
+
+
+@pytest.mark.asyncio
+async def test_conflict_warning_fails_open_on_timeout(monkeypatch):
+    # The conflict check is a soft warning — a timeout returns None (never blocks the approval).
+    monkeypatch.setattr(cal, "_blocking", _blocking_timeout)
+    with patch.object(cal, "_service", return_value=MagicMock()):
+        out = await cal.calendar_conflict_warning(
+            "2026-06-13T14:00:00-04:00", "2026-06-13T15:00:00-04:00",
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_real_blocking_times_out_a_hung_write(monkeypatch):
+    # End-to-end through the REAL _blocking (to_thread + wait_for): a slow Google write
+    # raises TimeoutError within the budget instead of blocking the event loop forever.
+    import time
+    monkeypatch.setattr(cal.settings, "CALENDAR_TIMEOUT_S", 0.05)
+    svc = MagicMock()
+    svc.events.return_value.insert.return_value.execute.side_effect = lambda: time.sleep(0.5)
+    with patch.object(cal, "_service", return_value=svc), pytest.raises(TimeoutError):
+        await cal.calendar_create("S", "2026-06-14T14:00:00-04:00", "2026-06-14T15:00:00-04:00")
