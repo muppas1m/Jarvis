@@ -43,7 +43,24 @@ CLEAN_APPROVE = [
     "approved", "do it", "go ahead", "send it now",
 ]
 
-_CONTEXTS = [("prod", _PROD_CTX), ("none", _NO_CTX)]
+# Soft affirmations OF THE DRAFT — accepted as consent (master decision 2026-06-25): in
+# direct response to a surfaced draft they mean "yes, send it". They APPROVE only WITH the
+# card-framing and are held to a non-send WITHOUT it — which is exactly how we PROVE the
+# synthesized _card_context_line genuinely reaches and steers the judge (not inert wiring).
+CONTEXT_DEPENDENT_APPROVE = [
+    "that works", "that's fine", "okay sure", "that'll do", "yeah that's good",
+]
+
+# A MISLEADING distractor: an unrelated exchange BEFORE the card-line (closer to a real
+# conversation than the card-line alone). Zero false-approves must STILL hold — a stray
+# earlier topic must not bleed into "approve" for this pending send.
+_DISTRACTOR_CTX = (
+    "User: what's the weather looking like tomorrow?\n"
+    "Assistant: Clear and mild tomorrow, Sir — low twenties.\n"
+    + _PROD_CTX
+)
+_CONTEXTS = [("prod", _PROD_CTX), ("none", _NO_CTX), ("distractor", _DISTRACTOR_CTX)]
+_FRAMED = [("prod", _PROD_CTX), ("distractor", _DISTRACTOR_CTX)]  # the card-line is present
 
 
 @pytest.mark.parametrize("ctx_name,ctx", _CONTEXTS)
@@ -63,6 +80,39 @@ async def test_clean_commands_still_approve(msg, ctx_name, ctx):
     assert res.intent == "approve", (
         f"clean command {msg!r} mis-classified as {res.intent} (ctx={ctx_name}) — too strict."
     )
+
+
+# --- the context-line genuinely STEERS the judge (item 3: prove it works, not just wired) ---
+@pytest.mark.parametrize("ctx_name,ctx", _FRAMED)
+@pytest.mark.parametrize("msg", CONTEXT_DEPENDENT_APPROVE)
+async def test_soft_affirmation_approves_with_the_framing(msg, ctx_name, ctx):
+    # WITH the surfacing card-line, a soft "that works" in response IS consent → approve.
+    res = await resolve_decision("email_reply", _SEND_ARGS, _SEND_DESC, msg, ctx)
+    assert res.intent == "approve", (
+        f"{msg!r} should read as consent WITH the card-framing (ctx={ctx_name}) — got {res.intent}."
+    )
+
+
+@pytest.mark.parametrize("msg", CONTEXT_DEPENDENT_APPROVE)
+async def test_soft_affirmation_needs_the_framing(msg):
+    # WITHOUT the card-line the SAME reply is NOT a send (it's ambiguous) — proving the
+    # framing is what disambiguates it into consent, i.e. _card_context_line is load-bearing.
+    res = await resolve_decision("email_reply", _SEND_ARGS, _SEND_DESC, msg, _NO_CTX)
+    assert res.intent != "approve", (
+        f"{msg!r} approved with NO framing (got {res.intent}) — then the card-line isn't what "
+        f"drives the consent, and this proof is vacuous."
+    )
+
+
+async def test_framing_routes_a_queue_question():
+    # A second, SAFE proof (no send): the card-framing lets the judge route a queue question
+    # correctly. "and the other emails?" → show_others WITH the framing, but a bare new topic
+    # (unrelated) WITHOUT it — the framing supplies the "we're mid-approval" referent.
+    msg = "and the other emails?"
+    framed = await resolve_decision("email_reply", _SEND_ARGS, _SEND_DESC, msg, _PROD_CTX)
+    bare = await resolve_decision("email_reply", _SEND_ARGS, _SEND_DESC, msg, _NO_CTX)
+    assert framed.intent == "show_others", f"framed → {framed.intent} (expected show_others)"
+    assert bare.intent != "show_others", f"bare → {bare.intent} (the framing should be required)"
 
 
 # --- the heads-up DRAFT boundary (the complex-email card) --------------------
