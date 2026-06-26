@@ -13,6 +13,8 @@ const FIELD_LABELS: Record<string, string> = {
   cc: "Cc",
   bcc: "Bcc",
   subject: "Subject",
+  original: "Replying to", // the original inbound email being replied to
+  original_email: "Replying to",
   body: "Body",
   summary: "Title",
   title: "Title",
@@ -64,7 +66,16 @@ export function ApprovalCard({
   // Render off kind: an email reply reads as "Email reply", a tool as its name.
   // (kind is carried by queue cards; inferred from tool_name otherwise.)
   const kind = approval.kind ?? (tool_name === "email_reply" ? "email" : "tool");
-  const actionLabel = kind === "email" ? "Email reply" : tool_name;
+  // A COMPLEX-email heads-up: no draft yet — render the email + "Draft it"/"Leave it",
+  // so approving DRAFTS (it re-queues a normal card to approve-to-send), not sends.
+  const needsDrafting = !!approval.needs_drafting;
+  const actionLabel = needsDrafting ? "Email — needs drafting" : kind === "email" ? "Email reply" : tool_name;
+  const approveLabel = needsDrafting ? "Draft it" : "Approve";
+  const rejectLabel = needsDrafting ? "Leave it" : "Reject";
+  const badge = needsDrafting ? "✎ Draft" : "⚠ Approve";
+  const helper = needsDrafting
+    ? "…or say the word and I'll draft it."
+    : "…or just tell me what to change.";
   const entries = Object.entries(tool_args ?? {}).filter(([, v]) => !isEmptyValue(v));
   const showCount = !resolved && queueCount > 1; // "1 of N" only on the live card
 
@@ -84,7 +95,7 @@ export function ApprovalCard({
               : "border-amber/40 bg-amber/10 text-amber"
           }`}
         >
-          {greyed ? "•" : "⚠ Approve"} · {actionLabel}
+          {greyed ? "•" : badge} · {actionLabel}
         </span>
         {resolved ? (
           <span
@@ -138,14 +149,14 @@ export function ApprovalCard({
               onClick={() => onDecide(true)}
               className="rounded-lg border border-ok/50 bg-ok/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-ok transition hover:bg-ok/20 disabled:opacity-50"
             >
-              {resolving ? "…" : "Approve"}
+              {resolving ? "…" : approveLabel}
             </button>
             <button
               disabled={resolving}
               onClick={() => onDecide(false)}
               className="rounded-lg border border-danger/50 bg-danger/10 px-4 py-1.5 font-mono text-sm uppercase tracking-widest text-danger transition hover:bg-danger/20 disabled:opacity-50"
             >
-              {resolving ? "…" : "Reject"}
+              {resolving ? "…" : rejectLabel}
             </button>
             {onSkip && (
               <button
@@ -159,7 +170,7 @@ export function ApprovalCard({
             )}
           </div>
           <p className="mt-2 text-xs text-ink-dim">
-            {resolving ? "Working on it…" : "…or just tell me what to change."}
+            {resolving ? "Working on it…" : helper}
           </p>
         </>
       )}

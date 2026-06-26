@@ -32,6 +32,9 @@ export interface ApprovalRequest {
   description?: string;
   status: ApprovalStatus;
   kind?: ApprovalKind; // present for queue/poll-surfaced cards; inferred otherwise
+  // A COMPLEX inbound email shown as a heads-up (no draft yet) — the card renders the
+  // email + "say go and I'll draft it" and "Draft it"/"Leave it" instead of Approve/Send.
+  needs_drafting?: boolean;
 }
 
 /** An in-chat document upload (A3), shown live in the timeline. Transient

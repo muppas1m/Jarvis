@@ -104,6 +104,7 @@ function approvalFromInterrupt(raw: unknown): ApprovalRequest | null {
     description: typeof c.description === "string" ? c.description : undefined,
     status: "pending",
     kind: inferKind(toolName), // a 3B present-in-moment card carries no kind; infer it
+    needs_drafting: c.needs_drafting === true,
   };
 }
 

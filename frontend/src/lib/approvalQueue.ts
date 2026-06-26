@@ -21,6 +21,7 @@ export interface UnifiedApprovalCard {
   description?: string;
   status: string;
   created_at: string;
+  needs_drafting?: boolean; // complex-email heads-up (no draft yet) — "say go to draft"
 }
 
 export interface ApprovalQueueResponse {
@@ -56,6 +57,7 @@ export function cardToApproval(c: UnifiedApprovalCard): ApprovalRequest {
     description: c.description,
     status: "pending",
     kind: c.kind,
+    needs_drafting: c.needs_drafting,
   };
 }
 
@@ -64,6 +66,12 @@ export function cardToApproval(c: UnifiedApprovalCard): ApprovalRequest {
  *  card surfaced this session. */
 export function leadInFor(card: UnifiedApprovalCard, first: boolean): string {
   if (card.kind === "email") {
+    if (card.needs_drafting) {
+      // Complex — not drafted yet; heads-up + the "say go" affordance.
+      return first
+        ? "You've got a bigger one here, Sir — say the word and I'll draft it."
+        : "Here's another bigger one, Sir — say the word and I'll draft it.";
+    }
     return first
       ? "I've drafted a reply for your approval, Sir."
       : "Here's another I've drafted, Sir…";
