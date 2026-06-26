@@ -236,7 +236,10 @@ class TelegramChannel(Channel):
         # then replace the buttons with a neutral "working" state. The CONFIRMATION is
         # rendered from the dispatch OUTCOME (not optimistically) — a needs_drafting card
         # approves into a DRAFT, not a send, so "Approved." would lie.
-        await query.answer()
+        try:
+            await query.answer()  # a >15-min-stale callback raises here — must NOT abort the rest
+        except TelegramError as exc:
+            logger.debug("telegram_callback_answer_failed", error=str(exc))
         await self._edit_callback(query, "⏳ Working…")
 
         # Dispatch + render the accurate outcome. A failure here must STILL confirm —

@@ -128,3 +128,19 @@ async def test_malformed_callback_is_ignored_no_edit(monkeypatch):
 
     spy.assert_not_awaited()
     q.edit_message_text.assert_not_awaited()
+
+
+async def test_stale_answer_does_not_abort_feedback(monkeypatch):
+    # A >15-min-stale callback: query.answer() raises (Telegram invalidated the token), but the
+    # master must STILL get feedback — the guard swallows it so the Working edit + dispatch run.
+    ch, q = _make_channel(), _fake_query("approve")
+    q.answer = AsyncMock(side_effect=BadRequest("Query is too old and response timeout expired"))
+    outcome = ApprovalDispatchOutcome(kind="tool", status="executed", detail="ok", success=True)
+    monkeypatch.setattr("app.agent.approval_dispatch.resolve_and_dispatch", AsyncMock(return_value=outcome))
+    monkeypatch.setattr("app.agent.approval_dispatch.alert_text_for", lambda o: None)
+
+    await ch._handle_approval_callback(q)  # must NOT raise despite answer() failing
+
+    texts = _edit_texts(q)
+    assert texts[0] == "⏳ Working…"     # feedback landed despite the stale answer()
+    assert texts[-1] == "✅ Approved."   # and the accurate outcome followed
