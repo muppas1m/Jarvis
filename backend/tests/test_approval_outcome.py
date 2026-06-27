@@ -83,7 +83,7 @@ async def test_failed_email_send_is_durable_visible_and_readable(real_checkpoint
     })
     try:
         # the send FAILS at dispatch (mock the guarded execution → success=False).
-        fail = SimpleNamespace(success=False, content="[ERROR] invalid recipient: 'not-an-email'")
+        fail = SimpleNamespace(success=False, content="[ERROR] invalid recipient: 'not-an-email'", uncertain=False)
         with patch("app.agent.nodes.execute_tool_guarded", AsyncMock(return_value=fail)):
             outcome = await resolve_and_dispatch(aid, "approve", "web", {"approved": True})
         assert outcome.kind == "tool" and outcome.success is False
@@ -118,7 +118,7 @@ async def test_successful_calendar_create_is_durable_visible_and_readable(real_c
         "tool_args": {"summary": "Standup", "start_iso": "2026-06-28T09:00"},
     })
     try:
-        ok = SimpleNamespace(success=True, content="Calendar event 'Standup' created: https://cal/x")
+        ok = SimpleNamespace(success=True, content="Calendar event 'Standup' created: https://cal/x", uncertain=False)
         with patch("app.agent.nodes.execute_tool_guarded", AsyncMock(return_value=ok)):
             outcome = await resolve_and_dispatch(aid, "approve", "web", {"approved": True})
         assert outcome.success is True

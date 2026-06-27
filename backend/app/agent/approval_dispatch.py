@@ -59,6 +59,9 @@ class ApprovalDispatchOutcome:
     status: str  # tool: DispatchStatus ; email: EmailApprovalOutcome.status ; draft_request: drafted|left|draft_failed
     detail: str = ""  # the tool result string / a short rendered detail
     success: bool = False
+    # A chat-tool send that hit EmailSendUncertain — could NOT be confirmed (success is not a
+    # bool here). Distinct from success/failure → rendered ⚠️ unconfirmed, never a clean ✅.
+    uncertain: bool = False
     thread_id: str = ""
     email_outcome: EmailApprovalOutcome | None = None
 
@@ -106,6 +109,9 @@ def _terminal_outcome(outcome: ApprovalDispatchOutcome) -> tuple[str, str] | Non
     executions to record. ``executed`` = the action succeeded; ``failed`` = it didn't."""
     if outcome.kind == "tool":
         if outcome.status == "executed":
+            if outcome.uncertain:  # EmailSendUncertain — chat path parity with the inbound path
+                return ("unconfirmed",
+                        _clean_detail(outcome.detail) or "The send couldn't be confirmed — it may have gone out.")
             return ("executed" if outcome.success else "failed", _clean_detail(outcome.detail))
         if outcome.status == "blocked":
             return ("failed", "That action isn't permitted.")
@@ -223,6 +229,8 @@ def alert_text_for(outcome: ApprovalDispatchOutcome) -> str | None:
         return outcome.detail or None  # "drafted / left / couldn't draft"
     if outcome.kind == "tool":
         if outcome.status == "executed":
+            if outcome.uncertain:
+                return f"⚠️ {outcome.detail}"
             return outcome.detail if outcome.success else f"❌ {outcome.detail}"
         if outcome.status == "blocked":
             return "❌ That action isn't permitted."
@@ -303,5 +311,5 @@ async def dispatch_approval(approval_id: str, decision: dict[str, Any]) -> Appro
     )
     return ApprovalDispatchOutcome(
         kind="tool", status="executed", detail=exec_result.content,
-        success=exec_result.success, thread_id=row.thread_id,
+        success=exec_result.success, uncertain=exec_result.uncertain, thread_id=row.thread_id,
     )

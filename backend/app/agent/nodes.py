@@ -309,12 +309,18 @@ async def agent_node(state: AgentState) -> dict:
 class ToolExecResult:
     """Outcome of one guarded tool execution — the sanitized result string plus
     success/error/latency. The graph node wraps ``content`` in a ToolMessage; the
-    out-of-band execute-on-approve dispatcher (Phase 3) renders it for the master."""
+    out-of-band execute-on-approve dispatcher (Phase 3) renders it for the master.
+
+    ``uncertain`` is the THIRD outcome (success is not a bool here): a send that hit
+    ``EmailSendUncertain`` — could NOT be confirmed (timeout / 5xx, may already have gone
+    out). success=False + uncertain=True so the outcome reads "may have sent — couldn't
+    confirm" (⚠️), never a clean ✅ and never a definite ❌."""
 
     content: str
     success: bool
     error: str | None
     latency_ms: int
+    uncertain: bool = False
 
 
 async def execute_tool_guarded(
@@ -338,13 +344,24 @@ async def execute_tool_guarded(
     execute of a single master-approved action is exempt by design (Phase 3
     rate-limit split)."""
     from app.agent.tools.registry import tool_registry
+    from app.email.provider.base import EmailSendUncertain
     from app.messaging.failure_alerter import notify_tool_executed
 
     dispatch_start = time.monotonic()
+    uncertain = False
     try:
         raw_result = await tool_registry.execute(tool_name, tool_args)
         success = True
         err: str | None = None
+    except EmailSendUncertain as exc:
+        # The send could NOT be confirmed (timeout / 5xx — may already have gone out). The
+        # THIRD outcome: not a clean success, not a definite failure. The tool carries the
+        # honest, recipient-specific wording on the exception.
+        logger.warning("tool_send_uncertain", tool=tool_name)
+        raw_result = str(exc)
+        success = False
+        uncertain = True
+        err = None
     except RateLimitedError as exc:
         logger.warning("tool_rate_limited", tool=tool_name, error=str(exc))
         raw_result = f"[RATE-LIMITED] Hit hourly cap on `{tool_name}`. Try again later. ({exc})"
@@ -401,7 +418,9 @@ async def execute_tool_guarded(
     except Exception as exc:  # noqa: BLE001 — never drop the result (P1 orphan guard)
         logger.error("tool_post_execute_failed", tool=tool_name, error=str(exc))
 
-    return ToolExecResult(content=content, success=success, error=err, latency_ms=latency_ms)
+    return ToolExecResult(
+        content=content, success=success, error=err, latency_ms=latency_ms, uncertain=uncertain
+    )
 
 
 # The result handed back to the agent when an APPROVE-tier tool is QUEUED (Phase
