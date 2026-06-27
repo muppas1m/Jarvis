@@ -7,6 +7,7 @@ import {
   inferKind,
   leadInFor,
   markSkipped,
+  normalizeApprovalStatus,
   selectNextCard,
   type UnifiedApprovalCard,
 } from "./approvalQueue";
@@ -56,12 +57,6 @@ interface DecideEnvelope {
   interrupt?: unknown;
 }
 
-function normalizeStatus(s?: string): ApprovalStatus {
-  if (s === "approved") return "approved";
-  if (s === "rejected") return "rejected";
-  if (s === "discarded" || s === "expired") return "discarded";
-  return "pending";
-}
 
 /** GET /api/chat/history `items` → renderable StreamItem[]. */
 function itemsFromHistory(raw: BackendItem[]): StreamItem[] {
@@ -75,7 +70,7 @@ function itemsFromHistory(raw: BackendItem[]): StreamItem[] {
             tool_name: it.tool_name ?? "action",
             tool_args: it.tool_args ?? {},
             description: it.description,
-            status: normalizeStatus(it.status),
+            status: normalizeApprovalStatus(it.status),
             kind: inferKind(it.tool_name ?? "action"),
           },
         }
@@ -409,7 +404,7 @@ export function useJarvis() {
                 setItems((m) =>
                   m.map((x) =>
                     x.type === "decision" && x.approval.approval_id === approval_id
-                      ? { ...x, approval: { ...x.approval, status: normalizeStatus(status) } }
+                      ? { ...x, approval: { ...x.approval, status: normalizeApprovalStatus(status) } }
                       : x,
                   ),
                 );

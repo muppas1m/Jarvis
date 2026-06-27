@@ -18,7 +18,12 @@ export type ApprovalStatus =
   | "approved"
   | "rejected"
   | "discarded" // superseded by an edit — kept in the stream, greyed
-  | "skipped"; // deferred "not now" (session-local, DB-inert) — greyed; reappears on reload
+  | "skipped" // deferred "not now" (session-local, DB-inert) — greyed; reappears on reload
+  // Terminal OUTCOME states (post-dispatch) — a resolved/failed action must render as a
+  // resolved badge with NO buttons, so a reload can't surface it as a live re-approvable card.
+  | "executed" // the approved action ran (✅ Sent / Done)
+  | "failed" // the approved action failed (❌)
+  | "unconfirmed"; // the send couldn't be confirmed (⚠️ may have sent)
 
 /** Which origin a card came from. "email" = an inbound auto-drafted reply;
  *  "tool" = a chat-queued APPROVE-tier tool call. The backend's UnifiedApprovalCard

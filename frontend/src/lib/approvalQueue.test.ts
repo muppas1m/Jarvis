@@ -141,3 +141,38 @@ test("skip never resolves: a skipped card is not approved/rejected, just deferre
   assert.notEqual(a.type === "decision" && a.approval.status, "approved");
   assert.notEqual(a.type === "decision" && a.approval.status, "rejected");
 });
+
+// --- #2: terminal outcome states reload as resolved badges, never live cards ---------------
+import {
+  isResolvedStatus,
+  normalizeApprovalStatus,
+  resolvedBadge,
+} from "./approvalQueue";
+
+test("normalizeApprovalStatus — terminal outcome states map THROUGH, never to pending", () => {
+  // THE reload bug: executed/failed/unconfirmed previously dropped to "pending" → a sent/failed
+  // action came back as a live Approve/Reject card.
+  assert.equal(normalizeApprovalStatus("executed"), "executed");
+  assert.equal(normalizeApprovalStatus("failed"), "failed");
+  assert.equal(normalizeApprovalStatus("unconfirmed"), "unconfirmed");
+  // decision states unchanged; expiry → discarded; unknown → pending
+  assert.equal(normalizeApprovalStatus("approved"), "approved");
+  assert.equal(normalizeApprovalStatus("expired"), "discarded");
+  assert.equal(normalizeApprovalStatus(undefined), "pending");
+});
+
+test("isResolvedStatus — terminal states are resolved (no Approve/Reject buttons)", () => {
+  for (const s of ["executed", "failed", "unconfirmed", "approved", "rejected", "discarded", "skipped"] as const) {
+    assert.equal(isResolvedStatus(s), true, `${s} must be resolved`);
+  }
+  assert.equal(isResolvedStatus("pending"), false);
+  assert.equal(isResolvedStatus("resolving"), false);
+});
+
+test("resolvedBadge — a failed send reads ❌ Failed; executed is kind-aware; uncertain is ⚠️", () => {
+  // The master's reload self-test: a failed send shows ❌ (and, via isResolvedStatus, no buttons).
+  assert.deepEqual(resolvedBadge("failed", "email"), { text: "❌ Failed", cls: "text-danger" });
+  assert.equal(resolvedBadge("executed", "email").text, "✅ Sent"); // email → Sent
+  assert.equal(resolvedBadge("executed", "tool").text, "✅ Done"); //  tool  → Done
+  assert.equal(resolvedBadge("unconfirmed", "email").text, "⚠️ Unconfirmed");
+});

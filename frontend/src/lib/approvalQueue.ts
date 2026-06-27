@@ -1,4 +1,4 @@
-import type { ApprovalKind, ApprovalRequest, StreamItem } from "./types";
+import type { ApprovalKind, ApprovalRequest, ApprovalStatus, StreamItem } from "./types";
 
 /**
  * The unified approval queue (3C) — consuming GET /api/approvals/queue.
@@ -86,6 +86,64 @@ export function leadInFor(card: UnifiedApprovalCard, first: boolean): string {
  *  "email_reply"; everything else is a tool. */
 export function inferKind(toolName: string): ApprovalKind {
   return toolName === "email_reply" ? "email" : "tool";
+}
+
+/** Normalize a backend approval status → the frontend ApprovalStatus. The terminal OUTCOME
+ *  states (executed/failed/unconfirmed) map THROUGH, never to "pending" — so a reload renders
+ *  a sent/failed/unconfirmed action as a resolved badge, never a live re-approvable card
+ *  (re-approving a resolved row 404s at the backend claim-gate; this closes the UX gap). */
+export function normalizeApprovalStatus(s?: string): ApprovalStatus {
+  switch (s) {
+    case "approved":
+      return "approved";
+    case "rejected":
+      return "rejected";
+    case "discarded":
+    case "expired":
+      return "discarded";
+    case "executed":
+      return "executed";
+    case "failed":
+      return "failed";
+    case "unconfirmed":
+      return "unconfirmed";
+    default:
+      return "pending";
+  }
+}
+
+/** A card with a decision OR a terminal outcome → render resolved, NO Approve/Reject buttons. */
+export function isResolvedStatus(status: ApprovalStatus): boolean {
+  return (
+    status === "approved" ||
+    status === "rejected" ||
+    status === "discarded" ||
+    status === "skipped" ||
+    status === "executed" ||
+    status === "failed" ||
+    status === "unconfirmed"
+  );
+}
+
+/** The resolved-state badge (text + colour). executed is kind-aware ("Sent" for an email,
+ *  "Done" for any other action); failed → ❌, unconfirmed → ⚠️. */
+export function resolvedBadge(status: ApprovalStatus, kind: ApprovalKind): { text: string; cls: string } {
+  switch (status) {
+    case "approved":
+      return { text: "Approved ✓", cls: "text-ok" };
+    case "rejected":
+      return { text: "Rejected ✗", cls: "text-danger" };
+    case "executed":
+      return { text: kind === "email" ? "✅ Sent" : "✅ Done", cls: "text-ok" };
+    case "failed":
+      return { text: "❌ Failed", cls: "text-danger" };
+    case "unconfirmed":
+      return { text: "⚠️ Unconfirmed", cls: "text-amber" };
+    case "skipped":
+      return { text: "Skipped — still awaiting", cls: "text-ink-dim" };
+    default: // discarded
+      return { text: "Discarded — superseded", cls: "text-ink-dim" };
+  }
 }
 
 /** The card's button + helper copy. A COMPLEX-email heads-up (no draft yet) approves

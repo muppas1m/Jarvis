@@ -1,7 +1,7 @@
 "use client";
 
-import { cardButtonLabels } from "@/lib/approvalQueue";
-import type { ApprovalRequest } from "@/lib/types";
+import { cardButtonLabels, isResolvedStatus, resolvedBadge } from "@/lib/approvalQueue";
+import type { ApprovalKind, ApprovalRequest } from "@/lib/types";
 
 /**
  * Inline approval card (A2a). Renders the REAL structured action from
@@ -63,10 +63,12 @@ export function ApprovalCard({
   const discarded = status === "discarded";
   const skipped = status === "skipped";
   const greyed = discarded || skipped; // deferred/superseded — muted, no actions
-  const resolved = status === "approved" || status === "rejected" || greyed;
+  // A decision OR a terminal outcome → resolved, NO buttons. A sent/failed action must never
+  // render as actionable (the backend claim-gate already 404s a re-approve; this closes the UX).
+  const resolved = isResolvedStatus(status);
   // Render off kind: an email reply reads as "Email reply", a tool as its name.
   // (kind is carried by queue cards; inferred from tool_name otherwise.)
-  const kind = approval.kind ?? (tool_name === "email_reply" ? "email" : "tool");
+  const kind: ApprovalKind = approval.kind ?? (tool_name === "email_reply" ? "email" : "tool");
   // A COMPLEX-email heads-up: no draft yet — render the email + "Draft it"/"Leave it",
   // so approving DRAFTS (it re-queues a normal card to approve-to-send), not sends.
   const needsDrafting = !!approval.needs_drafting;
@@ -94,22 +96,8 @@ export function ApprovalCard({
           {greyed ? "•" : badge} · {actionLabel}
         </span>
         {resolved ? (
-          <span
-            className={`font-mono text-xs uppercase tracking-wider ${
-              status === "approved"
-                ? "text-ok"
-                : status === "rejected"
-                  ? "text-danger"
-                  : "text-ink-dim"
-            }`}
-          >
-            {status === "approved"
-              ? "Approved ✓"
-              : status === "rejected"
-                ? "Rejected ✗"
-                : skipped
-                  ? "Skipped — still awaiting"
-                  : "Discarded — superseded"}
+          <span className={`font-mono text-xs uppercase tracking-wider ${resolvedBadge(status, kind).cls}`}>
+            {resolvedBadge(status, kind).text}
           </span>
         ) : (
           showCount && (
