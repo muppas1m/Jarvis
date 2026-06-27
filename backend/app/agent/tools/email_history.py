@@ -350,15 +350,18 @@ def register() -> None:
         handler=email_history_search,
         description=(
             "Search the master's email history — what messages came in, who "
-            "sent them, were they replied to, what's pending. "
+            "sent them, were they replied to, which are still awaiting a reply. "
             "Does NOT search conversation memory; use memory_search for that. "
+            "Does NOT show pending approvals or drafts awaiting your yes/no — for "
+            "those (incl. 'what are the pending draft emails', 'what's pending') use "
+            "approvals_pending. "
             "Use for: 'what emails came in', 'any messages from X', 'did the "
-            "email from Y get answered', 'what's still pending reply', 'what's "
+            "email from Y get answered', 'which emails still need a reply', 'what's "
             "urgent today'. Filter by urgency (immediate/today/this_week/none) to "
             "answer 'what urgent emails came in'. "
             "Returns a grouped summary by classification (action_required gets "
             "per-item detail with an urgency tag + intent/suggested-action; "
-            "fyi/spam get counts) plus approval status for each pending or sent reply."
+            "fyi/spam get counts) plus the send/reply status of past messages."
         ),
         args_schema=EmailHistorySearchArgs,
     )

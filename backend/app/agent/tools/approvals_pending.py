@@ -42,11 +42,13 @@ def register() -> None:
             "readable text (recipient, subject and a snippet for emails; the action, its "
             "key details and age for others). "
             "Use for: 'what's pending', \"what's in my approval queue\", 'what did you "
-            "draft', 'what did you queue', \"what's waiting on me\", 'show me the "
-            "approvals', 'anything to approve', 'do I have anything to sign off on'. "
+            "draft', 'what are the pending draft emails', 'what did you queue', \"what's "
+            "waiting on me\", 'show me the approvals', 'anything to approve', 'do I have "
+            "anything to sign off on'. "
             "PURE READ — it never sends or approves anything; the master still decides via "
-            "the cards/buttons. Does NOT brief on new emails (use 'briefing') or list "
-            "tasks (use task_list)."
+            "the cards/buttons. Does NOT search past/sent/received emails — for email "
+            "history use email_history_search. Does NOT brief on new emails (use "
+            "'briefing') or list tasks (use task_list)."
         ),
         args_schema=_ApprovalsPendingArgs,
     )
