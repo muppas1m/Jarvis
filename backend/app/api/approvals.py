@@ -24,18 +24,23 @@ loops back to present the next decision.
 """
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
+from app.approvals_service import UnifiedApprovalCard, list_pending_cards, to_unified_card
 from app.db.engine import async_session
 from app.db.models import PendingApproval
-from app.email.approval_handler import EmailApprovalOutcome, is_email_approval
+from app.email.approval_handler import EmailApprovalOutcome
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Back-compat alias — the card mapping now lives in app.approvals_service (the ONE shared
+# read surface). Kept so existing importers (runner, tests) need no churn.
+_unified_card = to_unified_card
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -159,38 +164,6 @@ class DecideRequest(BaseModel):
     )
 
 
-class UnifiedApprovalCard(BaseModel):
-    """One pending approval, normalized across BOTH origins for the unified queue.
-
-    A superset of the frontend's ApprovalRequest (approval_id / tool_name /
-    tool_args / description / status) plus the queue metadata it needs:
-
-      - ``kind`` — "email" (inbound auto-drafted reply) or "tool" (chat-queued
-        APPROVE-tier tool call). The SAME discriminator dispatch uses, so the
-        card's kind always matches how /decide will actually route it.
-      - ``approval_id`` — THE dedup key. A card surfaced in-stream the moment it
-        was queued (3B) and the same card returned by this queue poll carry the
-        identical approval_id, so the consumer presents it exactly once.
-      - ``created_at`` — the stable oldest-first sort key (carried so the consumer
-        can reason about ordering without a second read).
-
-    Origin fields ride in ``tool_args``: an email card is {to, subject, body}
-    (from the row's payload); a tool card is the real tool args. So the existing
-    ApprovalCard renders both with no special-casing."""
-
-    approval_id: str
-    kind: Literal["email", "tool"]
-    thread_id: str
-    tool_name: str
-    tool_args: dict
-    description: str
-    status: str
-    created_at: str
-    # True for a COMPLEX inbound email surfaced as a heads-up (no draft yet) — the card
-    # renders "say go and I'll draft it" + "Draft it"/"Leave it" instead of Approve/Send.
-    needs_drafting: bool = False
-
-
 class ApprovalQueueResponse(BaseModel):
     """The full ordered queue + its size. The list (not just the head) is returned
     so the consumer can show "1 of N", dedup against in-stream cards, and skip/next
@@ -235,47 +208,15 @@ async def list_pending_approvals() -> list[PendingApprovalView]:
     ]
 
 
-def _unified_card(row: PendingApproval) -> UnifiedApprovalCard:
-    """Normalize a PendingApproval row into the unified card. The kind predicate is
-    the SAME compound check dispatch_approval uses (action_type=="email_reply" OR
-    an email-origin thread_id) so a card never claims a kind dispatch would route
-    differently. Origin fields go into tool_args — email → {to, subject, body} from
-    the payload; tool → the real tool args — so the renderer needs no per-kind branch."""
-    payload = row.payload or {}
-    is_email = row.action_type == "email_reply" or is_email_approval(row.thread_id)
-    needs_drafting = bool(payload.get("needs_drafting"))
-    if is_email:
-        tool_name = row.action_type
-        # "original" = the email being replied to (always shown); "body" = the draft
-        # (omitted until drafted, so the card shows just the email + the heads-up).
-        tool_args = {
-            "to": payload.get("sender", ""),
-            "subject": payload.get("subject", ""),
-            "original": payload.get("body", ""),
-        }
-        if not needs_drafting:
-            tool_args["body"] = payload.get("draft", "")
-    else:
-        tool_name = payload.get("tool_name") or row.action_type
-        tool_args = payload.get("tool_args") or {}
-    return UnifiedApprovalCard(
-        approval_id=str(row.id),
-        kind="email" if is_email else "tool",
-        thread_id=row.thread_id,
-        tool_name=tool_name,
-        tool_args=tool_args,
-        description=row.description,
-        status=row.status,
-        created_at=row.created_at.isoformat() if row.created_at else "",
-        needs_drafting=needs_drafting,
-    )
-
-
 @router.get("/queue", response_model=ApprovalQueueResponse)
 async def approval_queue() -> ApprovalQueueResponse:
     """The unified one-at-a-time approval QUEUE over BOTH origins — inbound email
     replies AND chat-queued APPROVE-tier tool calls — oldest-first, pending and
     unexpired, each row normalized to a UnifiedApprovalCard.
+
+    Reads the SHARED ``list_pending_cards()`` (app.approvals_service) — the exact same
+    query + mapping the ``approvals_pending`` agent tool reads, so the HUD and the agent
+    can never drift on what's pending or how a card reads.
 
     PURE READ. It never claims or dispatches anything (resolve_and_dispatch /
     dispatch_approval are untouched), so the cutover's exactly-once and the email
@@ -290,17 +231,7 @@ async def approval_queue() -> ApprovalQueueResponse:
       - approval_id is THE dedup key across both surfaces.
       - The full ordered list + count come back in one read so the consumer does
         "1 of N", dedup, and skip/next without a second call."""
-    now = datetime.now(UTC)
-    async with async_session() as session:
-        result = await session.execute(
-            select(PendingApproval)
-            .where(PendingApproval.status == "pending")
-            .where(PendingApproval.expires_at > now)
-            .order_by(PendingApproval.created_at.asc())
-        )
-        rows = result.scalars().all()
-
-    cards = [_unified_card(row) for row in rows]
+    cards = await list_pending_cards()
     return ApprovalQueueResponse(approvals=cards, count=len(cards))
 
 

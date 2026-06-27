@@ -5,8 +5,9 @@ event), so a present master sees it without waiting for the /approvals/queue pol
 The contract under test:
   - the emitted event carries the SAME approval_id /approvals/queue returns for
     that row (THE dedup key — proven by reading both and asserting equality),
-  - the payload is tool-kind-shaped (tool_name / tool_args / description) so the
-    frontend renders it through the identical path as a polled card,
+  - the payload is the SHARED UnifiedApprovalCard shape (built by the one
+    app.approvals_service.to_unified_card both surfaces use) so the in-stream card
+    and the polled card are byte-identical — they cannot drift,
   - run_turn (no live session) queues the SAME row WITHOUT emitting — its card
     surfaces only via the poll.
 
@@ -105,10 +106,10 @@ async def test_streaming_queue_emits_present_in_moment_card(real_checkpointer, r
         queue = await approval_queue()
         match = next((c for c in queue.approvals if c.approval_id == str(row.id)), None)
         assert match is not None, "the same row must be the dedup target in /approvals/queue"
-        assert match.kind == "tool"
+        assert match.kind == "email"  # a chat-queued email_send is an EMAIL kind (the fix), not "tool"
         assert content["approval_id"] == match.approval_id  # one dedup key, both surfaces
-
-        # tool-kind-shaped payload → renders through the same path as a polled card
+        # The in-stream card IS the shared unified shape → byte-identical to the polled card.
+        assert content["kind"] == "email" == match.kind
         assert content["tool_name"] == "email_send" == match.tool_name
         assert content["tool_args"] == TOOL_ARGS == match.tool_args
         assert content["description"]

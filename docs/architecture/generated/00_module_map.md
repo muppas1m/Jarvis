@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (114 modules)
+## `app/` — the system (116 modules)
 
 ```
 app/
@@ -14,6 +14,7 @@ app/
 │   ├── tools/
 │   │   ├── __init__.py — Tool registration entry point.
 │   │   ├── actionable_tool.py — Actionable-memory tools (Phase 4.1) — the master's task list.
+│   │   ├── approvals_pending.py — approvals_pending — the agent's read of the approval queue (Phase 4).
 │   │   ├── briefing_tool.py — Briefing scope behaviors + the conversational tool (Phase 5.2).
 │   │   ├── builtin_memory.py — memory_search — built-in tool, always loaded.
 │   │   ├── calendar_tool.py — Google Calendar tool — read, create, update, delete events (+ conflict check).
@@ -138,6 +139,7 @@ app/
 │   ├── tts.py — Streaming TTS — provider-pluggable, sentence-at-a-time.
 │   └── wakeword.py — Server-side wake-word — openWakeWord "hey jarvis" (Phase 4.2).
 ├── __init__.py — —
+├── approvals_service.py — ONE shared read surface for pending approvals — so the HUD and the agent can't drift.
 ├── briefing.py — Read-state briefing engine (Phase 5.1) — the foundation.
 ├── config.py — Settings — single source of truth for runtime configuration.
 └── main.py — FastAPI app factory + lifespan.

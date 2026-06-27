@@ -551,16 +551,15 @@ async def _queued_approval_event(thread_id: str, message: Any) -> dict[str, Any]
     if row is None:
         return None
 
-    payload = row.payload or {}
+    # Shape the in-stream card through the SHARED mapping (app.approvals_service) so it's
+    # byte-identical to the /approvals/queue card — same kind / tool_args / fields. The two
+    # surfaces literally can't drift because they're built by the one function.
+    from app.approvals_service import to_unified_card
+
     return {
         "type": "approval_required",
         "thread_id": thread_id,
-        "content": {
-            "approval_id": str(row.id),
-            "tool_name": payload.get("tool_name") or row.action_type,
-            "tool_args": payload.get("tool_args") or {},
-            "description": row.description,
-        },
+        "content": to_unified_card(row).model_dump(),
     }
 
 
@@ -792,55 +791,29 @@ def _email_outcome_speech(outcome: Any) -> str:
 
 
 def _summarize_pending(rows: list, exclude_approval_id: str, h: str) -> str:
-    """Pure: a spoken/typed summary of the OTHER pending approvals (rows minus the
-    presented card). Kind-agnostic — an email card → "a reply to <sender> about
-    <subject>"; a tool card → the tool, humanized. Bounded to 5 items + "and N more"
-    so the spoken line stays digestible; only-the-presented-one → the single-card
-    line. Pure (rows in, string out) so the formatting is testable without the DB."""
-    from app.api.approvals import _unified_card
+    """Pure: the spoken/typed summary of the OTHER pending approvals (rows minus the
+    presented card), via the SHARED renderer (app.approvals_service.summarize_others) so
+    it agrees with the approvals_pending tool + the HUD and never prints a bare tool name
+    (the "email send; email send" garble). Rows in / string out — testable without the DB."""
+    from app.approvals_service import summarize_others, to_unified_card
 
-    others = [r for r in rows if str(r.id) != exclude_approval_id]
-    if not others:
-        return f"That's the only one pending, {h}."
-
-    descriptions: list[str] = []
-    for r in others[:5]:
-        card = _unified_card(r)
-        if card.kind == "email":
-            to = card.tool_args.get("to") or "someone"
-            subj = card.tool_args.get("subject")
-            descriptions.append(f"a reply to {to}" + (f" about '{subj}'" if subj else ""))
-        else:
-            descriptions.append(card.tool_name.replace("_", " "))
-    n = len(others)
-    more = f", and {n - 5} more" if n > 5 else ""
-    count = "one" if n == 1 else str(n)
-    plural = "" if n == 1 else "s"
-    return f"You have {count} other{plural} pending, {h}: {'; '.join(descriptions)}{more}."
+    cards = [to_unified_card(r) for r in rows]
+    return summarize_others(cards, exclude_approval_id, h)
 
 
 async def _pending_queue_summary(exclude_approval_id: str = "") -> str:
-    """The voice/text answer to "what else is pending?" — reads the pending+unexpired
-    queue (oldest-first) and formats it via the pure ``_summarize_pending``. A read
-    failure → a graceful vague line (never errors the turn)."""
-    from sqlalchemy import select
-
-    from app.db.engine import async_session
-    from app.db.models import PendingApproval
+    """The voice/text answer to "what else is pending?" — reads the SHARED
+    ``list_pending_cards()`` (the same source the tool + HUD read) and formats via the
+    pure ``summarize_others``. A read failure → a graceful vague line (never errors)."""
+    from app.approvals_service import list_pending_cards, summarize_others
 
     h = settings.MASTER_HONORIFIC
     try:
-        async with async_session() as session:
-            rows = list((await session.execute(
-                select(PendingApproval)
-                .where(PendingApproval.status == "pending")
-                .where(PendingApproval.expires_at > datetime.now(UTC))
-                .order_by(PendingApproval.created_at.asc())
-            )).scalars().all())
+        cards = await list_pending_cards()
     except Exception as exc:  # noqa: BLE001 — a read failure → a graceful, vague line
         logger.warning("pending_queue_summary_failed", error=str(exc))
         return f"I couldn't check the rest of the queue just now, {h}."
-    return _summarize_pending(rows, exclude_approval_id, h)
+    return summarize_others(cards, exclude_approval_id, h)
 
 
 async def _recent_context(thread_id: str, k: int = 6) -> str:
@@ -1139,13 +1112,11 @@ async def _requeue_revised_email(row: Any, revised_draft: str) -> dict[str, Any]
         session.add(approval)
         await session.commit()
         await session.refresh(approval)
-        new_id = str(approval.id)
-    return {
-        "approval_id": new_id,
-        "tool_name": "email_reply",
-        "tool_args": {"to": sender, "subject": subject, "body": revised_draft},
-        "description": description,
-    }
+    # Same SHARED mapping as the queue / present-in-moment card → identical UnifiedApprovalCard
+    # shape (kind="email", incl. the quoted original), so the revised card can't drift either.
+    from app.approvals_service import to_unified_card
+
+    return to_unified_card(approval).model_dump()
 
 
 async def _persist_edit_to_conversation(thread_id: str, message: str) -> None:
