@@ -377,4 +377,5 @@ def register() -> None:
             "fyi/spam get counts) plus the send/reply status of past messages."
         ),
         args_schema=EmailHistorySearchArgs,
+        capability="Search your email history — who wrote, what came in, what's still awaiting a reply (already-processed mail).",
     )

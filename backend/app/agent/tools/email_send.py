@@ -136,4 +136,5 @@ def register() -> None:
             "missing fact, chiefly the recipient's email address if you don't have it."
         ),
         args_schema=EmailSendArgs,
+        capability="Compose and send an email (pauses for your approval).",
     )

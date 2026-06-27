@@ -207,6 +207,7 @@ def register() -> None:
             "Does NOT check tasks/calendar/approvals (use readiness_check for 'am I all set')."
         ),
         args_schema=_BriefingArgs,
+        capability="Brief you on what's new (FYI emails today; news later).",
     )
     tool_registry.register(
         name="deliver_briefing",

@@ -62,4 +62,5 @@ def register() -> None:
             "'briefing') or list tasks (use task_list)."
         ),
         args_schema=_ApprovalsPendingArgs,
+        capability="Tell you what's awaiting your approval and what happened to actions you approved.",
     )

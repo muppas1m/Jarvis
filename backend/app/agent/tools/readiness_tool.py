@@ -295,4 +295,5 @@ def register() -> None:
             "looking'. Does NOT add tasks (use task_add) or read raw calendar (calendar_read)."
         ),
         args_schema=_ReadinessArgs,
+        capability="Tell you whether you're all set — the tasks, emails, and events needing your attention.",
     )

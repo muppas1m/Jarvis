@@ -426,6 +426,7 @@ def register():
             "Returns a flat list (title, start→end, location, attendees, event_id)."
         ),
         args_schema=CalendarReadArgs,
+        capability="Check your calendar and schedule.",
     )
     tool_registry.register(
         name="calendar_create",
@@ -442,6 +443,7 @@ def register():
             "'book a dentist appointment Friday morning'."
         ),
         args_schema=CalendarCreateArgs,
+        capability="Add a calendar event (pauses for your approval).",
     )
     tool_registry.register(
         name="calendar_update",
@@ -456,6 +458,7 @@ def register():
             "duplicate). Times are ISO-8601 with a timezone offset."
         ),
         args_schema=CalendarUpdateArgs,
+        capability="Reschedule or rename a calendar event (pauses for your approval).",
     )
     tool_registry.register(
         name="calendar_delete",
@@ -467,4 +470,5 @@ def register():
             "appointment', 'delete the duplicate Gym event'."
         ),
         args_schema=CalendarDeleteArgs,
+        capability="Delete a calendar event (pauses for your approval).",
     )

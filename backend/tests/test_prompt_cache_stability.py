@@ -23,9 +23,9 @@ If either contract breaks, every prompt cache hit becomes a miss and our
 LLM bill goes up significantly. The test is the canary.
 """
 from app.agent.prompts import (
-    CAPABILITIES_BLOCK,
     IDENTITY_BLOCK,
     SAFETY_DOCTRINE,
+    build_capabilities,
     build_system_prompt,
 )
 
@@ -164,11 +164,13 @@ def test_prefix_contains_identity_and_safety_blocks_verbatim() -> None:
     )
     assert IDENTITY_BLOCK.strip() in prompt
     assert SAFETY_DOCTRINE.strip() in prompt
-    # CAPABILITIES_BLOCK (P5a) is a static prefix member — it must appear
-    # verbatim and sit inside the cached prefix (before the volatile suffix).
-    assert CAPABILITIES_BLOCK.strip() in prompt
+    # The capabilities block (now registry-DERIVED via build_capabilities, #1) is a stable
+    # prefix member — deterministic (registration order is fixed) so it must appear verbatim
+    # and sit inside the cached prefix (before the volatile suffix).
+    capabilities = build_capabilities()
+    assert capabilities.strip() in prompt
     prefix, _ = _split_prefix_suffix(prompt)
-    assert CAPABILITIES_BLOCK.strip() in prefix, (
-        "CAPABILITIES_BLOCK must be in the STABLE PREFIX (before <on_demand>), "
+    assert capabilities.strip() in prefix, (
+        "the capabilities block must be in the STABLE PREFIX (before <on_demand>), "
         "else it won't be cached and will re-bill every turn."
     )

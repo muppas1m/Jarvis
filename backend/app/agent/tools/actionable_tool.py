@@ -143,6 +143,7 @@ def register() -> None:
             "'don't let me forget W'."
         ),
         args_schema=_TaskAddArgs,
+        capability="Add a task to your to-do list.",
     )
     tool_registry.register(
         name="task_list",
@@ -156,6 +157,7 @@ def register() -> None:
             "do about X', 'my open tasks', 'anything outstanding'."
         ),
         args_schema=_TaskListArgs,
+        capability="List your tasks and what needs doing.",
     )
     tool_registry.register(
         name="task_complete",
@@ -166,6 +168,7 @@ def register() -> None:
             "Use for: 'I did X', 'finished Y', 'X is done', 'completed Z'."
         ),
         args_schema=_TaskRefArgs,
+        capability="Mark a task done.",
     )
     tool_registry.register(
         name="task_drop",
@@ -176,6 +179,7 @@ def register() -> None:
             "Use for: 'forget about X', 'cancel Y', 'never mind Z', 'drop W'."
         ),
         args_schema=_TaskRefArgs,
+        capability="Drop a task from your list.",
     )
 
 

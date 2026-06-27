@@ -56,4 +56,5 @@ def register() -> None:
         ),
         args_schema=MemorySearchArgs,
         always_loaded=True,
+        capability="Recall facts from your memory and past conversations.",
     )

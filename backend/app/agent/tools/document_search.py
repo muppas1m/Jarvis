@@ -162,4 +162,5 @@ def register() -> None:
             "because you found related content elsewhere."
         ),
         args_schema=DocumentSearchArgs,
+        capability="Answer questions about your uploaded documents (PDFs, Word/Excel, notes) and cite the source file.",
     )

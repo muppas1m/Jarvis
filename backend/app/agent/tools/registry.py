@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 
 
 class _ToolEntry:
-    __slots__ = ("name", "tool", "always_loaded", "description")
+    __slots__ = ("name", "tool", "always_loaded", "description", "capability")
 
     def __init__(
         self,
@@ -51,11 +51,17 @@ class _ToolEntry:
         tool: BaseTool,
         always_loaded: bool,
         description: str,
+        capability: str = "",
     ) -> None:
         self.name = name
         self.tool = tool
         self.always_loaded = always_loaded
         self.description = description
+        # Master-facing one-line capability summary for the prompt's "You CAN" recital
+        # (distinct from `description`, which is LLM tool-ROUTING text). Empty = internal
+        # tool, excluded from the recital. The registry is the source of truth → the recital
+        # can't drift out of sync with the actual tools.
+        self.capability = capability
 
 
 class ToolRegistry:
@@ -74,9 +80,14 @@ class ToolRegistry:
         description: str,
         args_schema: type[BaseModel] | None = None,
         always_loaded: bool = False,
+        capability: str = "",
     ) -> None:
         """Register a tool. `handler` may be sync or async — StructuredTool
-        supports both via `func=` vs `coroutine=`."""
+        supports both via `func=` vs `coroutine=`.
+
+        `capability` is an OPTIONAL master-facing one-liner for the system prompt's "You CAN"
+        recital (see build_capabilities). Omit it for internal/signal tools (deliver_briefing)
+        so they don't appear as a master-visible capability."""
         if inspect.iscoroutinefunction(handler):
             tool = StructuredTool.from_function(
                 coroutine=handler,
@@ -97,8 +108,16 @@ class ToolRegistry:
             tool=tool,
             always_loaded=always_loaded,
             description=description,
+            capability=capability,
         )
         logger.info("tool_registered", name=name, always_loaded=always_loaded)
+
+    def capabilities(self) -> list[str]:
+        """The master-facing capability one-liners of every registered tool that declared one,
+        in registration order — the source for the prompt's "You CAN" recital. Internal tools
+        (no `capability`) are excluded. Deterministic (registration order is fixed) → the
+        recital is a stable prefix, cache-friendly."""
+        return [e.capability for e in self._entries.values() if e.capability]
 
     async def execute(self, name: str, args: dict[str, Any]) -> str:
         """Run a registered tool by name. Used by tool_executor_node."""
