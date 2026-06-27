@@ -150,6 +150,7 @@ app/
 ```
 scripts/
 ├── _smoke_isolation.py — Import FIRST (before any `app.*` import) in every DB-touching smoke script.
+├── eval_tool_routing.py — Tool-routing eval — does the agent pick the RIGHT tool for a query?
 ├── gen_architecture.py — Architecture-doc generator — introspects the LIVE code and emits Markdown +
 ├── google_oauth.py — One-time Google OAuth refresh-token bootstrap.
 ├── issue_jwt.py — Mint an HS256 JWT for the master so we can curl protected endpoints
