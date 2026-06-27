@@ -194,12 +194,18 @@ def _depoison_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
 # verb (or "email" used AS the verb) + a recipient marker. Requiring the word "email" is deliberate:
 # a bare "message"/"note" may be a non-email channel (whatsapp/SMS), and forcing an email card there
 # would be wrong — so the backstop scopes to email-send-to-a-recipient only.
-_EMAIL_TOKEN = re.compile(r"\be-?mails?\b", re.IGNORECASE)
-_EMAIL_SEND_VERB = re.compile(
-    r"\b(draft|write|compose|send|shoot|fire off|pen|reply|respond|get back)\b", re.IGNORECASE
+# Email-COMPOSE intent (channel-scoped). Email-NATIVE verbs (reply / respond / get back to) are
+# email on their own — that's the most common email action ("reply to Priya"). Channel-AMBIGUOUS
+# verbs (draft / write / send / …) need an email token OR an @-address, so "send a message to Bob"
+# (whatsapp/SMS) stays out. Used to GATE the backstop on a recent compose context — NOT to guess
+# intent from the latest message alone (the email-shaped RESPONSE is the primary signal below).
+_EMAIL_NATIVE_VERB = re.compile(r"\b(reply|respond|get\s+back|write\s+back|circle\s+back)\b", re.IGNORECASE)
+_AMBIGUOUS_COMPOSE_VERB = re.compile(
+    r"\b(draft|write|compose|send|shoot|fire\s+off|pen|forward)\b", re.IGNORECASE
 )
-_EMAIL_AS_VERB = re.compile(r"\be-?mail\s+(to\b|him\b|her\b|them\b|\S+@\S+)", re.IGNORECASE)
-_RECIPIENT = re.compile(r"\bto\b|\b(him|her|them)\b|\S+@\S+", re.IGNORECASE)
+_EMAIL_TOKEN = re.compile(r"\be-?mails?\b", re.IGNORECASE)
+_AT_ADDRESS = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+_EMAIL_AS_VERB = re.compile(r"\be-?mail\s+(to\b|him\b|her\b|them\b|[^\s@]+@)", re.IGNORECASE)
 
 # Doctrine exceptions where PROSE is the RIGHT answer, so the backstop must NOT force a card:
 #   see-only — prompts.py: the card is the review surface EXCEPT when the master asks to see the
@@ -218,14 +224,15 @@ _META_HOWTO = re.compile(
     r"|explain\s+how|teach\s+me|tips?\s+(for|on)|advice\s+on|example\s+of\s+a)\b",
     re.IGNORECASE,
 )
-_EMAIL_SHAPE_SIGNALS = (
-    re.compile(r"^\s*subject\s*:", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"\b(dear|hi|hello|hey)\b[^,\n]{0,30},", re.IGNORECASE),
-    re.compile(
-        r"\b(best|best regards|kind regards|warm regards|regards|sincerely|thanks|"
-        r"thank you|cheers)\b\s*,?\s*\n",
-        re.IGNORECASE,
-    ),
+# Email-SHAPED reply = the PRIMARY drop signal. A Subject: line (whatsapp/SMS have none), OR a
+# salutation AND a formal sign-off (a casual "hi Bob, running late" has a salutation but no formal
+# sign-off, so it doesn't qualify). This is what a drafted email looks like regardless of phrasing.
+_SUBJECT_LINE = re.compile(r"^\s*subject\s*:", re.IGNORECASE | re.MULTILINE)
+_SALUTATION = re.compile(r"\b(dear|hi|hello|hey)\b[^,\n]{0,30},", re.IGNORECASE)
+_SIGNOFF = re.compile(
+    r"\b(best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|"
+    r"cheers|yours( truly| sincerely)?|respectfully)\b\s*,?\s*\n",
+    re.IGNORECASE,
 )
 _DRAFT_BACKSTOP_NUDGE = (
     "You wrote that email as chat text instead of calling the email_send tool. The master "
@@ -235,35 +242,55 @@ _DRAFT_BACKSTOP_NUDGE = (
 )
 
 
-def _is_draft_email_imperative(user_message: str) -> bool:
-    # email-send-to-a-recipient: an email token + (a compose/send verb OR "email" as the verb) + a
-    # recipient marker. "send a message to Bob" (no email token) → False (non-email channel).
-    m = user_message or ""
-    if not _EMAIL_TOKEN.search(m):
-        return False
-    has_verb = bool(_EMAIL_SEND_VERB.search(m)) or bool(_EMAIL_AS_VERB.search(m))
-    return has_verb and bool(_RECIPIENT.search(m))
+def _is_email_compose_intent(text: str) -> bool:
+    """Channel-scoped compose intent. Email-native verbs (reply/respond/get back) are email on
+    their own; ambiguous verbs (draft/write/send) need an email token or an @-address; "email X"
+    counts. So "reply to Priya" → True, "send a message to Bob" → False."""
+    t = text or ""
+    if _EMAIL_NATIVE_VERB.search(t) or _EMAIL_AS_VERB.search(t):
+        return True
+    return bool(_AMBIGUOUS_COMPOSE_VERB.search(t)) and bool(_EMAIL_TOKEN.search(t) or _AT_ADDRESS.search(t))
 
 
 def _is_email_shaped(text: str) -> bool:
-    # ≥2 distinct email signals (salutation + sign-off, or a Subject line) — a casual "hi"
-    # alone never qualifies, so a normal answer isn't mistaken for a drafted email.
-    return sum(1 for p in _EMAIL_SHAPE_SIGNALS if p.search(text or "")) >= 2
+    # Subject: line, OR salutation + a formal sign-off. A casual "Hi Sir, …" (salutation only) or a
+    # plain answer never qualifies, so a normal reply isn't mistaken for a drafted email.
+    t = text or ""
+    if _SUBJECT_LINE.search(t):
+        return True
+    return bool(_SALUTATION.search(t)) and bool(_SIGNOFF.search(t))
 
 
-def _is_draft_email_drop(user_message: str, response: AIMessage) -> bool:
-    """The describe-instead-of-call drop: a clear email-send-to-a-recipient imperative that came
-    back as email-shaped PROSE with no email_send call. EXCLUDES the cases where prose is correct —
-    see-only ("just show me a draft, don't send it" — the doctrine exception) and meta/how-to ("how
-    do I write a formal email?") — and non-email channels (the imperative requires the word 'email')."""
+def _in_compose_email_context(state: AgentState, k: int = 4) -> bool:
+    """Did the master express email-compose intent in the current OR a recent prior turn? Scanning
+    the recent user turns is what catches the multi-turn follow-up drop ("okay send it" / "bob@x.com"
+    after "send an email to my manager") — those follow-ups aren't compose imperatives themselves."""
+    if _is_email_compose_intent(state.get("user_message", "")):
+        return True
+    seen = 0
+    for m in reversed(state.get("messages", []) or []):
+        if isinstance(m, HumanMessage) and isinstance(m.content, str):
+            if _is_email_compose_intent(m.content):
+                return True
+            seen += 1
+            if seen >= k:
+                break
+    return False
+
+
+def _is_draft_email_drop(state: AgentState, response: AIMessage) -> bool:
+    """The describe-instead-of-call drop. PRIMARY signal: an email-SHAPED reply (Subject line, or
+    salutation + formal sign-off — whatsapp/SMS lack these). Gated by: NOT see-only/meta on the
+    latest turn (prose is right there), AND a recent email-COMPOSE context. Response-shape-first
+    catches reply phrasing AND the multi-turn follow-up drop, and won't fire on a non-email channel."""
     if not (isinstance(response, AIMessage) and isinstance(response.content, str)):
         return False
-    if not _is_draft_email_imperative(user_message):
+    if not _is_email_shaped(response.content):
         return False
-    msg = user_message or ""
-    if _SEE_ONLY.search(msg) or _META_HOWTO.search(msg):
+    current = state.get("user_message", "") or ""
+    if _SEE_ONLY.search(current) or _META_HOWTO.search(current):
         return False  # the master wants to SEE the text / asked how-to — prose is right
-    return _is_email_shaped(response.content)
+    return _in_compose_email_context(state)
 
 
 def _append_queue_offer(response: AIMessage) -> AIMessage:
@@ -284,7 +311,7 @@ async def _draft_email_backstop(
     (the card is the review surface); if it still drops, append an explicit offer — never silent."""
     if getattr(response, "tool_calls", None):
         return response
-    if not _is_draft_email_drop(state.get("user_message", ""), response):
+    if not _is_draft_email_drop(state, response):
         return response
 
     logger.info("draft_email_backstop_retry", thread_id=state.get("thread_id"))
