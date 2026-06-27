@@ -128,7 +128,12 @@ def register() -> None:
             "request master approval before this fires. Use for replying to incoming "
             "emails (set in_reply_to_message_id + source_message_id for proper "
             "threading) or composing new ones. ONE recipient at a time; multi-recipient "
-            "and HTML body land later."
+            "and HTML body land later. "
+            "DRAFT FROM CONTEXT: when the master asks you to write/draft/send something and "
+            "the substance is already in the conversation (what to say, the situation, the "
+            "tone), compose the subject and body FROM that context now — do NOT re-interview "
+            "the master for points/subject/tone you already have. Ask only for a genuinely-"
+            "missing fact, chiefly the recipient's email address if you don't have it."
         ),
         args_schema=EmailSendArgs,
     )
