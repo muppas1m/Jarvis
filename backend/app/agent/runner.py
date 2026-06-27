@@ -424,9 +424,10 @@ async def stream_turn(
     if envelope["status"] == "interrupted":
         yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
     else:
-        attach = await _briefing_attach(result)  # 5.4 — code-guaranteed brief/offer
-        if attach:
-            yield {"type": "token", "content": "\n\n" + attach}  # stream it live
+        # 5.4 — code-guaranteed brief/offer in the DONE payload ONLY (like the card reminder),
+        # NOT also as a live token: the client's done does patch(response), so a token + done
+        # would render it twice. The done's response is canonical → it shows exactly once.
+        attach = await _briefing_attach(result)
         payload = _with_reminder(_terminal_payload(envelope), card_reminder)
         if attach:
             payload["response"] = _append_block(payload.get("response", ""), attach)
@@ -492,12 +493,17 @@ async def _briefing_attach(result: dict[str, Any]) -> str:
     returns the brief (deliver) or the offer line (floor), or "" for suppress/already-done.
     Fail-soft — a hiccup here must never break the reply."""
     try:
-        from app.agent.briefing_state import render_attach
-        text, _delivered = await render_attach(
+        from app.agent.briefing_state import mark_offered, render_attach
+        text, delivered = await render_attach(
             result.get("briefing_proactive") or "suppress",
             result.get("briefing_offer") or "",
             result.get("messages") or [],
         )
+        # An OFFER is a throttled proactive surface too — stamp the cooldown so a string of
+        # ordinary messages with items pending gets AT MOST ONE offer, not one per message.
+        # (A delivery already stamped it via mark_briefed inside briefing('latest').)
+        if text and not delivered:
+            await mark_offered(datetime.now(UTC))
         return text
     except Exception as exc:  # noqa: BLE001 — never break the reply on the briefing attach
         logger.warning("briefing_attach_failed", error=str(exc))
@@ -1481,11 +1487,12 @@ async def voice_turn(
             ev = await _speak(card_reminder)
             if ev:
                 yield ev
-        # 5.4 proactive briefing: code-attach the brief/offer — SPOKEN (voice parity) and
-        # captioned (live token), exactly like the rest of the reply.
+        # 5.4 proactive briefing: code-attach the brief/offer — SPOKEN (voice parity, the
+        # caption rides the audio event) + in the DONE payload, exactly like the card reminder.
+        # No live token: the caption comes from the audio event, and the done response is
+        # canonical — so it's heard + shown once, never twice.
         attach = await _briefing_attach(result)
         if attach:
-            yield {"type": "token", "content": "\n\n" + attach}
             ev = await _speak(attach)
             if ev:
                 yield ev

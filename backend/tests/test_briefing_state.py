@@ -247,3 +247,32 @@ async def test_load_live_state_reads_the_facts():
     finally:
         await _cleanup(tag)
         await _restore_profile(saved)
+
+
+async def test_offer_throttles_then_resurfaces_after_window():
+    # Item 1: a proactive OFFER is a throttled event. Turn 1 surfaces → mark_offered stamps the
+    # cooldown → Turn 2 (a plain task moments later) is SUPPRESS (no second offer); past the
+    # cooldown window the SAME pending items re-surface (the offer didn't advance the HWM).
+    saved = await _save_profile()
+    tag = "throttle"
+    try:
+        async with async_session() as s:
+            await s.execute(update(UserProfile).values(briefing_hwm=None, last_briefed_at=None, last_seen_at=None))
+            await s.commit()
+        await _seed(tag, [_FUT - timedelta(minutes=30)])  # one unheard item
+
+        # Turn 1 → a proactive surface moment (offer eligible).
+        assert bs.proactive_mode(await bs.load_live_state(_FUT)) == bs.SURFACE_SINGLE
+        await bs.mark_offered(_FUT)  # the runner stamps this when it attaches the OFFER
+
+        # Turn 2, a minute later (next message in the same stream) → SUPPRESSED, not a 2nd offer.
+        assert bs.proactive_mode(await bs.load_live_state(_FUT + timedelta(minutes=1))) == bs.SUPPRESS
+
+        # An OFFER does NOT advance the HWM → the items are still unheard, so past the cooldown
+        # window the same delta re-surfaces (re-offer/deliver on a genuine later moment).
+        past = _FUT + timedelta(minutes=settings.BRIEFING_COOLDOWN_MINUTES + 1)
+        live = await bs.load_live_state(past)
+        assert live.unheard == 1 and bs.proactive_mode(live) == bs.SURFACE_SINGLE
+    finally:
+        await _cleanup(tag)
+        await _restore_profile(saved)

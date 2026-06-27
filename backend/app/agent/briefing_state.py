@@ -179,7 +179,9 @@ def briefing_directive(state: BriefingLiveState) -> str:
             f"this message a CHECK-IN (read broadly — 'good morning', 'hey', 'what's up', 'what's new', 'how are "
             f"things')? If YES, call deliver_briefing() — the system then presents the brief (you don't write it). "
             f"If it's a SPECIFIC request (e.g. 'cancel my 3pm'), handle THAT and do NOT call deliver_briefing — the "
-            f"system offers the briefing as a tail. Never narrate a briefing; deliver_briefing() is the only way to brief."
+            f"system offers the briefing as a tail. Never narrate a briefing; deliver_briefing() is the only way to "
+            f"brief. After calling it, your reply is JUST the natural greeting (e.g. 'Good morning, {h}!') — do NOT add "
+            f"a lead-in like 'here's your briefing' or list any items; the system appends the brief right after."
         )
     return facts + " " + d
 
@@ -244,6 +246,17 @@ async def mark_briefed(now: datetime) -> datetime | None:
     AFTER the brief text is produced (advance-on-return) — never before. Both stamps are
     monotonic. This is the one place the follow-up TTS-accurate refinement will touch."""
     hwm = await advance_hwm(now)
+    await mark_offered(now)  # the delivery is also a proactive surface — stamp the throttle
+    return hwm
+
+
+async def mark_offered(now: datetime) -> None:
+    """Stamp the proactive-surface throttle (last_briefed_at) on an OFFER too — WITHOUT
+    advancing the HWM, so the items stay unheard and re-surface AFTER the cooldown window.
+    This is what stops the nag: once an offer (or delivery) goes out, the cooldown gate
+    suppresses re-surfacing on every subsequent message (incl. plain tasks) until the window
+    passes; an EXPLICIT 'what's the latest' still bypasses (it calls the briefing tool).
+    Monotonic. (So last_briefed_at is really 'last proactively surfaced', offered or heard.)"""
     async with async_session() as session:
         await session.execute(
             update(UserProfile)
@@ -251,4 +264,3 @@ async def mark_briefed(now: datetime) -> datetime | None:
             .values(last_briefed_at=now)
         )
         await session.commit()
-    return hwm
