@@ -223,7 +223,9 @@ async def test_revise_then_approve_sends_only_the_revised_row(_rebind_async_stat
                 select(PendingApproval).where(PendingApproval.id == uuid.UUID(revised_id))
             )).scalar_one()
         assert o.status == "discarded", "the discarded original must sit harmlessly untouched"
-        assert r.status == "approved", "the revised card must be the one resolved"
+        # the revised card is the one resolved + SENT → terminal "executed" (outcome-visibility
+        # work, 5d9e79c — a sent reply advances past "approved" to its terminal outcome).
+        assert r.status == "executed", "the revised card must be the one resolved + sent"
     finally:
         async with async_session() as s:
             await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == thread_id))
