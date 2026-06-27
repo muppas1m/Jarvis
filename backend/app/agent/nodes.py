@@ -32,10 +32,12 @@ Resume safety (the load-bearing design choice, see test_resume_dedup.py):
 """
 import asyncio
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -181,6 +183,86 @@ def _depoison_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# #3 draft-email backstop — force the email_send call when the model describes  #
+# an email as prose instead of calling the tool (the describe-instead-of-call   #
+# drop, silent in voice). Detection is deliberately tight (a clear "draft/write/#
+# send an email to X" imperative + an email-shaped reply) so soft "what would   #
+# you say?" prose isn't caught.                                                 #
+# --------------------------------------------------------------------------- #
+_DRAFT_EMAIL_IMPERATIVE = re.compile(
+    r"\b(draft|write|compose|send|shoot|fire off|pen)\b[^.?!]{0,40}\b(e-?mail|message|reply|note)\b"
+    r"|\b(reply|respond|get back)\b[^.?!]{0,30}\b(to|email)\b"
+    r"|\bemail\b[^.?!]{0,20}\b(him|her|them|to)\b",
+    re.IGNORECASE,
+)
+_EMAIL_SHAPE_SIGNALS = (
+    re.compile(r"^\s*subject\s*:", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\b(dear|hi|hello|hey)\b[^,\n]{0,30},", re.IGNORECASE),
+    re.compile(
+        r"\b(best|best regards|kind regards|warm regards|regards|sincerely|thanks|"
+        r"thank you|cheers)\b\s*,?\s*\n",
+        re.IGNORECASE,
+    ),
+)
+_DRAFT_BACKSTOP_NUDGE = (
+    "You wrote that email as chat text instead of calling the email_send tool. The master "
+    "cannot review, approve, or send a draft that isn't on an approval card. Call email_send "
+    "NOW with to, subject, and body filled in from the draft you just wrote. If you don't have "
+    "the recipient's email address, ask the master for it — do not invent one."
+)
+
+
+def _is_draft_email_imperative(user_message: str) -> bool:
+    return bool(_DRAFT_EMAIL_IMPERATIVE.search(user_message or ""))
+
+
+def _is_email_shaped(text: str) -> bool:
+    # ≥2 distinct email signals (salutation + sign-off, or a Subject line) — a casual "hi"
+    # alone never qualifies, so a normal answer isn't mistaken for a drafted email.
+    return sum(1 for p in _EMAIL_SHAPE_SIGNALS if p.search(text or "")) >= 2
+
+
+def _is_draft_email_drop(user_message: str, response: AIMessage) -> bool:
+    """The describe-instead-of-call drop: a clear draft/send-email imperative that came back as
+    an email-shaped PROSE reply with no email_send call."""
+    if not (isinstance(response, AIMessage) and isinstance(response.content, str)):
+        return False
+    return _is_draft_email_imperative(user_message) and _is_email_shaped(response.content)
+
+
+def _append_queue_offer(response: AIMessage) -> AIMessage:
+    """Make the non-completion explicit (never a silent drop) when the retry still didn't call."""
+    content = response.content if isinstance(response.content, str) else str(response.content)
+    offer = (
+        "\n\n(I've written that draft above but haven't queued it for your approval yet — "
+        "say the word and I'll send it, Sir.)"
+    )
+    return response.model_copy(update={"content": content + offer})
+
+
+async def _draft_email_backstop(
+    state: AgentState, response: AIMessage, llm: Any, msgs: list[BaseMessage]
+) -> AIMessage:
+    """If the model described an email instead of calling email_send, force the call ONCE via a
+    re-prompt (not prose-parsing). On success the retry's email_send tool_call REPLACES the prose
+    (the card is the review surface); if it still drops, append an explicit offer — never silent."""
+    if getattr(response, "tool_calls", None):
+        return response
+    if not _is_draft_email_drop(state.get("user_message", ""), response):
+        return response
+
+    logger.info("draft_email_backstop_retry", thread_id=state.get("thread_id"))
+    retry = await llm.ainvoke([*msgs, response, HumanMessage(content=_DRAFT_BACKSTOP_NUDGE)])
+    if isinstance(retry, AIMessage) and isinstance(retry.content, str):
+        retry = retry.model_copy(update={"content": strip_function_leak(retry.content)})
+    if getattr(retry, "tool_calls", None):
+        return retry  # it called email_send → a card queues this turn
+
+    logger.info("draft_email_backstop_still_dropped", thread_id=state.get("thread_id"))
+    return _append_queue_offer(response)
+
+
 async def agent_node(state: AgentState) -> dict:
     """Reasoning step. Builds the system prompt, calls the LLM with bound
     tools, appends the LLM's response to messages."""
@@ -290,6 +372,10 @@ async def agent_node(state: AgentState) -> dict:
         if cleaned != response.content:
             logger.warning("agent_response_function_leak_stripped")
             response = response.model_copy(update={"content": cleaned})
+
+    # #3 — force a card when the model described an email instead of calling email_send.
+    if isinstance(response, AIMessage):
+        response = await _draft_email_backstop(state, response, llm, msgs)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
     update: dict = {"messages": [response]}
