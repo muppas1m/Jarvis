@@ -521,6 +521,16 @@ async def tool_executor_node(state: AgentState) -> dict:
 
     # ---- APPROVE → QUEUE (non-blocking; executes out-of-band on approve) ----
     if level == SafetyLevel.APPROVE:
+        # Pre-queue validation: reject obviously-bad input (e.g. a placeholder/missing email
+        # recipient the LLM emitted) BEFORE minting a card. The agent reads the error and asks
+        # the master for the real value; nothing is queued, nothing dispatches to a 400.
+        pre_error = _pre_approve_error(tool_name, tool_args)
+        if pre_error is not None:
+            await _log_audit(
+                thread_id, tool_name, level, tool_args, success=False, error="INVALID_ARGS",
+            )
+            return {"messages": [ToolMessage(content=pre_error, tool_call_id=tool_call_id)]}
+
         # Phase 3 — APPROVE-tier tools are NON-BLOCKING: QUEUE, never interrupt().
         # The graph used to interrupt() here and BLOCK the whole turn until a
         # resume re-entered the node and executed. Now the node creates the
@@ -805,6 +815,18 @@ async def _approval_warning(tool_name: str, tool_args: dict) -> str | None:
         return await calendar_conflict_warning(
             tool_args.get("start_iso", ""), tool_args.get("end_iso", ""),
         )
+    return None
+
+
+def _pre_approve_error(tool_name: str, tool_args: dict) -> str | None:
+    """BLOCKING pre-queue validation for APPROVE-tier tools — return an agent-facing error
+    string to REFUSE queuing (so the agent reads it and asks the master to fix the input),
+    or None to proceed. Keyed on tool_name; the validation logic lives WITH the tool. Catches
+    bad input (e.g. a placeholder recipient the LLM emitted) BEFORE a card the master can only
+    reject is minted. Distinct from _approval_warning, which is a non-blocking card enricher."""
+    if tool_name == "email_send":
+        from app.agent.tools.email_send import validate_recipient
+        return validate_recipient(tool_args.get("to", ""))
     return None
 
 

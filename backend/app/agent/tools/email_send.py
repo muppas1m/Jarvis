@@ -14,12 +14,49 @@ Two invocation pathways (unchanged from the Gmail-only era, just neutral):
 """
 from __future__ import annotations
 
+import re
+from email.utils import parseaddr
+
 from pydantic import BaseModel, Field
 
 from app.agent.tools.registry import tool_registry
 from app.config import settings
 from app.email.provider import EmailSendUncertain, ReplyRef
 from app.email.send import send_email
+
+# A real-looking address AFTER display-name extraction: one @, a dotted domain, no spaces
+# or brackets. Deliberately strict — its job is to reject the LLM's templated placeholders
+# ("[Manager's Email Address]", "<recipient email>", "TBD", "manager's email"), all of which
+# fail this naturally, while accepting real addresses incl. plus-tags / subdomains.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def validate_recipient(to: str) -> str | None:
+    """Validate an outbound recipient BEFORE an email_send card is queued. Returns an
+    agent-facing error string when the address is missing or a placeholder/non-address (so
+    the agent ASKS the master for the real one), or None when it's usable.
+
+    Python-side by design — the placeholder is text the LLM ITSELF emitted when it lacked a
+    real address, so we can't rely on it to notice. ``parseaddr`` extracts the address from a
+    valid "Name <addr>" form (which IS accepted); a templated "<recipient email>" / "[...]"
+    parses to a non-address and is rejected by the strict pattern."""
+    raw = (to or "").strip()
+    if not raw:
+        return _need_recipient(raw, "no recipient was provided")
+    addr = parseaddr(raw)[1].strip()  # "Bob <bob@x.com>" → "bob@x.com"; "[Mgr email]" → itself
+    if not _EMAIL_RE.match(addr):
+        return _need_recipient(raw, "it isn't a real email address — it looks like a placeholder")
+    return None
+
+
+def _need_recipient(value: str, reason: str) -> str:
+    """The tool result that steers the agent to ask the master for the real address."""
+    shown = f" ({value!r})" if value else ""
+    return (
+        f"[NEEDS RECIPIENT] I can't queue this email — the recipient{shown} is not usable: "
+        f"{reason}. I won't guess or send to a placeholder. Ask the master for the actual "
+        f"recipient email address, then call email_send again with it."
+    )
 
 
 class EmailSendArgs(BaseModel):
