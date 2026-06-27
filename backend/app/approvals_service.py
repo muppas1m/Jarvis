@@ -12,7 +12,7 @@ called by:
 So "what's pending / what did you draft / show me the approvals" answers the same whether
 or not a card happens to be on screen. PURE READ — nothing here claims or dispatches.
 """
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -39,11 +39,15 @@ class UnifiedApprovalCard(BaseModel):
     tool_name: str
     tool_args: dict
     description: str
-    status: str
+    status: str  # pending | approved | rejected | discarded | expired | executed | failed
     created_at: str
     # True for a COMPLEX inbound email surfaced as a heads-up (no draft yet) — the card
     # renders "say go and I'll draft it" instead of Approve/Send.
     needs_drafting: bool = False
+    # The dispatch result for a RESOLVED action (status executed/failed) — the short human
+    # detail ("Email sent to X" / "invalid recipient") + when it resolved. Empty for pending rows.
+    outcome_detail: str = ""
+    resolved_at: str = ""
 
 
 def to_unified_card(row: PendingApproval) -> UnifiedApprovalCard:
@@ -99,7 +103,13 @@ def to_unified_card(row: PendingApproval) -> UnifiedApprovalCard:
         status=row.status,
         created_at=row.created_at.isoformat() if row.created_at else "",
         needs_drafting=needs_drafting,
+        outcome_detail=getattr(row, "outcome_detail", "") or "",
+        resolved_at=(_resolved.isoformat() if (_resolved := getattr(row, "resolved_at", None)) else ""),
     )
+
+
+# Terminal outcome states a RESOLVED+dispatched action lands in (set by the dispatch gate).
+TERMINAL_OUTCOME_STATES = ("executed", "failed")
 
 
 async def list_pending_cards() -> list[UnifiedApprovalCard]:
@@ -114,6 +124,26 @@ async def list_pending_cards() -> list[UnifiedApprovalCard]:
             .where(PendingApproval.status == "pending")
             .where(PendingApproval.expires_at > now)
             .order_by(PendingApproval.created_at.asc())
+        )).scalars().all())
+    return [to_unified_card(r) for r in rows]
+
+
+async def list_recent_outcomes(within_hours: int = 24, limit: int = 10) -> list[UnifiedApprovalCard]:
+    """THE shared read for RESOLVED actions — what HAPPENED to things the master approved
+    (executed/failed, with the dispatch detail), most-recent-first, across ALL channels
+    (the row carries the outcome regardless of where it was resolved). The agent reads this
+    to answer "did X send / what happened to that?"; the HUD could read it too. PURE READ.
+
+    Restores what the non-blocking cutover dropped: the agent's knowledge of an action's fate
+    once the [QUEUED] turn has long completed. Within-window so it stays a "recent" view."""
+    cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
+    async with async_session() as session:
+        rows = list((await session.execute(
+            select(PendingApproval)
+            .where(PendingApproval.status.in_(TERMINAL_OUTCOME_STATES))
+            .where(PendingApproval.resolved_at > cutoff)
+            .order_by(PendingApproval.resolved_at.desc())
+            .limit(limit)
         )).scalars().all())
     return [to_unified_card(r) for r in rows]
 
@@ -214,4 +244,30 @@ def render_for_agent(cards: list[UnifiedApprovalCard], honorific: str, now: date
             action = c.tool_name.replace("_", " ")
             args = _compact_args(c.tool_args)
             lines.append(f"• {action}" + (f" — {args}" if args else "") + f"  ({age})")
+    return "\n".join(lines)
+
+
+def _outcome_subject(card: UnifiedApprovalCard) -> str:
+    """A short human reference to WHAT the resolved action was (no per-kind branch in the
+    caller). email → "email to <to>"; tool → the humanized action."""
+    if card.kind == "email":
+        to = card.tool_args.get("to") or "someone"
+        verb = "email to" if card.tool_name == "email_send" else "reply to"
+        return f"{verb} {to}"
+    return card.tool_name.replace("_", " ")
+
+
+def render_outcomes_for_agent(cards: list[UnifiedApprovalCard], honorific: str, now: datetime | None = None) -> str:
+    """Readable summary of recently-RESOLVED actions and what happened to each — the agent's
+    grounding for "did X send / what happened to that?". ✅ executed / ❌ failed + the dispatch
+    detail + age. Same card source the HUD could read. Empty list → "" (caller omits the section)."""
+    if not cards:
+        return ""
+    now = now or datetime.now(UTC)
+    lines = [f"Recently resolved, {honorific}:"]
+    for c in cards:
+        icon = "✅" if c.status == "executed" else "❌"
+        detail = (c.outcome_detail or "").strip()
+        tail = f" — {detail}" if detail else (" — done" if c.status == "executed" else " — failed")
+        lines.append(f"{icon} {_outcome_subject(c)}{tail}  ({_age(c.resolved_at or c.created_at, now)})")
     return "\n".join(lines)

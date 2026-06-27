@@ -187,6 +187,22 @@ async def note_document_upload(
         logger.warning("document_upload_note_failed", thread_id=thread_id, error=str(exc))
 
 
+async def note_approval_outcome(thread_id: str, marker: str) -> None:
+    """Ground a resolved-action OUTCOME into the conversation thread so the agent knows
+    next turn what happened (the email sent/failed, the event created). Restores what the
+    non-blocking cutover dropped.
+
+    A plain AIMessage note — NOT a tool response, so it never re-answers the original
+    [QUEUED] tool_call (no double-answer). Best-effort: a write failure (incl. a rare race
+    with a concurrently-streaming turn) is logged and never breaks the dispatch result."""
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        await graph().aupdate_state(config, {"messages": [AIMessage(content=marker)]})
+        logger.info("approval_outcome_noted", thread_id=thread_id)
+    except Exception as exc:  # noqa: BLE001 — the marker is best-effort
+        logger.warning("approval_outcome_note_failed", thread_id=thread_id, error=str(exc))
+
+
 async def run_turn(
     user_message: str,
     thread_id: str,

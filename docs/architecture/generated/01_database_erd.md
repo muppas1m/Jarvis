@@ -125,6 +125,7 @@ erDiagram
         DateTime expires_at
         DateTime resolved_at
         String resolved_via
+        Text outcome_detail
     }
     rate_limit_events {
         UUID id PK

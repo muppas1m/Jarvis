@@ -24,11 +24,12 @@ ALL tool-call resolution here has landed; there is no graph resume anymore.
 """
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agent.safety import SafetyClassifier, SafetyLevel
 from app.db.engine import async_session
@@ -83,7 +84,84 @@ async def resolve_and_dispatch(
     if thread_id is None:
         logger.info("resolve_and_dispatch_not_claimed", approval_id=approval_id, action=action)
         return _NOT_CLAIMED
-    return await dispatch_approval(approval_id, decision)
+    outcome = await dispatch_approval(approval_id, decision)
+    # Restore what the non-blocking cutover dropped: make the action's fate durable (on the
+    # row) + visible (grounded into the conversation thread). Runs in the ONE gate so it
+    # covers EVERY channel (dashboard / Telegram / voice / typed) and every APPROVE-tier
+    # action generically. Best-effort — never alters the outcome the transport renders.
+    await _record_outcome(approval_id, outcome)
+    return outcome
+
+
+def _clean_detail(detail: str) -> str:
+    """A short, human, single-line outcome detail — strip a leading ``[TAG]`` marker
+    (``[ERROR]`` / ``[QUEUED]`` …), collapse whitespace, cap length."""
+    s = re.sub(r"^\s*\[[A-Z_]+\]\s*", "", detail or "")
+    return " ".join(s.split())[:1000]
+
+
+def _terminal_outcome(outcome: ApprovalDispatchOutcome) -> tuple[str, str] | None:
+    """Map a dispatch result to (terminal_status, detail) to persist, or None to SKIP —
+    rejected / row_missing / not_claimed / the draft-request sub-flow are not action
+    executions to record. ``executed`` = the action succeeded; ``failed`` = it didn't."""
+    if outcome.kind == "tool":
+        if outcome.status == "executed":
+            return ("executed" if outcome.success else "failed", _clean_detail(outcome.detail))
+        if outcome.status == "blocked":
+            return ("failed", "That action isn't permitted.")
+        return None
+    if outcome.kind == "email":
+        if outcome.status in ("sent", "send_uncertain"):
+            return ("executed", _clean_detail(outcome.detail) or "Reply sent.")
+        if outcome.status in ("send_failed", "row_missing", "payload_incomplete"):
+            return ("failed", _clean_detail(outcome.detail) or "Send failed.")
+        return None  # rejected
+    return None  # draft_request / none
+
+
+async def _persist_outcome(approval_id: str, status: str, detail: str) -> None:
+    """Persist the terminal dispatch outcome on the row (status executed/failed + the short
+    detail) so the recent-outcomes read surfaces it across ALL channels — including HUD/
+    Telegram-resolved actions that have no chat thread to ground. Best-effort."""
+    try:
+        aid = uuid.UUID(approval_id)
+    except ValueError:
+        return
+    try:
+        async with async_session() as session:
+            await session.execute(
+                update(PendingApproval)
+                .where(PendingApproval.id == aid)
+                .values(status=status, outcome_detail=detail or None)
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — outcome persistence is best-effort
+        logger.warning("approval_outcome_persist_failed", approval_id=approval_id, error=str(exc))
+
+
+async def _record_outcome(approval_id: str, outcome: ApprovalDispatchOutcome) -> None:
+    """Persist the terminal outcome AND ground the conversation thread, generically for any
+    APPROVE-tier action. Best-effort end-to-end — never affects the returned outcome."""
+    terminal = _terminal_outcome(outcome)
+    if terminal is None:
+        return
+    status, detail = terminal
+    await _persist_outcome(approval_id, status, detail)
+
+    # Ground the CONVERSATION thread (web / voice) so the agent knows next turn what
+    # happened. Inbound-email threads aren't conversations the agent converses in → skip
+    # (the persisted status + the recent-outcomes read cover those). The marker is a plain
+    # AIMessage note — it never re-answers the original [QUEUED] tool_call (no double-answer).
+    thread_id = outcome.thread_id
+    if thread_id and not is_email_approval(thread_id):
+        marker = ("✅ " if status == "executed" else "❌ ") + (
+            detail or ("Done." if status == "executed" else "That action failed.")
+        )
+        try:
+            from app.agent.runner import note_approval_outcome
+            await note_approval_outcome(thread_id, marker)
+        except Exception as exc:  # noqa: BLE001 — grounding is best-effort
+            logger.warning("approval_outcome_grounding_failed", thread_id=thread_id, error=str(exc))
 
 
 async def _dispatch_email_draft_request(

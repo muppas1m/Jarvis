@@ -14,7 +14,7 @@ app/
 │   ├── tools/
 │   │   ├── __init__.py — Tool registration entry point.
 │   │   ├── actionable_tool.py — Actionable-memory tools (Phase 4.1) — the master's task list.
-│   │   ├── approvals_pending.py — approvals_pending — the agent's read of the approval queue (Phase 4).
+│   │   ├── approvals_pending.py — approvals_pending — the agent's read of the approval queue + recent outcomes (Phase 4).
 │   │   ├── briefing_tool.py — Briefing scope behaviors + the conversational tool (Phase 5.2).
 │   │   ├── builtin_memory.py — memory_search — built-in tool, always loaded.
 │   │   ├── calendar_tool.py — Google Calendar tool — read, create, update, delete events (+ conflict check).

@@ -8,7 +8,7 @@
 
 | Tool | Safety tier | Always-loaded | Backing module | Summary |
 |---|---|---|---|---|
-| `approvals_pending` | SAFE |  | `app.agent.tools.approvals_pending` | List everything awaiting the master's approval — queued email sends, auto-drafted inbound … |
+| `approvals_pending` | SAFE |  | `app.agent.tools.approvals_pending` | The master's approval queue AND what happened to actions they already approved |
 | `briefing` | SAFE |  | `app.agent.tools.briefing_tool` | Brief the master on incoming items (FYI emails today; news later) for a scope |
 | `calendar_create` | APPROVE |  | `app.agent.tools.calendar_tool` | Create a new event on the master's Google Calendar |
 | `calendar_delete` | APPROVE |  | `app.agent.tools.calendar_tool` | Delete / cancel an existing calendar event by event_id |
