@@ -190,10 +190,32 @@ def _depoison_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
 # send an email to X" imperative + an email-shaped reply) so soft "what would   #
 # you say?" prose isn't caught.                                                 #
 # --------------------------------------------------------------------------- #
-_DRAFT_EMAIL_IMPERATIVE = re.compile(
-    r"\b(draft|write|compose|send|shoot|fire off|pen)\b[^.?!]{0,40}\b(e-?mail|message|reply|note)\b"
-    r"|\b(reply|respond|get back)\b[^.?!]{0,30}\b(to|email)\b"
-    r"|\bemail\b[^.?!]{0,20}\b(him|her|them|to)\b",
+# Genuine "send/draft an EMAIL to a recipient" intent = an explicit email token + a compose/send
+# verb (or "email" used AS the verb) + a recipient marker. Requiring the word "email" is deliberate:
+# a bare "message"/"note" may be a non-email channel (whatsapp/SMS), and forcing an email card there
+# would be wrong — so the backstop scopes to email-send-to-a-recipient only.
+_EMAIL_TOKEN = re.compile(r"\be-?mails?\b", re.IGNORECASE)
+_EMAIL_SEND_VERB = re.compile(
+    r"\b(draft|write|compose|send|shoot|fire off|pen|reply|respond|get back)\b", re.IGNORECASE
+)
+_EMAIL_AS_VERB = re.compile(r"\be-?mail\s+(to\b|him\b|her\b|them\b|\S+@\S+)", re.IGNORECASE)
+_RECIPIENT = re.compile(r"\bto\b|\b(him|her|them)\b|\S+@\S+", re.IGNORECASE)
+
+# Doctrine exceptions where PROSE is the RIGHT answer, so the backstop must NOT force a card:
+#   see-only — prompts.py: the card is the review surface EXCEPT when the master asks to see the
+#   text without sending ("just show me a draft, don't do anything");
+#   meta/how-to — "how do I write a formal email?" wants an explanation, not an email.
+_SEE_ONLY = re.compile(
+    r"\b(do\s*n'?t\s+(send|actually\s+send|do\s+anything|deliver|fire)"
+    r"|without\s+(actually\s+)?sending"
+    r"|just\s+show\s+me|show\s+me\s+(the|a|what)|let\s+me\s+see"
+    r"|see\s+(the|a)\s+(draft|text|wording)|preview\s+(it|the)|don'?t\s+queue)\b",
+    re.IGNORECASE,
+)
+_META_HOWTO = re.compile(
+    r"\b(how\s+(do|should|would|could|can|to)\b|how'?s\s+the\s+best"
+    r"|what'?s?\s+(a|the)\s+(good|best|right|proper)\s+way"
+    r"|explain\s+how|teach\s+me|tips?\s+(for|on)|advice\s+on|example\s+of\s+a)\b",
     re.IGNORECASE,
 )
 _EMAIL_SHAPE_SIGNALS = (
@@ -214,7 +236,13 @@ _DRAFT_BACKSTOP_NUDGE = (
 
 
 def _is_draft_email_imperative(user_message: str) -> bool:
-    return bool(_DRAFT_EMAIL_IMPERATIVE.search(user_message or ""))
+    # email-send-to-a-recipient: an email token + (a compose/send verb OR "email" as the verb) + a
+    # recipient marker. "send a message to Bob" (no email token) → False (non-email channel).
+    m = user_message or ""
+    if not _EMAIL_TOKEN.search(m):
+        return False
+    has_verb = bool(_EMAIL_SEND_VERB.search(m)) or bool(_EMAIL_AS_VERB.search(m))
+    return has_verb and bool(_RECIPIENT.search(m))
 
 
 def _is_email_shaped(text: str) -> bool:
@@ -224,11 +252,18 @@ def _is_email_shaped(text: str) -> bool:
 
 
 def _is_draft_email_drop(user_message: str, response: AIMessage) -> bool:
-    """The describe-instead-of-call drop: a clear draft/send-email imperative that came back as
-    an email-shaped PROSE reply with no email_send call."""
+    """The describe-instead-of-call drop: a clear email-send-to-a-recipient imperative that came
+    back as email-shaped PROSE with no email_send call. EXCLUDES the cases where prose is correct —
+    see-only ("just show me a draft, don't send it" — the doctrine exception) and meta/how-to ("how
+    do I write a formal email?") — and non-email channels (the imperative requires the word 'email')."""
     if not (isinstance(response, AIMessage) and isinstance(response.content, str)):
         return False
-    return _is_draft_email_imperative(user_message) and _is_email_shaped(response.content)
+    if not _is_draft_email_imperative(user_message):
+        return False
+    msg = user_message or ""
+    if _SEE_ONLY.search(msg) or _META_HOWTO.search(msg):
+        return False  # the master wants to SEE the text / asked how-to — prose is right
+    return _is_email_shaped(response.content)
 
 
 def _append_queue_offer(response: AIMessage) -> AIMessage:

@@ -31,10 +31,14 @@ class _FakeLLM:
 
 def test_imperative_detection():
     for yes in ["draft an email to Bob", "write an email to him", "send an email to alice@x.com",
-                "reply to Priya's email", "email her about the delay", "compose a message to the team"]:
+                "reply to Priya's email", "email her about the delay", "compose an email to the team"]:
         assert _is_draft_email_imperative(yes), yes
     for no in ["what is the capital of France", "what would you say to Bob?",
-               "summarize the contract", "add a task to call the dentist"]:
+               "summarize the contract", "add a task to call the dentist",
+               # non-email channels: bare "message"/"note" must NOT be email-send intent
+               "send a message to Bob", "compose a message to the team", "leave a note for Alice",
+               # an email mention with no recipient isn't a send-to-X imperative
+               "what's a good email subject for a follow-up"]:
         assert not _is_draft_email_imperative(no), no
 
 
@@ -51,6 +55,27 @@ def test_drop_detection_requires_both_imperative_and_shape():
     assert _is_draft_email_drop("draft an email to Bob", prose)
     assert not _is_draft_email_drop("what would you say to Bob?", prose)  # not an imperative
     assert not _is_draft_email_drop("draft an email to Bob", AIMessage(content="Queued it, Sir."))  # not shaped
+
+
+def test_no_backstop_for_see_only_meta_or_non_email():
+    # Three cases the detection must NOT force a card on — even when the reply is email-shaped
+    # (so the ONLY thing keeping them from firing is the new scoping/exclusions).
+    prose = AIMessage(content=_DRAFT)
+    # (1) See-only — the doctrine itself permits prose when the master asks to SEE without sending.
+    for see_only in ["just show me a draft email to Bob, don't send it",
+                     "write an email to Bob but don't send it, just show me the text",
+                     "draft an email to her without sending"]:
+        assert not _is_draft_email_drop(see_only, prose), see_only
+    # (2) Meta / how-to — wants an explanation, not an email.
+    for meta in ["how do I write a formal email to my boss?",
+                 "what's a good way to write an email to a client?"]:
+        assert not _is_draft_email_drop(meta, prose), meta
+    # (3) Non-email channels — bare "message"/"note" must not force email_send.
+    for non_email in ["send a message to Bob saying I'll be late",
+                      "leave a note for Alice about the meeting"]:
+        assert not _is_draft_email_drop(non_email, prose), non_email
+    # control: the real drop still fires.
+    assert _is_draft_email_drop("draft an email to Bob about the delay", prose)
 
 
 @pytest.mark.asyncio
