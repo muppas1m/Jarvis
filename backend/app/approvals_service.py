@@ -39,7 +39,7 @@ class UnifiedApprovalCard(BaseModel):
     tool_name: str
     tool_args: dict
     description: str
-    status: str  # pending | approved | rejected | discarded | expired | executed | failed
+    status: str  # pending | approved | rejected | discarded | expired | executed | failed | unconfirmed
     created_at: str
     # True for a COMPLEX inbound email surfaced as a heads-up (no draft yet) — the card
     # renders "say go and I'll draft it" instead of Approve/Send.
@@ -109,7 +109,9 @@ def to_unified_card(row: PendingApproval) -> UnifiedApprovalCard:
 
 
 # Terminal outcome states a RESOLVED+dispatched action lands in (set by the dispatch gate).
-TERMINAL_OUTCOME_STATES = ("executed", "failed")
+# unconfirmed = EmailSendUncertain — the send could NOT be confirmed (neither clean success
+# nor a definite failure); rendered ⚠️, never a clean ✅.
+TERMINAL_OUTCOME_STATES = ("executed", "failed", "unconfirmed")
 
 
 async def list_pending_cards() -> list[UnifiedApprovalCard]:
@@ -264,10 +266,13 @@ def render_outcomes_for_agent(cards: list[UnifiedApprovalCard], honorific: str, 
     if not cards:
         return ""
     now = now or datetime.now(UTC)
+    _icon = {"executed": "✅", "failed": "❌", "unconfirmed": "⚠️"}
+    _default_tail = {"executed": "done", "failed": "failed",
+                     "unconfirmed": "may have sent — couldn't confirm"}
     lines = [f"Recently resolved, {honorific}:"]
     for c in cards:
-        icon = "✅" if c.status == "executed" else "❌"
+        icon = _icon.get(c.status, "•")
         detail = (c.outcome_detail or "").strip()
-        tail = f" — {detail}" if detail else (" — done" if c.status == "executed" else " — failed")
+        tail = f" — {detail}" if detail else f" — {_default_tail.get(c.status, c.status)}"
         lines.append(f"{icon} {_outcome_subject(c)}{tail}  ({_age(c.resolved_at or c.created_at, now)})")
     return "\n".join(lines)

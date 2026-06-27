@@ -111,8 +111,13 @@ def _terminal_outcome(outcome: ApprovalDispatchOutcome) -> tuple[str, str] | Non
             return ("failed", "That action isn't permitted.")
         return None
     if outcome.kind == "email":
-        if outcome.status in ("sent", "send_uncertain"):
+        if outcome.status == "sent":
             return ("executed", _clean_detail(outcome.detail) or "Reply sent.")
+        if outcome.status == "send_uncertain":
+            # EmailSendUncertain — the send could NOT be confirmed. A DISTINCT terminal state,
+            # never a clean ✅ "sent": the agent says "may have sent — I couldn't confirm".
+            return ("unconfirmed",
+                    _clean_detail(outcome.detail) or "The send couldn't be confirmed — it may have gone out.")
         if outcome.status in ("send_failed", "row_missing", "payload_incomplete"):
             return ("failed", _clean_detail(outcome.detail) or "Send failed.")
         return None  # rejected
@@ -154,9 +159,13 @@ async def _record_outcome(approval_id: str, outcome: ApprovalDispatchOutcome) ->
     # AIMessage note — it never re-answers the original [QUEUED] tool_call (no double-answer).
     thread_id = outcome.thread_id
     if thread_id and not is_email_approval(thread_id):
-        marker = ("✅ " if status == "executed" else "❌ ") + (
-            detail or ("Done." if status == "executed" else "That action failed.")
-        )
+        icon = {"executed": "✅", "failed": "❌", "unconfirmed": "⚠️"}.get(status, "•")
+        default = {
+            "executed": "Done.",
+            "failed": "That action failed.",
+            "unconfirmed": "The send couldn't be confirmed — it may have gone out.",
+        }.get(status, "")
+        marker = f"{icon} " + (detail or default)
         try:
             from app.agent.runner import note_approval_outcome
             await note_approval_outcome(thread_id, marker)

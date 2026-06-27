@@ -105,7 +105,10 @@ async def email_history_search(
     limit = max(1, min(int(limit), _MAX_LIMIT))
 
     valid_classifications = {"spam", "fyi", "action_required"}
-    valid_statuses = {"pending", "approved", "rejected", "expired"}
+    # executed/failed/unconfirmed are the terminal outcome states the approval dispatch now
+    # stamps (a sent inbound reply is "executed", not "approved") — recognize them so this
+    # tool agrees with approvals_pending instead of contradicting it.
+    valid_statuses = {"pending", "approved", "rejected", "expired", "executed", "failed", "unconfirmed"}
     valid_urgencies = {"immediate", "today", "this_week", "none"}
 
     classification_filter: Optional[str] = classification.strip() or None
@@ -309,11 +312,21 @@ def _status_phrase(r, now: datetime) -> str:
             return f"pending (expires in {hours}h)"
         return "pending"
 
+    # Terminal outcome states (post-dispatch) — these must AGREE with approvals_pending's
+    # ✅ executed / ❌ failed / ⚠️ unconfirmed so the two outcome tools never contradict.
+    if status == "executed":
+        return f"reply sent {_relative_time(r.resolved_at, now)}"
+    if status == "failed":
+        return f"reply failed to send {_relative_time(r.resolved_at, now)}"
+    if status == "unconfirmed":
+        return f"reply may have sent — couldn't confirm ({_relative_time(r.resolved_at, now)})"
+
     if status == "approved":
+        # Transitional: claimed but the outcome recorder hasn't stamped a terminal state yet.
         if r.auto_sent:
             sent_ago = _relative_time(r.resolved_at, now)
             return f"approved, reply sent {sent_ago}"
-        return "approved (send not confirmed — check audit_trail)"
+        return "approved (send not yet confirmed)"
 
     if status == "rejected":
         return f"rejected {_relative_time(r.resolved_at, now)}"
