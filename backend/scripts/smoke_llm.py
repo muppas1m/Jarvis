@@ -5,10 +5,11 @@ Run inside the backend container:
 
     docker compose run --rm --entrypoint sh backend -c "cd /app && python scripts/smoke_llm.py"
 """
+
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
 import httpx
 from sqlalchemy import select
 
@@ -16,7 +17,6 @@ from app.config import settings
 from app.db.engine import async_session, close_db
 from app.db.models import LLMUsageLog
 from app.llm.gateway import llm_gateway
-
 
 THREAD_ID = "smoke-test-turn-5"
 

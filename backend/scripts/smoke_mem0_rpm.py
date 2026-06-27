@@ -14,15 +14,17 @@ Run inside the backend container:
     docker compose run --rm --entrypoint sh backend -c \
         "cd /app && python scripts/smoke_mem0_rpm.py"
 """
+
 import asyncio
 import sys
 import time
 import uuid
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
+
 from app.config import settings
 from app.db.engine import close_db
 from app.memory.manager import MemoryManager
-
 
 # Vary the content a little so Mem0's dedup doesn't merge them silently.
 TEMPLATES = [

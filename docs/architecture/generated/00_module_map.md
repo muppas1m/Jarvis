@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (113 modules)
+## `app/` — the system (114 modules)
 
 ```
 app/
@@ -58,7 +58,8 @@ app/
 ├── db/
 │   ├── __init__.py — —
 │   ├── engine.py — Database engine + session factory.
-│   └── models.py — ORM models — every table the application owns.
+│   ├── models.py — ORM models — every table the application owns.
+│   └── test_provisioning.py — Self-bootstrapping isolated test database + the data-safety guard.
 ├── documents/
 │   ├── __init__.py — Document ingestion: extract → chunk → (Turn 19: contextualize → embed → store).
 │   ├── chunker.py — Semantic chunking with token-budget ceiling.
@@ -146,6 +147,7 @@ app/
 
 ```
 scripts/
+├── _smoke_isolation.py — Import FIRST (before any `app.*` import) in every DB-touching smoke script.
 ├── gen_architecture.py — Architecture-doc generator — introspects the LIVE code and emits Markdown +
 ├── google_oauth.py — One-time Google OAuth refresh-token bootstrap.
 ├── issue_jwt.py — Mint an HS256 JWT for the master so we can curl protected endpoints
@@ -164,5 +166,6 @@ scripts/
 ├── smoke_observability.py — Turn 17.9 smoke — observability + reasoning lifts (p/q/q2/q3/s).
 ├── smoke_rag.py — Turn 19.6 smoke — RAG retrieval pipeline correctness (NOT retrieval quality).
 ├── smoke_telegram_route.py — Turn 11b — deterministic Telegram channel smoke.
-└── smoke_tools.py — Turn 10 smoke test — tool registry end-to-end.
+├── smoke_tools.py — Turn 10 smoke test — tool registry end-to-end.
+└── verify_prod_untouched.py — Empirical proof that the test suite no longer touches prod (the 2026-06-27 fix).
 ```

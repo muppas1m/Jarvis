@@ -15,16 +15,17 @@ Run inside the backend container:
     docker compose run --rm --entrypoint sh backend -c \
         "cd /app && python scripts/smoke_agent.py"
 """
+
 import asyncio
 import sys
 import uuid
 
-from sqlalchemy import select, text
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
+from sqlalchemy import text
 
 from app.agent.graph import close_checkpointer, init_checkpointer
 from app.agent.runner import run_turn
 from app.db.engine import async_session, close_db
-
 
 THREAD_ID = f"smoke-turn-9-{uuid.uuid4().hex[:8]}"
 

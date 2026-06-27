@@ -55,4 +55,5 @@ Setting names ending in `_URL` / `_HOST` / `_BASE_URL` / `_TOPIC`. A new endpoin
 - `LANGFUSE_HOST`
 - `OLLAMA_BASE_URL`
 - `REDIS_URL`
+- `TEST_DATABASE_URL`
 - `TUNNEL_PUBLIC_URL`

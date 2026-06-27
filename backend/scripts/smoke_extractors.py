@@ -28,6 +28,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
 import fitz  # PyMuPDF
 from docx import Document as DocxDocument
 from openpyxl import Workbook

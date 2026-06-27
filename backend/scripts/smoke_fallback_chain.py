@@ -15,9 +15,11 @@ Run inside the backend container:
     docker compose run --rm --entrypoint sh backend -c \
         "cd /app && python scripts/smoke_fallback_chain.py"
 """
+
 import asyncio
 import sys
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
 from sqlalchemy import select
 
 from app.config import settings

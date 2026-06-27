@@ -12,10 +12,12 @@ Run inside the backend container:
     docker compose run --rm --entrypoint sh backend -c \
         "cd /app && python scripts/smoke_langfuse_nodes.py"
 """
+
 import asyncio
 import sys
 import uuid
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
 import httpx
 
 from app.agent.graph import close_checkpointer, init_checkpointer
@@ -24,7 +26,6 @@ from app.agent.tools import register_all_tools
 from app.agent.tools.registry import tool_registry
 from app.config import settings
 from app.db.engine import close_db
-
 
 THREAD_ID = f"smoke-langfuse-{uuid.uuid4().hex[:8]}"
 

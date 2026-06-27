@@ -17,6 +17,26 @@ loop can raise, and that's noise, not a failure.
 import pytest
 
 from app.db.engine import engine
+from app.db.test_provisioning import (
+    DBIsolationError,
+    assert_isolated,
+    ensure_test_database,
+)
+
+
+def pytest_configure(config):
+    """Data-safety gate — runs ONCE before collection, before any test imports a
+    session. (1) HARD GUARD: refuse the whole run if the engine is bound to the prod
+    DB (the 2026-06-27 incident: the suite wrote to the master's live data). (2)
+    Provision a pristine isolated test DB for this session. A failure here aborts the
+    run loudly rather than letting a single test touch prod."""
+    try:
+        assert_isolated()
+        ensure_test_database(drop_first=True)
+    except DBIsolationError as exc:
+        pytest.exit(f"\n*** DB ISOLATION GUARD TRIPPED ***\n{exc}\n", returncode=1)
+    except Exception as exc:  # provisioning failure → fail loud, never fall through to prod
+        pytest.exit(f"\n*** test DB provisioning failed ***\n{exc!r}\n", returncode=1)
 
 
 async def _aclose(client) -> None:

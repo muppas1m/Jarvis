@@ -17,11 +17,13 @@ Run inside the backend container:
     docker compose run --rm --entrypoint sh backend -c \
         "cd /app && python scripts/smoke_telegram_route.py"
 """
+
 import asyncio
 import sys
 import uuid
 from unittest.mock import patch
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
 from sqlalchemy import select
 
 from app.agent.graph import close_checkpointer, init_checkpointer
@@ -31,8 +33,8 @@ from app.config import settings
 from app.db.engine import async_session, close_db
 from app.db.models import ConversationAnalytics
 from app.messaging.channel import NormalizedMessage
-from app.messaging.channels.telegram import get_telegram_channel
 from app.messaging.channel_registry import channel_registry
+from app.messaging.channels.telegram import get_telegram_channel
 from app.messaging.router import route_inbound
 
 

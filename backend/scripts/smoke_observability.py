@@ -20,6 +20,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
@@ -33,7 +35,6 @@ from app.agent.runner import (  # noqa: E402
     _stop_reason_for_error,
 )
 from app.agent.safety import SafetyClassifier, SafetyLevel  # noqa: E402
-from app.config import settings  # noqa: E402
 from app.db.engine import async_session  # noqa: E402
 from app.db.models import AuditTrail  # noqa: E402
 from app.utils.exceptions import CostCapExceededError  # noqa: E402

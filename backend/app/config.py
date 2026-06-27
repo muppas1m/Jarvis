@@ -10,7 +10,37 @@ pattern is fine for our process-per-container architecture; if we ever go
 multi-process or want hot-reload of config, swap to a `get_settings()` function
 with `@lru_cache`.
 """
+import os
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _under_test() -> bool:
+    """True when this process is the test/smoke harness — pytest in-process, or an
+    explicit opt-in for the standalone smoke scripts (JARVIS_TEST_MODE). Under pytest
+    this can NOT be turned off: the entire point is that a test run can never bind to
+    the master's live database (the 2026-06-27 corruption incident)."""
+    if "pytest" in sys.modules:
+        return True
+    return os.getenv("JARVIS_TEST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _db_name(url: str) -> str:
+    """The database name (last path segment) of a SQLAlchemy/libpq URL."""
+    return urlsplit(url).path.lstrip("/")
+
+
+def _with_test_db_name(url: str, suffix: str = "_test") -> str:
+    """`url` with its database name suffixed (idempotent if already suffixed) — the
+    auto-derived test DB, e.g. …/jarvis → …/jarvis_test. Host/creds/driver unchanged."""
+    parts = urlsplit(url)
+    name = parts.path.lstrip("/")
+    if name.endswith(suffix):
+        return url
+    return urlunsplit(parts._replace(path=f"/{name}{suffix}"))
 
 
 class Settings(BaseSettings):
@@ -25,6 +55,18 @@ class Settings(BaseSettings):
     DATABASE_URL: str            # async (asyncpg) — used by FastAPI / SQLAlchemy
     DATABASE_URL_SYNC: str       # sync (psycopg2) — used by Alembic migrations
     POSTGRES_ADMIN_PASSWORD: str = "jarvis_dev_admin"
+
+    # --- Test isolation (data-safety chokepoint) -----------------------------
+    # Under pytest / JARVIS_TEST_MODE the two URLs above are swapped to a SEPARATE
+    # database (auto-derived as <dbname>_test unless overridden here) by
+    # _isolate_test_db below — so a test or smoke run can NEVER write to prod.
+    TEST_DATABASE_URL: str = ""
+    TEST_DATABASE_URL_SYNC: str = ""
+    # Set by the validator (NOT env-driven) so the conftest hard guard can assert on
+    # them. RUNTIME_DB_IS_TEST = the swap actually happened; PROD_DB_NAME = the live
+    # database we must never touch under test.
+    RUNTIME_DB_IS_TEST: bool = False
+    PROD_DB_NAME: str = ""
 
     # --- Redis ----------------------------------------------------------------
     REDIS_URL: str
@@ -432,6 +474,35 @@ class Settings(BaseSettings):
     # it routes to the digest instead, so a misclassified real email stays
     # visible rather than silently vanishing from the inbox.
     EMAIL_TRIAGE_CONFIDENCE_FLOOR: float = 0.5
+
+    # --- Test-DB isolation: THE data-safety chokepoint -----------------------
+    @model_validator(mode="after")
+    def _isolate_test_db(self):
+        """Repoint EVERY database write surface at the isolated test DB when running
+        under test. The SQLAlchemy engine (DATABASE_URL), the LangGraph checkpointer
+        (DATABASE_URL_SYNC), and Mem0 (DATABASE_URL) all read these from this one
+        settings singleton — so swapping them HERE redirects all three at once. The
+        prod-DB build (uvicorn / celery) takes the early return and is unaffected."""
+        self.PROD_DB_NAME = _db_name(self.DATABASE_URL)
+        if not _under_test():
+            return self
+
+        test_async = self.TEST_DATABASE_URL or _with_test_db_name(self.DATABASE_URL)
+        test_sync = self.TEST_DATABASE_URL_SYNC or _with_test_db_name(self.DATABASE_URL_SYNC)
+
+        # HARD GUARD: the test DB must never be the prod DB. A misconfigured override
+        # (or a prod DB that already ends in _test) fails loud rather than corrupting data.
+        if _db_name(test_async) == self.PROD_DB_NAME or test_async == self.DATABASE_URL:
+            raise RuntimeError(
+                f"Refusing to run under test: resolved test database "
+                f"{_db_name(test_async)!r} equals the prod database {self.PROD_DB_NAME!r}. "
+                f"Point TEST_DATABASE_URL at a DISTINCT database."
+            )
+
+        self.DATABASE_URL = test_async
+        self.DATABASE_URL_SYNC = test_sync
+        self.RUNTIME_DB_IS_TEST = True
+        return self
 
 
 settings = Settings()

@@ -33,6 +33,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import _smoke_isolation  # noqa: F401  — side effect: bind to the test DB before any app import
+
 # Allow running this script directly without installing the backend package.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -52,7 +54,6 @@ from app.documents.search import (  # noqa: E402
     search_documents,
 )
 from app.utils.logging import configure_logging  # noqa: E402
-
 
 # Three disjoint single-topic documents. Separate documents (not one multi-topic
 # file) so each lands as its own chunk regardless of the chunker's packing —
