@@ -1471,6 +1471,15 @@ async def voice_turn(
             yield ev
         yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
     else:
+        # If NO agent text was streamed this turn, nothing was spoken yet — e.g. a clean
+        # "send an email to X" ends at queued_finish, whose closing is injected POST-stream and
+        # never streamed, so the card would surface silently. Speak the response now. When agent
+        # text WAS streamed (first_token), it was already spoken (incl. a compound's answer) — so
+        # don't re-speak.
+        if not first_token and (envelope.get("response") or "").strip():
+            ev = await _speak(envelope["response"])
+            if ev:
+                yield ev
         # Off-topic-while-pending: after answering, SPEAK the card reminder + append it
         # to the response (voice parity with text — answer, then a one-line reminder).
         if card_reminder:

@@ -201,3 +201,59 @@ async def test_reissue_same_send_in_one_turn_no_duplicate(real_checkpointer):
         assert len(await _cards(thread_id)) == 1, "identical content must dedup to one card"
     finally:
         await _cleanup(thread_id)
+
+
+# --------------------------------------------------------------------------- #
+# Side-effect fixes: queued_finish must NOT discard a genuine answer/ack,      #
+# and VOICE must speak the closing (the card was surfacing silently).          #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_queued_finish_preserves_genuine_content_not_draft_prose():
+    qmsg = _q("c1")
+
+    def ai(content):
+        return AIMessage(content=content, tool_calls=[_send_call("b@x", "Hi", "yo", "c1")])
+    # (1) a genuine inline answer/ack is KEPT as the response (compound / contextual ack)
+    out = await queued_finish_node({"messages": [ai("The capital of France is Paris."), qmsg]})
+    assert out["final_response"] == "The capital of France is Paris."
+    assert "messages" not in out  # no duplicate message — the agent's content is already in history
+    # (2) the draft restated as email-shaped prose → the generic closing (the card IS the draft)
+    draft = "Subject: Hi\n\nHi Bob,\n\nHere it is.\n\nBest,\nM"
+    out2 = await queued_finish_node({"messages": [ai(draft), qmsg]})
+    assert "queued it for your approval" in out2["final_response"].lower()
+    # (3) no content → the generic closing
+    out3 = await queued_finish_node({"messages": [ai(""), qmsg]})
+    assert "queued it for your approval" in out3["final_response"].lower()
+
+
+@pytest.mark.asyncio
+async def test_compound_inline_answer_survives_in_response(real_checkpointer):
+    # "email Bob and what's 2+2" → the agent answers inline AND queues → the answer must SURVIVE.
+    thread_id = f"web:{_MARK}-compound"
+    one = AIMessage(content="2 plus 2 is 4, Sir.", tool_calls=[_send_call("bob@x.com", "Hi", "yo", "c1")])
+    try:
+        with patch("app.agent.nodes._build_chat_model", lambda *a, **k: _Scripted([one])), _patches():
+            env = await runner.run_turn("email bob and what's 2+2", thread_id, "web", "u")
+        assert "2 plus 2 is 4" in env["response"], "the non-queue answer was discarded"
+        assert len(await _cards(thread_id)) == 1
+    finally:
+        await _cleanup(thread_id)
+
+
+@pytest.mark.asyncio
+async def test_voice_send_speaks_the_queued_closing(real_checkpointer, monkeypatch):
+    # VOICE "send an email to X": the card surfaces AND the closing is SPOKEN (was silent).
+    thread_id = f"web:{_MARK}-voice"
+    monkeypatch.setattr(runner, "synthesize", AsyncMock(return_value=b"AUDIO"))
+    monkeypatch.setattr("app.agent.nodes._build_chat_model",
+                        lambda *a, **k: _Scripted([AIMessage(content="", tool_calls=[_send_call("bob@x.com", "Hi", "yo", "c1")])]))
+    monkeypatch.setattr("app.messaging.failure_alerter.send_approval_request_to_master", AsyncMock())
+    try:
+        events = [ev async for ev in runner.voice_turn("send an email to bob", thread_id, "web", "u")]
+        assert any(e["type"] == "approval_required" for e in events), "the card must still surface"
+        spoken = [e["content"]["text"].lower() for e in events
+                  if e["type"] == "audio" and not e["content"].get("filler")]
+        assert any("queued it for your approval" in t for t in spoken), \
+            f"the closing must be SPOKEN, not silent; spoken={spoken}"
+    finally:
+        await _cleanup(thread_id)

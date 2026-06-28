@@ -818,13 +818,24 @@ def should_continue_tools(state: AgentState) -> str:
 
 async def queued_finish_node(state: AgentState) -> dict:
     """End the turn after an all-[QUEUED] tool round (the root fix's terminal node). The action(s)
-    are parked awaiting the master; routing back to agent_node would let it re-queue. Inject the
-    brief, deterministic closing reply (count-aware) as the turn's response — no LLM round needed."""
+    are parked awaiting the master; routing back to agent_node would let it re-queue.
+
+    PRESERVE any GENUINE answer/ack the agent produced ALONGSIDE the queue (a compound request's
+    non-queue answer, a contextual ack) — it's already the last assistant message, so surface it
+    as the response. But NOT the draft restated as email-shaped prose (the card IS the draft) →
+    there, and when there's no content, inject the brief deterministic closing. Either way the turn
+    ends (no re-queue)."""
     h = settings.MASTER_HONORIFIC
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.tool_calls),
         None,
     )
+    content = (last_ai.content if last_ai and isinstance(last_ai.content, str) else "").strip()
+    if content and not _is_email_shaped(content):
+        # the agent answered/acknowledged inline — keep it (no duplicate message; it's already
+        # the last assistant message, so just make it the turn's response).
+        return {"final_response": content}
+
     round_ids = {tc["id"] for tc in last_ai.tool_calls} if last_ai else set()
     n = sum(
         1 for m in state["messages"]
