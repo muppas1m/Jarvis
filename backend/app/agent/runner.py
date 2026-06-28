@@ -241,6 +241,7 @@ async def run_turn(
         "channel_user_id": channel_user_id,
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
+        "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
     }
 
     started_ms = time.monotonic()
@@ -369,6 +370,7 @@ async def stream_turn(
         "channel_user_id": channel_user_id,
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
+        "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
     }
 
     started_ms = time.monotonic()
@@ -1323,6 +1325,7 @@ async def voice_turn(
         "channel_user_id": channel_user_id,
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
+        "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
     }
 
     chunker = SentenceChunker()

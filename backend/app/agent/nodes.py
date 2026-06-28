@@ -440,7 +440,10 @@ async def agent_node(state: AgentState) -> dict:
         response = await _draft_email_backstop(state, response, llm, msgs)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
-    update: dict = {"messages": [response]}
+    # Mark that the agent has run this turn so the once-per-turn hourly rate check (above) is NOT
+    # re-run on later agent passes. (state.py field was read but never written → the check ran on
+    # EVERY pass, over-counting the cap.) Reset to 0 in each turn's initial_state.
+    update: dict = {"messages": [response], "tool_calls_this_turn": (state.get("tool_calls_this_turn") or 0) + 1}
     if not has_tool_calls:
         update["final_response"] = (
             response.content
