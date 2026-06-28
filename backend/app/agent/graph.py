@@ -31,6 +31,7 @@ from app.agent.nodes import (
     compact_node,
     memory_load_node,
     persist_node,
+    queued_finish_node,
     should_continue,
     should_continue_tools,
     tool_executor_node,
@@ -120,6 +121,7 @@ def build_graph():
     builder.add_node("memory_load", memory_load_node)
     builder.add_node("agent", agent_node)
     builder.add_node("tool_executor", tool_executor_node)
+    builder.add_node("queued_finish", queued_finish_node)
     builder.add_node("persist", persist_node)
     builder.add_node("compact", compact_node)
 
@@ -139,8 +141,12 @@ def build_graph():
         {
             "tool_executor": "tool_executor",
             "agent": "agent",
+            # ROOT FIX (duplicate-cards): an all-[QUEUED] round ENDS the turn here instead of
+            # looping back to agent_node (which re-queued the same action 5×).
+            "queued_finish": "queued_finish",
         },
     )
+    builder.add_edge("queued_finish", "persist")
     # persist → compact (4.B.3 rolling summary at the turn boundary) → END.
     builder.add_edge("persist", "compact")
     builder.add_edge("compact", END)

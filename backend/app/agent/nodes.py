@@ -713,7 +713,20 @@ async def tool_executor_node(state: AgentState) -> dict:
         # find-or-create keeps the should_continue_tools loop (or any re-process)
         # from minting a duplicate row + a second ping.
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
-        if approval_id is None:
+        if approval_id is not None:
+            logger.info(
+                "approval_already_queued_skip_duplicate",
+                thread_id=thread_id, interrupt_id=tool_call_id, tool_name=tool_name,
+            )
+        elif (dup := await _find_pending_approval_by_content(thread_id, tool_name, tool_args)) is not None:
+            # Content dedup (defense-in-depth): the SAME un-resolved action under a NEW tool_call_id
+            # must NOT mint a second card or re-ping (the 5-identical-cards bug). Reuse the row.
+            approval_id = dup
+            logger.info(
+                "approval_duplicate_content_skip",
+                thread_id=thread_id, tool_name=tool_name,
+            )
+        else:
             # Enrich the prompt with a pre-approval warning (calendar conflict
             # check today) so the master sees overlaps before deciding.
             description = _describe_action(tool_name, tool_args)
@@ -730,11 +743,6 @@ async def tool_executor_node(state: AgentState) -> dict:
                 approval_id=str(approval_id),
                 tool_name=tool_name,
                 description=description,
-            )
-        else:
-            logger.info(
-                "approval_already_queued_skip_duplicate",
-                thread_id=thread_id, interrupt_id=tool_call_id, tool_name=tool_name,
             )
         # Audit the QUEUE event (not an execute — the tool has NOT run).
         await _log_audit(
@@ -761,11 +769,20 @@ async def tool_executor_node(state: AgentState) -> dict:
 
 
 def should_continue_tools(state: AgentState) -> str:
-    """Routing after `tool_executor`. Loop back to itself if the latest
-    AIMessage still has unprocessed tool calls; otherwise return to the
-    agent so it can react to the tool results."""
-    # Walk back to find the most recent AIMessage with tool_calls (skip any
-    # ToolMessages we just emitted).
+    """Routing after `tool_executor`:
+      - unprocessed tool calls remain in the latest round → loop back to drain them;
+      - the WHOLE round resolved to terminal [QUEUED] approvals → END the turn
+        (`queued_finish`), NOT back to the agent — see below;
+      - otherwise (a non-QUEUED result the agent must react to) → back to `agent`.
+
+    ROOT FIX (duplicate-cards bug): an APPROVE-tier tool QUEUEs and returns a [QUEUED]
+    ToolMessage; the action is now parked awaiting the master, with nothing for the agent to
+    react to. Routing back to agent_node let it RE-QUEUE the same action round after round
+    (directly + via the #3 backstop) → 5 identical cards. When every result of the round is
+    [QUEUED], the agent's job for those actions is done → end the turn so no further round can
+    re-queue. A round that queues TWO DIFFERENT actions drains both in the per-call executor
+    before this runs (both [QUEUED] → end); a MIXED round (SAFE read + APPROVE) has a non-QUEUED
+    result the agent legitimately consumes → back to agent."""
     last_ai_msg = None
     for m in reversed(state["messages"]):
         if isinstance(m, AIMessage) and m.tool_calls:
@@ -780,7 +797,44 @@ def should_continue_tools(state: AgentState) -> str:
         if isinstance(m, ToolMessage)
     }
     pending = [tc for tc in last_ai_msg.tool_calls if tc["id"] not in already_processed]
-    return "tool_executor" if pending else "agent"
+    if pending:
+        return "tool_executor"
+
+    round_ids = {tc["id"] for tc in last_ai_msg.tool_calls}
+    round_results = [
+        m for m in state["messages"]
+        if isinstance(m, ToolMessage) and m.tool_call_id in round_ids
+    ]
+    if round_results and all(
+        isinstance(m.content, str) and m.content.startswith(QUEUED_MARKER_TAG)
+        for m in round_results
+    ):
+        return "queued_finish"   # all parked for approval — end the turn (no re-queue)
+    return "agent"
+
+
+async def queued_finish_node(state: AgentState) -> dict:
+    """End the turn after an all-[QUEUED] tool round (the root fix's terminal node). The action(s)
+    are parked awaiting the master; routing back to agent_node would let it re-queue. Inject the
+    brief, deterministic closing reply (count-aware) as the turn's response — no LLM round needed."""
+    h = settings.MASTER_HONORIFIC
+    last_ai = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.tool_calls),
+        None,
+    )
+    round_ids = {tc["id"] for tc in last_ai.tool_calls} if last_ai else set()
+    n = sum(
+        1 for m in state["messages"]
+        if isinstance(m, ToolMessage) and m.tool_call_id in round_ids
+        and isinstance(m.content, str) and m.content.startswith(QUEUED_MARKER_TAG)
+    )
+    if n >= 3:
+        closing = f"I've queued all {n} for your approval, {h}."
+    elif n == 2:
+        closing = f"I've queued both for your approval, {h}."
+    else:
+        closing = f"I've queued it for your approval, {h}."
+    return {"messages": [AIMessage(content=closing)], "final_response": closing}
 
 
 # ============================================================================
@@ -1018,6 +1072,29 @@ async def _find_pending_approval(thread_id: str, interrupt_id: str) -> uuid.UUID
         )
         row = result.first()
         return row[0] if row else None
+
+
+async def _find_pending_approval_by_content(
+    thread_id: str, action_type: str, tool_args: dict
+) -> uuid.UUID | None:
+    """Content-level dedup (defense-in-depth): the id of an UN-RESOLVED (status='pending')
+    PendingApproval for the SAME (thread_id, action_type, tool_args), else None.
+
+    ``_find_pending_approval`` dedups by interrupt_id (the tool_call_id), so it only catches the
+    SAME call re-processed. This catches the SAME action re-queued under a NEW tool_call_id — the
+    5-identical-cards bug — so an identical action can never queue twice under any re-entrancy.
+    Compares tool_args in Python over the (tiny) set of pending rows — robust + index-free."""
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(PendingApproval.id, PendingApproval.payload)
+            .where(PendingApproval.thread_id == thread_id)
+            .where(PendingApproval.action_type == action_type)
+            .where(PendingApproval.status == "pending")
+        )).all()
+    for row_id, payload in rows:
+        if (payload or {}).get("tool_args") == tool_args:
+            return row_id
+    return None
 
 
 async def _discard_pending_approval(thread_id: str, interrupt_id: str) -> None:

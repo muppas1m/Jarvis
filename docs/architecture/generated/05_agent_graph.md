@@ -17,6 +17,7 @@ graph TD;
 	memory_load(memory_load)
 	agent(agent)
 	tool_executor(tool_executor)
+	queued_finish(queued_finish)
 	persist(persist)
 	compact(compact)
 	__end__([<p>__end__</p>]):::last
@@ -25,7 +26,9 @@ graph TD;
 	agent -.-> tool_executor;
 	memory_load --> agent;
 	persist --> compact;
+	queued_finish --> persist;
 	tool_executor -.-> agent;
+	tool_executor -.-> queued_finish;
 	compact --> __end__;
 	tool_executor -.-> tool_executor;
 	classDef default fill:#f2f0ff,line-height:1.2
