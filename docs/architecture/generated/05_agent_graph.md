@@ -15,6 +15,7 @@ config:
 graph TD;
 	__start__([<p>__start__</p>]):::first
 	memory_load(memory_load)
+	card_resolution(card_resolution)
 	agent(agent)
 	tool_executor(tool_executor)
 	queued_finish(queued_finish)
@@ -24,7 +25,9 @@ graph TD;
 	__start__ --> memory_load;
 	agent -.-> persist;
 	agent -.-> tool_executor;
-	memory_load --> agent;
+	card_resolution -.-> agent;
+	card_resolution -.-> persist;
+	memory_load --> card_resolution;
 	persist --> compact;
 	queued_finish --> persist;
 	tool_executor -.-> agent;

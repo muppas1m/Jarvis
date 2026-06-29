@@ -54,6 +54,34 @@ class AgentState(TypedDict, total=False):
 
     # --- tool-call accounting ------------------------------------------------
     tool_calls_this_turn: int
+    # Step B (OPEN-1 idempotency floor) — reserved now so the state contract is settled
+    # ONCE and Step B doesn't re-pour the schema. The turn-scoped set of action signatures
+    # already queued this turn — `(tool, normalize(to))` for email_send, `(tool, start_iso)`
+    # for calendar_create — so a re-queue of the SAME action returns the existing [QUEUED]
+    # marker instead of a duplicate card (robust to subject/body regeneration). Step A does
+    # NOT read or write this; it is declared here as the agreed shape only.
+    queued_signatures: list[str]
+
+    # --- presented-card resolution (Step A — card interactions THROUGH the graph) ---
+    # `presented_approval_id` is the card the master is currently viewing (passed in by
+    # the runner from the client). When set, `card_resolution_node` judges the master's
+    # message against it on the STRONG model (consent gate) and either resolves it
+    # (claim-gated dispatch) or routes the turn to the agent as a normal, persisted turn.
+    # This retires the old runner short-circuits that never persisted (D2/NV1) and gave
+    # canned wrong-context answers (D3).
+    presented_approval_id: str   # the viewed card's id, or "" when none
+    presented_via: str           # "voice" | "web" — the resolved_via for the claim gate
+    # Set by card_resolution_node when it RESOLVES a card (approve/reject/edit/skip/stale),
+    # read by the runner post-graph to reconstruct the frontend events (decision_resolved /
+    # approval_required for an edit re-queue / presented_nav for skip). {} when the message
+    # was a question routed to the agent instead.
+    card_outcome: dict
+    # `card_handled` True → the node fully resolved the card → route to persist (end the
+    # turn with the node's outcome reply). False/absent → route to the agent (a question
+    # about the card, or no card) with `card_context` injected so the agent answers about
+    # the RIGHT card (D3) and can note it's still pending.
+    card_handled: bool
+    card_context: str
 
     # --- final assistant text (set when agent emits a non-tool message) -----
     final_response: str

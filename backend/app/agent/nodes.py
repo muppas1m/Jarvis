@@ -395,6 +395,18 @@ async def agent_node(state: AgentState) -> dict:
             "[Earlier conversation summary — older turns were compacted to save "
             "context; specific facts live in long-term memory above]\n" + running_summary
         )))
+    # Presented-card context (Step A): card_resolution_node routed a card QUESTION here.
+    # Give the agent the referent so it answers about THIS card (D3), not a different one,
+    # and can briefly note it's still awaiting approval if the message was off-topic.
+    card_context = (state.get("card_context") or "").strip()
+    if card_context:
+        msgs.append(SystemMessage(content=(
+            "[The master is viewing a pending approval card. " + card_context +
+            " If their latest message is ABOUT this card, answer about THIS specific item; "
+            "if it's a new topic, answer it and you may briefly note the card is still "
+            "awaiting their approval. Do NOT approve or send anything yourself — the master "
+            "decides via the card.]"
+        )))
     # De-poison (open-weights leak): strip any `<function…>` tool-call leak the
     # model emitted as TEXT in a PRIOR assistant turn from the history it now sees,
     # so it can't anchor on its own past format and re-emit it (in-context
@@ -849,6 +861,166 @@ async def queued_finish_node(state: AgentState) -> dict:
     else:
         closing = f"I've queued it for your approval, {h}."
     return {"messages": [AIMessage(content=closing)], "final_response": closing}
+
+
+# ============================================================================
+# Node 1b — card_resolution (Step A — presented-card interactions THROUGH the graph)
+# ============================================================================
+async def _card_edit_redraft(judged: Any, message: str) -> dict:
+    """Edit re-draft INSIDE the graph: claim-gated discard → revise → re-queue a NEW card.
+    Mirrors runner._revise_presented_card's core but returns STATE — the runner emits the
+    decision_resolved(discarded) + the new approval_required card from `card_outcome`. The
+    master's words are already in `messages` (the turn's HumanMessage), so we add only the
+    confirmation AIMessage; the checkpoint persists the negotiation (kills D2 for edits too)."""
+    from app.api.approvals import resolve_approval
+    from app.agent.runner import _requeue_revised_email
+    from app.email.responder import revise_draft
+
+    h = settings.MASTER_HONORIFIC
+    aid = judged.approval_id
+    # Carry the CARD's thread_id (not the conversation thread) into card_outcome so the
+    # decision_resolved event matches the old path exactly. For a chat card they're equal;
+    # for a CROSS-THREAD inbound-email card they differ — the old runner path emitted
+    # row.thread_id, so omitting it was a divergence. (The frontend greys by approval_id, so
+    # this is cosmetic today, but the contract stays faithful for any thread_id consumer.)
+    tid = judged.row.thread_id
+
+    # Only an email card with a draft can be revised; a tool card / heads-up → a nudge.
+    if not (judged.is_email_card and not judged.needs_drafting):
+        nudge = f"I can only send or discard this for now, {h}. Shall I go ahead?"
+        return {"messages": [AIMessage(content=nudge)], "final_response": nudge,
+                "card_outcome": {"approval_id": aid, "thread_id": tid}, "card_handled": True}
+
+    # 1. Claim-gated discard (pending→discarded) — the SAME atomic claim, so a concurrent
+    #    approve can't race it. A lost claim → already resolved → ack.
+    if await resolve_approval(aid, "discard", "web") is None:
+        reply = f"That one's already taken care of, {h}."
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"approval_id": aid, "decision_status": "stale", "thread_id": tid},
+                "card_handled": True}
+
+    payload = judged.row.payload or {}
+    change = judged.change or message
+    try:
+        revised = await revise_draft(
+            subject=payload.get("subject", ""), sender=payload.get("sender", ""),
+            draft=payload.get("draft", ""), change=change,
+        )
+        if not (revised or "").strip():
+            raise ValueError("empty revised draft")
+        card = await _requeue_revised_email(judged.row, revised)
+    except Exception as exc:  # noqa: BLE001 — never error the turn / never send
+        logger.warning("card_edit_redraft_failed", approval_id=aid, error=str(exc))
+        reply = f"I couldn't revise that one, {h} — ask me again and I'll redo it."
+        # The old card is already discarded → emit the flip so the UI greys it; no new card.
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"approval_id": aid, "decision_status": "discarded", "thread_id": tid},
+                "card_handled": True}
+
+    reply = f"I've revised that reply, {h} — the new draft is queued for your approval."
+    return {"messages": [AIMessage(content=reply)], "final_response": reply,
+            "card_outcome": {"approval_id": aid, "decision_status": "discarded",
+                             "thread_id": tid, "new_card": card},
+            "card_handled": True}
+
+
+async def card_resolution_node(state: AgentState) -> dict:
+    """Step A (L1): presented-card interactions run THROUGH the graph, so they persist
+    (kills D2/NV1) and a question about a card gets a REAL agent answer (kills D3).
+
+    When the master is viewing a card (`presented_approval_id` set), judge their message
+    against it on the STRONG decision model (`_judge_presented` → `resolve_decision`,
+    the consent gate — unchanged), then:
+      - approve/reject → `resolve_and_dispatch` (the atomic claim → at-most-once),
+        deterministic outcome reply; the runner emits decision_resolved from `card_outcome`.
+      - edit          → claim-gated discard → re-draft → re-queue a NEW card.
+      - skip          → DB-inert client nav (the row stays pending).
+      - stale/gone    → a brief ack.
+      - show_others / unclear / unrelated → NOT a resolution → route to the agent as a
+        normal, persisted turn, injecting the card context so it answers about THIS card.
+    No presented card → straight through to the agent.
+
+    L1 invariants preserved: the strong-model judge + the atomic claim both run here. A graph
+    re-process is safe — the claim returns not_claimed on the second pass, so no double-fire."""
+    aid = (state.get("presented_approval_id") or "").strip()
+    if not aid:
+        return {}  # no card → straight to the agent (no-op pass-through)
+
+    from app.agent.approval_dispatch import resolve_and_dispatch
+    from app.agent.runner import (
+        _card_context_line,
+        _judge_presented,
+        _presented_outcome_speech,
+    )
+
+    h = settings.MASTER_HONORIFIC
+    message = state.get("user_message", "") or ""
+    resolved_via = state.get("presented_via") or "web"
+
+    # Recent context for the judge, built from in-state history (no DB read needed —
+    # the turn's messages are already on the state).
+    recent: list[str] = []
+    for m in (state.get("messages") or [])[-6:]:
+        if isinstance(m, HumanMessage) and isinstance(m.content, str):
+            recent.append(f"User: {m.content}")
+        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+            recent.append(f"Assistant: {m.content}")
+    recent_context = "\n".join(recent)
+
+    judged = await _judge_presented(aid, message, recent_context)
+
+    # Stale / gone card → brief ack, end the turn (persisted).
+    if judged is None:
+        ack = f"That one's already taken care of, {h}."
+        return {"messages": [AIMessage(content=ack)], "final_response": ack,
+                "card_outcome": {"approval_id": aid, "decision_status": "stale"}, "card_handled": True}
+
+    intent = judged.intent
+
+    # Questions (NOT a resolution) → the agent, with the card context so it answers about
+    # THIS card (D3) and may note it's still pending. Persisted as a normal turn.
+    if intent in ("show_others", "unclear", "unrelated"):
+        logger.info("card_resolution_to_agent", approval_id=aid, intent=intent)
+        return {"card_context": _card_context_line(judged.row) if judged.row else "",
+                "card_handled": False}
+
+    # approve / reject → the atomic claim (at-most-once) + deterministic outcome reply.
+    # ground_thread=False: THIS turn writes the outcome reply into the thread itself, so the
+    # generic grounding must NOT also write it (a chat-queued tool card's thread_id IS this
+    # conversation thread → would double-write). The durable row-persist still runs (HUD).
+    if intent in ("approve", "reject"):
+        outcome = await resolve_and_dispatch(
+            aid, intent, resolved_via, {"approved": intent == "approve"}, ground_thread=False
+        )
+        if outcome.status == "not_claimed":  # lost the claim → never double-execute
+            reply = f"That one's already taken care of, {h}."
+            return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                    "card_outcome": {"approval_id": aid, "decision_status": "stale"}, "card_handled": True}
+        flip = "approved" if intent == "approve" else "rejected"
+        reply = _presented_outcome_speech(outcome, intent)
+        logger.info("card_resolution_resolved", approval_id=aid, intent=intent, status=outcome.status)
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"approval_id": aid, "decision_status": flip,
+                                 "thread_id": outcome.thread_id}, "card_handled": True}
+
+    # skip → DB-inert client nav (the row stays pending, reappears on reload).
+    if intent == "skip":
+        reply = f"Skipped, {h}."
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"approval_id": aid, "nav": "skip"}, "card_handled": True}
+
+    # edit → claim-gated re-draft (its own helper).
+    if intent == "edit":
+        return await _card_edit_redraft(judged, message)
+
+    # Unreachable taxonomy gap → safe default: route to the agent.
+    return {"card_handled": False}
+
+
+def route_after_card(state: AgentState) -> str:
+    """After card_resolution: a fully-resolved card ends the turn (persist); a question /
+    no-card flows to the agent for a normal, persisted turn."""
+    return "persist" if state.get("card_handled") else "agent"
 
 
 # ============================================================================

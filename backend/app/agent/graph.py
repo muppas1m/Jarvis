@@ -28,10 +28,12 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes import (
     agent_node,
+    card_resolution_node,
     compact_node,
     memory_load_node,
     persist_node,
     queued_finish_node,
+    route_after_card,
     should_continue,
     should_continue_tools,
     tool_executor_node,
@@ -102,23 +104,37 @@ async def reset_thread(thread_id: str) -> None:
 def build_graph():
     """Compile the agent StateGraph. Call AFTER init_checkpointer().
 
-    Topology:
-        START -> memory_load -> agent -> [should_continue]
-                                  ^       ├─ tool_calls? -> tool_executor
-                                  |       └─ no          -> persist -> END
+    Topology (Step A added card_resolution before the agent):
+        START -> memory_load -> card_resolution -> [route_after_card]
+                                  ^                  ├─ card_handled? -> persist (end the turn
+                                  |                  │                    with the node's outcome)
+                                  |                  └─ no            -> agent
                                   |
-                                  |     [should_continue_tools after tool_executor]
+                                  |     agent -> [should_continue]
+                                  |       ├─ tool_calls? -> tool_executor
+                                  |       └─ no          -> persist
+                                  |
+                                  |     tool_executor -> [should_continue_tools]
                                   |       ├─ more pending? -> tool_executor
-                                  └───────└─ all done     -> agent
+                                  |       ├─ all [QUEUED]  -> queued_finish -> persist
+                                  └───────└─ else          -> agent
+
+        persist -> compact -> END
+
+    card_resolution (Step A): when the master is viewing an approval card
+    (presented_approval_id set), it judges their message on the STRONG model and either
+    resolves the card (claim-gated dispatch) IN-graph — so the exchange persists — or routes
+    the turn to the agent for a normal answer. Retires the old runner short-circuits that
+    never persisted (D2/NV1) and gave canned wrong-context answers (D3).
 
     The tool_executor node processes ONE tool call per invocation; the
     conditional edge after it loops back to itself until every tool call
-    in the most recent AIMessage has produced a ToolMessage. This is what
-    makes the resume-from-interrupt path safe — see nodes.py docstring.
+    in the most recent AIMessage has produced a ToolMessage.
     """
     builder = StateGraph(AgentState)
 
     builder.add_node("memory_load", memory_load_node)
+    builder.add_node("card_resolution", card_resolution_node)
     builder.add_node("agent", agent_node)
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("queued_finish", queued_finish_node)
@@ -126,7 +142,15 @@ def build_graph():
     builder.add_node("compact", compact_node)
 
     builder.add_edge(START, "memory_load")
-    builder.add_edge("memory_load", "agent")
+    builder.add_edge("memory_load", "card_resolution")
+    builder.add_conditional_edges(
+        "card_resolution",
+        route_after_card,
+        {
+            "agent": "agent",
+            "persist": "persist",
+        },
+    )
     builder.add_conditional_edges(
         "agent",
         should_continue,

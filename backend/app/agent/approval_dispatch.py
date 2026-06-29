@@ -70,7 +70,8 @@ _NOT_CLAIMED = ApprovalDispatchOutcome(kind="none", status="not_claimed")
 
 
 async def resolve_and_dispatch(
-    approval_id: str, action: str, resolved_via: str, decision: dict[str, Any]
+    approval_id: str, action: str, resolved_via: str, decision: dict[str, Any],
+    *, ground_thread: bool = True,
 ) -> ApprovalDispatchOutcome:
     """THE single claim-then-dispatch gate every transport (dashboard / Telegram /
     voice / typed) calls. It atomically CLAIMS the approval (``resolve_approval``)
@@ -80,7 +81,15 @@ async def resolve_and_dispatch(
     anywhere else is a hole, so the gate lives in ONE function — it is structurally
     impossible to dispatch an unclaimed approval through it. On a lost claim
     (already resolved / expired / missing) it returns ``not_claimed`` and the tool
-    NEVER runs."""
+    NEVER runs.
+
+    ``ground_thread`` (default True): write a ✅/❌ outcome marker into the card's
+    conversation thread so the agent knows next turn. The OUT-OF-CONVERSATION callers
+    (dashboard button / Telegram callback) need it — there's no turn to record the
+    outcome otherwise. The IN-GRAPH resolver (``card_resolution_node``) passes False:
+    that turn already writes its OWN outcome reply into the thread, so grounding here
+    would DOUBLE-write it (a chat-queued tool card's thread_id IS the conversation
+    thread). The durable row-persist is unaffected either way (the HUD still reads it)."""
     from app.api.approvals import resolve_approval  # lazy — avoid an import cycle
 
     thread_id = await resolve_approval(approval_id, action, resolved_via)
@@ -92,7 +101,7 @@ async def resolve_and_dispatch(
     # row) + visible (grounded into the conversation thread). Runs in the ONE gate so it
     # covers EVERY channel (dashboard / Telegram / voice / typed) and every APPROVE-tier
     # action generically. Best-effort — never alters the outcome the transport renders.
-    await _record_outcome(approval_id, outcome)
+    await _record_outcome(approval_id, outcome, ground_thread=ground_thread)
     return outcome
 
 
@@ -150,9 +159,14 @@ async def _persist_outcome(approval_id: str, status: str, detail: str) -> None:
         logger.warning("approval_outcome_persist_failed", approval_id=approval_id, error=str(exc))
 
 
-async def _record_outcome(approval_id: str, outcome: ApprovalDispatchOutcome) -> None:
-    """Persist the terminal outcome AND ground the conversation thread, generically for any
-    APPROVE-tier action. Best-effort end-to-end — never affects the returned outcome."""
+async def _record_outcome(
+    approval_id: str, outcome: ApprovalDispatchOutcome, *, ground_thread: bool = True
+) -> None:
+    """Persist the terminal outcome AND (unless ``ground_thread`` is False) ground the
+    conversation thread, generically for any APPROVE-tier action. Best-effort end-to-end —
+    never affects the returned outcome. ``ground_thread=False`` is the in-graph resolver:
+    the row-persist still runs (HUD), but the thread marker is skipped because the resolving
+    turn already wrote its own outcome reply (no double-write)."""
     terminal = _terminal_outcome(outcome)
     if terminal is None:
         return
@@ -164,7 +178,7 @@ async def _record_outcome(approval_id: str, outcome: ApprovalDispatchOutcome) ->
     # (the persisted status + the recent-outcomes read cover those). The marker is a plain
     # AIMessage note — it never re-answers the original [QUEUED] tool_call (no double-answer).
     thread_id = outcome.thread_id
-    if thread_id and not is_email_approval(thread_id):
+    if ground_thread and thread_id and not is_email_approval(thread_id):
         icon = {"executed": "✅", "failed": "❌", "unconfirmed": "⚠️"}.get(status, "•")
         default = {
             "executed": "Done.",

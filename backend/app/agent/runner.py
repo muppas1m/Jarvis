@@ -242,6 +242,14 @@ async def run_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        # Card-resolution fields reset per turn (replace reducer persists them in the
+        # checkpoint; a stale value would re-inject a dead card note / re-emit an old
+        # decision_resolved). run_turn (Telegram) never carries a presented card.
+        "presented_approval_id": "",
+        "presented_via": "",
+        "card_context": "",
+        "card_handled": False,
+        "card_outcome": {},
     }
 
     started_ms = time.monotonic()
@@ -331,35 +339,12 @@ async def stream_turn(
                "content": _terminal_payload(_pending_interrupt_envelope(thread_id))}
         return
 
-    card_reminder = ""   # set when an off-topic message is answered with a card pending
-    if presented_approval_id:
-        # A card is presented and the master TYPED something. Judge it against the card
-        # (context-aware), then take the UNIFIED disposition (same for voice + text):
-        # resolve an actionable intent; re-ask an ambiguous one; ACK a stale/gone card;
-        # otherwise (off-topic) FALL THROUGH to a normal turn + a once-per-card reminder.
-        recent_context = await _recent_context(thread_id)
-        disp, judged = await _presented_disposition(presented_approval_id, user_message, recent_context)
-        logger.info(
-            "stream_turn_presented", thread_id=thread_id, approval_id=presented_approval_id,
-            disp=disp, intent=(judged.intent if judged else "stale"),
-        )
-        if disp == "resolve":
-            async for ev in _resolve_presented_decision(
-                judged, speak=False, message=user_message, conversation_thread_id=thread_id
-            ):
-                yield ev
-            return
-        if disp == "reask":
-            async for ev in _reask_presented(judged, speak=False):
-                yield ev
-            return
-        if disp == "plain":  # stale/gone card → brief ack, never answer it as a turn
-            async for ev in _stale_ack(speak=False):
-                yield ev
-            return
-        if disp == "remind":  # off-topic → answer below + remind ONCE per card
-            card_reminder = await _reminder_for(judged)
-        # only 'remind' reaches here now → answer the message in the normal turn below.
+    # Step A: a presented card no longer short-circuits before the graph. The card id is
+    # passed INTO the graph; `card_resolution_node` judges it on the strong model and either
+    # resolves it (claim-gated) or routes to the agent — either way the exchange persists
+    # (kills D2/NV1) and a question gets a real answer (kills D3). card_reminder retired (the
+    # agent notes a pending card via the injected card_context); "" keeps the payload helper inert.
+    card_reminder = ""
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
@@ -371,6 +356,12 @@ async def stream_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        "presented_approval_id": presented_approval_id or "",
+        "presented_via": "web",
+        # reset per turn (replace reducer) so a prior turn's card state can't leak.
+        "card_context": "",
+        "card_handled": False,
+        "card_outcome": {},
     }
 
     started_ms = time.monotonic()
@@ -442,6 +433,12 @@ async def stream_turn(
     if envelope["status"] == "interrupted":
         yield {"type": "approval_required", "thread_id": thread_id, "content": envelope["interrupt"]}
     else:
+        # Step A: a presented-card resolution handled in-graph → emit the frontend events
+        # (decision_resolved / approval_required for an edit re-queue / presented_nav for skip)
+        # reconstructed from the node-set card_outcome, so the dashboard greys/surfaces cards
+        # exactly as before — now from a PERSISTED turn.
+        for ev in _card_outcome_events(thread_id, result.get("card_outcome") or {}):
+            yield ev
         # 5.4 — code-guaranteed brief/offer in the DONE payload ONLY (like the card reminder),
         # NOT also as a live token: the client's done does patch(response), so a token + done
         # would render it twice. The done's response is canonical → it shows exactly once.
@@ -1243,6 +1240,35 @@ def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> d
     }
 
 
+def _card_outcome_events(thread_id: str, outcome: dict[str, Any]) -> list[dict[str, Any]]:
+    """Reconstruct the frontend events for a presented-card resolution that
+    `card_resolution_node` handled IN the graph (Step A). The node sets `card_outcome`
+    in state; the runner emits the same events the old runner short-circuits did —
+    a card flip (decision_resolved), a skip nav (presented_nav), and/or the NEW card
+    from an edit re-draft (approval_required) — so the dashboard greys/surfaces cards
+    exactly as before, now from a PERSISTED turn."""
+    events: list[dict[str, Any]] = []
+    if not outcome:
+        return events
+    approval_id = outcome.get("approval_id", "")
+    status = outcome.get("decision_status") or ""
+    if outcome.get("nav") == "skip":
+        events.append({
+            "type": "presented_nav", "thread_id": thread_id,
+            "content": {"action": "skip", "approval_id": approval_id},
+        })
+    elif status in ("approved", "rejected", "discarded"):
+        events.append(_decision_resolved_event(
+            outcome.get("thread_id") or thread_id, approval_id, status
+        ))
+    if outcome.get("new_card"):
+        events.append({
+            "type": "approval_required", "thread_id": thread_id,
+            "content": outcome["new_card"],
+        })
+    return events
+
+
 async def voice_turn(
     user_message: str,
     thread_id: str,
@@ -1284,37 +1310,13 @@ async def voice_turn(
         yield {"type": "done", "content": _terminal_payload(env)}
         return
 
-    card_reminder = ""   # set when an off-topic utterance is answered with a card pending
-    if presented_approval_id:
-        # A card is presented and the master SPOKE. Identical disposition to text (one
-        # shared judge + classifier): resolve an actionable intent; re-ask an ambiguous
-        # one; ACK a stale/gone card; otherwise (off-topic) FALL THROUGH to a normal
-        # spoken turn (answer it) + a once-per-card spoken reminder. This replaces the
-        # old voice-only nudge-and-block: voice now answers off-topic exactly like text.
-        # Checked AFTER the conversation interrupt so a live in-thread approval wins.
-        recent_context = await _recent_context(thread_id)
-        disp, judged = await _presented_disposition(presented_approval_id, user_message, recent_context)
-        logger.info(
-            "voice_turn_presented", thread_id=thread_id, approval_id=presented_approval_id,
-            disp=disp, intent=(judged.intent if judged else "stale"),
-        )
-        if disp == "resolve":
-            async for ev in _resolve_presented_decision(
-                judged, speak=True, message=user_message, conversation_thread_id=thread_id
-            ):
-                yield ev
-            return
-        if disp == "reask":
-            async for ev in _reask_presented(judged, speak=True):
-                yield ev
-            return
-        if disp == "plain":  # stale/gone card → brief spoken ack, never answer it as a turn
-            async for ev in _stale_ack(speak=True):
-                yield ev
-            return
-        if disp == "remind":  # off-topic → answer below + remind ONCE per card
-            card_reminder = await _reminder_for(judged)
-        # only 'remind' reaches here now → answer the utterance in the normal voice turn below.
+    # Step A: a presented card no longer short-circuits before the graph (voice parity with
+    # text). The card id is passed INTO the graph; `card_resolution_node` judges it on the
+    # strong model and either resolves it (claim-gated, spoken via the post-stream reply) or
+    # routes to the agent — either way the exchange persists (kills NV1) and a question gets a
+    # real answer (kills D3). card_reminder retired (the agent notes a pending card via the
+    # injected card_context); "" keeps the payload/speak helpers inert.
+    card_reminder = ""
 
     await _recover_cancellation_residue(thread_id)  # clean barge-in residue first
     msgs_before = await _existing_message_count(thread_id)
@@ -1326,6 +1328,12 @@ async def voice_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        "presented_approval_id": presented_approval_id or "",
+        "presented_via": "voice",
+        # reset per turn (replace reducer) so a prior turn's card state can't leak.
+        "card_context": "",
+        "card_handled": False,
+        "card_outcome": {},
     }
 
     chunker = SentenceChunker()
@@ -1480,6 +1488,12 @@ async def voice_turn(
             ev = await _speak(envelope["response"])
             if ev:
                 yield ev
+        # Step A: a presented-card resolution handled in-graph → emit the frontend events
+        # (decision_resolved / approval_required for an edit re-queue / presented_nav for skip)
+        # reconstructed from the node-set card_outcome. The spoken outcome reply is already
+        # voiced above (it's the post-stream response); these are the silent card-state signals.
+        for ev in _card_outcome_events(thread_id, result.get("card_outcome") or {}):
+            yield ev
         # Off-topic-while-pending: after answering, SPEAK the card reminder + append it
         # to the response (voice parity with text — answer, then a one-line reminder).
         if card_reminder:
