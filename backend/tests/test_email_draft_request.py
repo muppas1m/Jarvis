@@ -90,19 +90,9 @@ async def test_dispatch_approval_routes_headsup_to_draft_not_send(monkeypatch):
     assert sent.await_count == 0  # the SEND handler was NEVER called
 
 
-# --- runner side: the property + the edit-nudge ------------------------------
+# --- runner side: the heads-up property --------------------------------------
 def test_judgment_needs_drafting_property():
     assert _j("approve", needs_drafting=True).needs_drafting is True
     assert _j("approve", needs_drafting=False).needs_drafting is False
-
-
-async def test_edit_on_headsup_card_nudges_not_revises():
-    events = [
-        e async for e in runner._resolve_presented_decision(
-            _j("edit", change="make it formal"), speak=False,
-            message="make it formal", conversation_thread_id="web:master",
-        )
-    ]
-    done = [e for e in events if e["type"] == "done"][-1]
-    assert "haven't drafted" in done["content"]["response"].lower()  # nudge to "go" first
-    assert not any(e["type"] == "approval_required" for e in events)  # no revise, no new card
+# (the edit-on-headsup nudge moved into the graph — covered by card_resolution_node's
+#  _card_edit_redraft "I can only send or discard" branch.)

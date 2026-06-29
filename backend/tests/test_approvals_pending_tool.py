@@ -116,24 +116,7 @@ async def test_identical_whether_or_not_a_card_is_surfaced():
         await _cleanup()
 
 
-@pytest.mark.asyncio
-async def test_summarize_pending_uses_shared_renderer_no_garble():
-    # The voice/text "what else is pending?" line goes through the SAME renderer → an
-    # email_send reads "an email to <to>", never the "email send" garble.
-    await _seed()
-    try:
-        cards = await list_pending_cards()
-        rows_like_cards = [c for c in cards if _MARK in c.thread_id]
-        # drive the row-based summary used by the presented-card path
-        async with async_session() as s:
-            from sqlalchemy import select
-            rows = (await s.execute(select(PendingApproval)
-                    .where(PendingApproval.thread_id.like(f"%{_MARK}")))).scalars().all()
-        out = runner._summarize_pending(list(rows), "none-presented", "Sir")
-        assert "an email to alice@example.com" in out      # email_send → "an email to", humanized
-        assert "a reply to Bob <bob@example.com>" in out   # email_reply → "a reply to"
-        assert "calendar create" in out
-        assert "email send" not in out.lower()
-        assert len(rows_like_cards) == 3
-    finally:
-        await _cleanup()
+# (Removed test_summarize_pending_uses_shared_renderer_no_garble — it drove the now-removed
+#  runner._summarize_pending, whose underlying renderer approvals_service.summarize_others is
+#  itself now-dead collateral, flagged for a follow-up. The approvals_pending TOOL renderer
+#  (render_for_agent) is covered by the tests above.)

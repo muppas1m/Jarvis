@@ -866,7 +866,7 @@ async def queued_finish_node(state: AgentState) -> dict:
 # ============================================================================
 # Node 1b — card_resolution (Step A — presented-card interactions THROUGH the graph)
 # ============================================================================
-async def _card_edit_redraft(judged: Any, message: str) -> dict:
+async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web") -> dict:
     """Edit re-draft INSIDE the graph: claim-gated discard → revise → re-queue a NEW card.
     Mirrors runner._revise_presented_card's core but returns STATE — the runner emits the
     decision_resolved(discarded) + the new approval_required card from `card_outcome`. The
@@ -892,8 +892,9 @@ async def _card_edit_redraft(judged: Any, message: str) -> dict:
                 "card_outcome": {"approval_id": aid, "thread_id": tid}, "card_handled": True}
 
     # 1. Claim-gated discard (pending→discarded) — the SAME atomic claim, so a concurrent
-    #    approve can't race it. A lost claim → already resolved → ack.
-    if await resolve_approval(aid, "discard", "web") is None:
+    #    approve can't race it. A lost claim → already resolved → ack. resolved_via threads
+    #    the real channel (voice/web) into the audit field instead of a hardcoded "web".
+    if await resolve_approval(aid, "discard", resolved_via) is None:
         reply = f"That one's already taken care of, {h}."
         return {"messages": [AIMessage(content=reply)], "final_response": reply,
                 "card_outcome": {"approval_id": aid, "decision_status": "stale", "thread_id": tid},
@@ -1011,7 +1012,7 @@ async def card_resolution_node(state: AgentState) -> dict:
 
     # edit → claim-gated re-draft (its own helper).
     if intent == "edit":
-        return await _card_edit_redraft(judged, message)
+        return await _card_edit_redraft(judged, message, resolved_via)
 
     # Unreachable taxonomy gap → safe default: route to the agent.
     return {"card_handled": False}
