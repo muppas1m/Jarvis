@@ -113,13 +113,14 @@ def test_routing_pending_calls_drain_first():
 
 
 @pytest.mark.asyncio
-async def test_queued_finish_node_closing_is_count_aware():
+async def test_queued_finish_falls_back_to_ack_when_rows_absent():
+    # Step B L1: queued_finish now NAMES the queued cards (deterministic read-back, see
+    # test_stepb_stage1). With no seeded PendingApproval rows for c1/c2 the fetch finds none →
+    # a generic "queued … approval" ack (never an error / never silent).
     ai2 = AIMessage(content="", tool_calls=[_send_call("a@x", "A", "a", "c1"), _send_call("b@x", "B", "b", "c2")])
     out = await queued_finish_node({"messages": [ai2, _q("c1"), _q("c2")]})
-    assert "queued both" in out["final_response"].lower()
-    ai1 = AIMessage(content="", tool_calls=[_send_call("a@x", "A", "a", "c1")])
-    out1 = await queued_finish_node({"messages": [ai1, _q("c1")]})
-    assert "queued it" in out1["final_response"].lower()
+    r = out["final_response"].lower()
+    assert "queued" in r and "approval" in r
 
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +165,8 @@ async def test_one_send_yields_exactly_one_card(real_checkpointer):
         with patch("app.agent.nodes._build_chat_model", lambda *a, **k: llm), _patches():
             env = await runner.run_turn("send an email to bob", thread_id, "web", "u")
         assert env["status"] == "complete"
-        assert "queued it for your approval" in env["response"].lower()
+        assert "bob@x.com" in env["response"]  # L1: the deterministic read-back NAMES the card
+        assert "queued" in env["response"].lower()
         cards = await _cards(thread_id)
         assert len(cards) == 1, f"expected exactly 1 card, got {len(cards)}"
         # the root fix: the agent ran ONCE — no re-queue loop (pre-fix this looped to the rate cap).
@@ -185,7 +187,7 @@ async def test_two_distinct_emails_yield_two_cards(real_checkpointer):
         assert len(cards) == 2, f"two DIFFERENT actions must both queue, got {len(cards)}"
         tos = sorted((c.payload or {}).get("tool_args", {}).get("to") for c in cards)
         assert tos == ["alice@x.com", "bob@x.com"]
-        assert "queued both" in env["response"].lower()
+        assert "alice@x.com" in env["response"] and "bob@x.com" in env["response"]  # read-back names both
     finally:
         await _cleanup(thread_id)
 
@@ -215,8 +217,8 @@ async def test_queued_finish_preserves_genuine_content_not_draft_prose():
         return AIMessage(content=content, tool_calls=[_send_call("b@x", "Hi", "yo", "c1")])
     # (1) a genuine inline answer/ack is KEPT as the response (compound / contextual ack)
     out = await queued_finish_node({"messages": [ai("The capital of France is Paris."), qmsg]})
-    assert out["final_response"] == "The capital of France is Paris."
-    assert "messages" not in out  # no duplicate message — the agent's content is already in history
+    assert "capital of France is Paris" in out["final_response"]  # genuine answer preserved
+    assert "queued" in out["final_response"].lower()             # + the read-back appended (L1)
     # (2) the draft restated as email-shaped prose → the generic closing (the card IS the draft)
     draft = "Subject: Hi\n\nHi Bob,\n\nHere it is.\n\nBest,\nM"
     out2 = await queued_finish_node({"messages": [ai(draft), qmsg]})
@@ -253,7 +255,7 @@ async def test_voice_send_speaks_the_queued_closing(real_checkpointer, monkeypat
         assert any(e["type"] == "approval_required" for e in events), "the card must still surface"
         spoken = [e["content"]["text"].lower() for e in events
                   if e["type"] == "audio" and not e["content"].get("filler")]
-        assert any("queued it for your approval" in t for t in spoken), \
-            f"the closing must be SPOKEN, not silent; spoken={spoken}"
+        assert any("queued" in t for t in spoken), \
+            f"the read-back must be SPOKEN, not silent; spoken={spoken}"
     finally:
         await _cleanup(thread_id)

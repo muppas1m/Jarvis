@@ -727,6 +727,19 @@ async def tool_executor_node(state: AgentState) -> dict:
         # Idempotency: interrupt_id (the tool_call_id) is unique per call; the
         # find-or-create keeps the should_continue_tools loop (or any re-process)
         # from minting a duplicate row + a second ping.
+        #
+        # L0 (in-turn idempotency guard): the SAME action re-emitted THIS turn (a NEW tool_call_id)
+        # returns the existing [QUEUED] — no new card, no re-ping — IN FRONT of the durable DB
+        # dedups below (additive, never a replacement; on a mid-turn crash the in-memory set is
+        # lost but the DB content-dedup at _find_pending_approval_by_content still catches it).
+        sigs = list(state.get("queued_signatures") or [])
+        sig = _queue_signature(tool_name, tool_args)
+        if sig in sigs:
+            logger.info("queued_signature_hit_skip", thread_id=thread_id, tool_name=tool_name)
+            await _log_audit(thread_id, tool_name, level, tool_args, success=False, error="QUEUED_DEDUP")
+            return {"messages": [ToolMessage(
+                content=_QUEUED_MARKER.format(tool=tool_name), tool_call_id=tool_call_id)]}
+
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
         if approval_id is not None:
             logger.info(
@@ -773,7 +786,8 @@ async def tool_executor_node(state: AgentState) -> dict:
                     content=_QUEUED_MARKER.format(tool=tool_name),
                     tool_call_id=tool_call_id,
                 )
-            ]
+            ],
+            "queued_signatures": sigs + [sig],  # L0: record so a re-emit this turn is deduped
         }
 
     # ---- execute (SAFE or NOTIFY — APPROVE is queued above, never reaches here)
@@ -832,39 +846,56 @@ def should_continue_tools(state: AgentState) -> str:
     return "agent"
 
 
-async def queued_finish_node(state: AgentState) -> dict:
-    """End the turn after an all-[QUEUED] tool round (the root fix's terminal node). The action(s)
-    are parked awaiting the master; routing back to agent_node would let it re-queue.
+async def _readback_for_queued(tool_call_ids: list, h: str) -> str:
+    """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the cards just
+    queued by this round, fetched by their interrupt_id (= the tool_call_id). describe_card gives
+    "an email to X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays
+    fixed on the llama primary. Falls back to a generic ack if the rows can't be read."""
+    from app.approvals_service import describe_card, to_unified_card
+    if not tool_call_ids:
+        return f"I've queued it for your approval, {h}."
+    try:
+        async with async_session() as session:
+            rows = (await session.execute(
+                select(PendingApproval).where(PendingApproval.interrupt_id.in_(list(tool_call_ids)))
+            )).scalars().all()
+        cards = [to_unified_card(r) for r in rows if r.status == "pending"]
+    except Exception as exc:  # noqa: BLE001 — never break the turn on the read-back fetch
+        logger.warning("readback_fetch_failed", error=str(exc))
+        cards = []
+    if not cards:
+        return f"I've queued it for your approval, {h}."
+    phrases = [describe_card(c) for c in cards]
+    if len(phrases) == 1:
+        joined = phrases[0]
+    elif len(phrases) == 2:
+        joined = f"{phrases[0]} and {phrases[1]}"
+    else:
+        joined = "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
+    return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
 
-    PRESERVE any GENUINE answer/ack the agent produced ALONGSIDE the queue (a compound request's
-    non-queue answer, a contextual ack) — it's already the last assistant message, so surface it
-    as the response. But NOT the draft restated as email-shaped prose (the card IS the draft) →
-    there, and when there's no content, inject the brief deterministic closing. Either way the turn
-    ends (no re-queue)."""
+
+async def queued_finish_node(state: AgentState) -> dict:
+    """End the turn after an all-[QUEUED] tool round — the deterministic LOOP TERMINATOR (kept;
+    retiring it re-opens the non-termination the root fix closed) AND the L1 read-back.
+
+    The reply is a DETERMINISTIC read-back that NAMES the queued cards (`_readback_for_queued`,
+    constraint #1 — the guarantee, not the model), so D1 (the canned "I've queued both") is fixed
+    without depending on the llama primary. A GENUINE non-queue answer (a compound's other half,
+    e.g. "…and what's 2+2") is PRESERVED — but NOT email-shaped prose (the card IS the draft). The
+    read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's tool_calls
+    message → no orphaned tool_call / Jun-11 poisoning)."""
     h = settings.MASTER_HONORIFIC
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.tool_calls),
         None,
     )
-    content = (last_ai.content if last_ai and isinstance(last_ai.content, str) else "").strip()
-    if content and not _is_email_shaped(content):
-        # the agent answered/acknowledged inline — keep it (no duplicate message; it's already
-        # the last assistant message, so just make it the turn's response).
-        return {"final_response": content}
+    round_ids = [tc["id"] for tc in last_ai.tool_calls] if last_ai else []
+    read_back = await _readback_for_queued(round_ids, h)
 
-    round_ids = {tc["id"] for tc in last_ai.tool_calls} if last_ai else set()
-    n = sum(
-        1 for m in state["messages"]
-        if isinstance(m, ToolMessage) and m.tool_call_id in round_ids
-        and isinstance(m.content, str) and m.content.startswith(QUEUED_MARKER_TAG)
-    )
-    if n >= 3:
-        closing = f"I've queued all {n} for your approval, {h}."
-    elif n == 2:
-        closing = f"I've queued both for your approval, {h}."
-    else:
-        closing = f"I've queued it for your approval, {h}."
-    return {"messages": [AIMessage(content=closing)], "final_response": closing}
+    content = (last_ai.content if last_ai and isinstance(last_ai.content, str) else "").strip()
+    final = f"{content}\n\n{read_back}" if (content and not _is_email_shaped(content)) else read_back
+    return {"messages": [AIMessage(content=read_back)], "final_response": final}
 
 
 # ============================================================================
@@ -1421,6 +1452,24 @@ async def _find_pending_approval_by_content(
         if (payload or {}).get("tool_args") == tool_args:
             return row_id
     return None
+
+
+def _queue_signature(tool_name: str, tool_args: dict) -> str:
+    """L0 — the in-turn idempotency key: "the same action re-emitted this turn". Subject-
+    discriminated for email (matching supersession's (to, subject) key) so a REGENERATED same
+    email dedups but two DISTINCT emails to one recipient in a compound turn both queue;
+    (tool, start, title) for calendar; exact-args otherwise. Turn-scoped (AgentState), ADDITIVE
+    in front of the durable DB dedups — never a replacement."""
+    from email.utils import parseaddr
+    if tool_name == "email_send":
+        to = parseaddr(tool_args.get("to") or "")[1].strip().lower()
+        subj = " ".join((tool_args.get("subject") or "").split()).lower()
+        return f"email_send|{to}|{subj}"
+    if tool_name == "calendar_create":
+        start = (tool_args.get("start_iso") or "").strip()
+        title = " ".join((tool_args.get("title") or "").split()).lower()
+        return f"calendar_create|{start}|{title}"
+    return f"{tool_name}|" + json.dumps(tool_args, sort_keys=True, default=str)
 
 
 async def _supersede_prior_email_card(thread_id: str, tool_name: str, tool_args: dict) -> int:

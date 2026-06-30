@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from langgraph.errors import GraphRecursionError
+
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -91,6 +93,18 @@ def graph():
     return _graph
 
 
+def _log_turn_error(thread_id: str, exc: BaseException, where: str) -> str:
+    """D22 — structured turn-error capture so an opaque 'Could not reach Jarvis' is diagnosable
+    next time. Distinguishes the GraphRecursionError loop-terminal (the L1 backstop) from a real
+    fault, and logs the exception TYPE. Returns the master-facing message."""
+    if isinstance(exc, GraphRecursionError):
+        logger.error("graph_recursion_terminal", thread_id=thread_id, where=where,
+                     limit=settings.GRAPH_RECURSION_LIMIT)
+        return "That request got stuck in a loop and I stopped it, Sir — could you rephrase it?"
+    logger.exception(where, thread_id=thread_id, error_type=type(exc).__name__, error=str(exc))
+    return "I hit an internal error. Please try again."
+
+
 def _config_with_handler(thread_id: str) -> tuple[dict, Any | None]:
     """Per-call config + the langfuse handler reference (so we can pull
     trace_id off it after the run). Returns (config, handler_or_None)."""
@@ -99,6 +113,9 @@ def _config_with_handler(thread_id: str) -> tuple[dict, Any | None]:
     config = {
         "configurable": {"thread_id": thread_id},
         "callbacks": callbacks,
+        # Explicit recursion backstop (D22 / L1): a runaway loop hits this as a logged terminal,
+        # not LangGraph's silent default-25 GraphRecursionError surfaced as a generic error.
+        "recursion_limit": settings.GRAPH_RECURSION_LIMIT,
     }
     return config, handler
 
@@ -242,6 +259,7 @@ async def run_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         # Card-resolution fields reset per turn (replace reducer persists them in the
         # checkpoint; a stale value would re-inject a dead card note / re-emit an old
         # decision_resolved). run_turn (Telegram) never carries a presented card.
@@ -256,15 +274,12 @@ async def run_turn(
     try:
         result = await graph().ainvoke(initial_state, config=config)
     except Exception as exc:
-        logger.exception("graph_invoke_failed", thread_id=thread_id, error=str(exc))
+        msg = _log_turn_error(thread_id, exc, "graph_invoke_failed")
         logger.info(
             "turn_complete", thread_id=thread_id, status="error",
             stop_reason=_stop_reason_for_error(exc), tool_calls=None,
         )
-        return _error_envelope(
-            thread_id, "I hit an internal error. Please try again.",
-            stop_reason=_stop_reason_for_error(exc),
-        )
+        return _error_envelope(thread_id, msg, stop_reason=_stop_reason_for_error(exc))
 
     duration_ms = int((time.monotonic() - started_ms) * 1000)
     envelope = await _build_envelope(
@@ -356,6 +371,7 @@ async def stream_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         "presented_approval_id": presented_approval_id or "",
         "presented_via": "web",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
@@ -399,10 +415,10 @@ async def stream_turn(
                             if ev:
                                 yield ev
     except Exception as exc:
-        logger.exception("graph_stream_failed", thread_id=thread_id, error=str(exc))
+        msg = _log_turn_error(thread_id, exc, "graph_stream_failed")
         yield {
             "type": "error",
-            "content": "I hit an internal error. Please try again.",
+            "content": msg,
             "stop_reason": _stop_reason_for_error(exc),
         }
         return
@@ -964,6 +980,7 @@ async def voice_turn(
         "user_message": user_message,
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
+        "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         "presented_approval_id": presented_approval_id or "",
         "presented_via": "voice",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
@@ -1085,8 +1102,7 @@ async def voice_turn(
         voice_mode.reset(flag_v)
 
     if error_exc is not None:
-        logger.exception("voice_stream_failed", thread_id=thread_id, error=str(error_exc))
-        msg = "I hit an internal error. Please try again."
+        msg = _log_turn_error(thread_id, error_exc, "voice_stream_failed")
         ev = await _speak(msg)
         if ev:
             yield ev

@@ -342,6 +342,10 @@ class Settings(BaseSettings):
     DAILY_LLM_SPEND_CAP_USD: float = 5.00
     DAILY_LLM_SOFT_CAP_PCT: float = 0.80    # at 80% of hard cap, force FAST_MODEL
     MAX_TOOL_CALLS_PER_TURN: int = 8
+    # Graph recursion backstop (LangGraph default is 25). An all-[QUEUED] round terminates at
+    # queued_finish, so this is a defensive ceiling; hitting it is logged as a turn-error terminal
+    # (D22), never a silent "internal error". Bounds any future return-to-agent loop (L2).
+    GRAPH_RECURSION_LIMIT: int = 40
     MAX_AGENT_TURNS_PER_HOUR: int = 100
     TOOL_RESULT_MAX_CHARS: int = 2000       # results bigger than this are archived
     MAX_UPLOAD_SIZE_MB: int = 25            # /documents/upload hard cap — streamed, never buffered whole
