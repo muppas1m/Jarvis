@@ -20,6 +20,7 @@ The function returns a tuple (sanitized_text, archived_full):
   - `archived_full` is the original raw payload when truncation happened
     (caller writes it to the tool_results table); None when no truncation.
 """
+import re
 from typing import Any
 
 
@@ -75,3 +76,19 @@ def sanitize_tool_result(
         f"{wrapper_close}"
     )
     return sanitized, raw_str
+
+
+def unwrap_tool_output(text: str) -> str:
+    """Extract the human-readable result from ``sanitize_tool_result``'s wrapper.
+
+    The ``<tool_output trust="untrusted">`` wrapper + DATA preamble exist for the AGENT's
+    prompt-injection guard — they must NEVER reach the master's eyes (D18: the raw wrapper was
+    rendered as a resolution reply / stored as ``outcome_detail``). This strips them back to the
+    clean inner result. Idempotent on already-clean text."""
+    s = text or ""
+    m = re.search(r"<tool_output\b[^>]*>", s)
+    if m:
+        s = s[m.end():].split("</tool_output>", 1)[0]
+    elif s.startswith(TOOL_RESULT_PREAMBLE):
+        s = s[len(TOOL_RESULT_PREAMBLE):]
+    return s.strip()

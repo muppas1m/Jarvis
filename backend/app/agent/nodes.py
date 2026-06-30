@@ -742,6 +742,10 @@ async def tool_executor_node(state: AgentState) -> dict:
                 thread_id=thread_id, tool_name=tool_name,
             )
         else:
+            # Liveness: a re-queued REVISION of the same email (same recipient+subject)
+            # supersedes the prior pending card, so the queue doesn't stack stale duplicates
+            # (the D15 duplicate-target trigger). Gentle — different-subject emails survive.
+            await _supersede_prior_email_card(thread_id, tool_name, tool_args)
             # Enrich the prompt with a pre-approval warning (calendar conflict
             # check today) so the master sees overlaps before deciding.
             description = _describe_action(tool_name, tool_args)
@@ -925,6 +929,157 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
             "card_handled": True}
 
 
+# --------------------------------------------------------------------------- #
+# Wrong-card-resolution SEAL (D15/D16) — resolve the AUTHORITATIVE live target,  #
+# NOT the (possibly stale, oldest-pending) client presented_approval_id.         #
+# --------------------------------------------------------------------------- #
+_CARD_KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
+_CARD_KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
+_CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
+# Anaphoric / command / filler tokens that DON'T name a specific target. A message made only of
+# these is a bare generic command ("send it" / "yes go ahead") → resolve the one live card.
+_GENERIC_TOKENS = frozenset({
+    "approve", "approved", "approves", "approving", "reject", "rejected", "rejects", "rejecting",
+    "send", "sent", "sends", "sending", "discard", "cancel", "cancelled", "confirm", "confirmed",
+    "go", "ahead", "do", "done", "it", "this", "that", "the", "one", "yes", "no", "nope", "yeah",
+    "yep", "yup", "sure", "ok", "okay", "k", "please", "now", "right", "them", "those", "thing",
+    "i", "my", "me", "you", "your", "to", "a", "an", "and", "with", "for", "is", "are", "of", "on",
+    "just", "actually", "still", "want", "wanted", "like", "would", "could", "can", "shall", "let",
+    "there", "here", "we", "should", "out", "off", "up", "good", "fine", "great",
+})
+
+
+# Kind / action / meta words that describe the CARD'S KIND, not a distinguishing target. Clause (a)
+# owns the kind check; these are stripped from clause (b) on BOTH the message and the card referent,
+# so a content match is on DISTINGUISHING content only. Otherwise the tool name ("email send") in the
+# referent lets a NEW same-kind request ("send an email to bob") match on the bare word "email" — and
+# the gate, which must be the BACKSTOP when the judge mis-fires (the llama primary might), would fail.
+_KIND_INDICATOR_WORDS = frozenset({
+    "calendar", "event", "events", "meeting", "meetings", "appointment", "appointments", "schedule",
+    "email", "emails", "mail", "reply", "replies", "send", "sends", "sent", "create", "creates",
+    "update", "delete", "draft", "drafts", "card", "approval", "action", "message", "messages",
+})
+
+
+def _card_distinguishing_text(card: Any) -> str:
+    """The card's DISTINGUISHING content (recipient / subject / title) with kind/action words removed —
+    so a content match is on what identifies THIS card, never on its kind."""
+    targs = card.tool_args or {}
+    text = " ".join(str(targs.get(k, "")) for k in ("to", "subject", "title")).lower()
+    return " ".join(w for w in re.findall(r"[a-z0-9@.]+", text) if w not in _KIND_INDICATOR_WORDS)
+
+
+def _names_mismatched_target(message: str, card: Any) -> bool:
+    """Deterministic count==1 guard (master refinement #1) — refuse when the master NAMES a target
+    that doesn't match the single live card; resolve a bare generic command. Code only, NO LLM,
+    and errs SAFE (over-refusing just asks). Two clauses:
+      (a) a KIND word for a DIFFERENT kind ("approve the calendar event" with one email card) → refuse.
+      (b) the message names DISTINGUISHING content (non-generic, non-kind tokens) and NONE of it
+          references the card ("approve the boat party" — or a NEW "send an email to bob" — with one
+          Fernandes-email card) → refuse. Kind words are excluded here, so a same-kind new request is
+          refused on its distinguishing token ("bob"), not matched on "email".
+    A message of only generic/anaphoric/kind tokens ("send it" / "yes") → resolve the one card."""
+    msg = (message or "").lower()
+    is_calendar = card.tool_name in _CALENDAR_TOOLS
+    is_email = card.kind == "email"
+    # (a) hard kind mismatch
+    if _CARD_KIND_CALENDAR.search(msg) and not is_calendar:
+        return True
+    if _CARD_KIND_EMAIL.search(msg) and not is_email:
+        return True
+    # (b) distinguishing-content mismatch — significant tokens, minus generic AND kind words
+    tokens = [t for t in re.findall(r"[a-z0-9@.]+", msg)
+              if len(t) > 2 and t not in _GENERIC_TOKENS and t not in _KIND_INDICATOR_WORDS]
+    if not tokens:
+        return False  # bare generic → resolve the one card
+    referent = _card_distinguishing_text(card)
+    return not any(t in referent for t in tokens)  # named a target this card isn't → refuse
+
+
+def _clean_resolution_reply(outcome: Any, intent: str, target: Any, h: str) -> str:
+    """The human reply for a resolved card — NAMES the actual card (D16, not an unconditional
+    "Discarded, Sir") and never leaks the raw <tool_output trust="untrusted"> wrapper (D18)."""
+    from app.agent.runner import _email_outcome_speech
+    from app.agent.sanitizer import unwrap_tool_output
+    from app.approvals_service import describe_card
+
+    subj = describe_card(target)
+    if intent == "reject":
+        return f"Discarded {subj}, {h}."
+    # approve
+    if outcome.uncertain:
+        return f"I tried to send {subj}, {h}, but couldn't confirm it went through."
+    if outcome.kind == "tool" and not outcome.success:
+        return f"That action failed, {h} — {subj} did not go through."
+    if target.tool_name == "email_send":
+        to = target.tool_args.get("to") or "the recipient"
+        return f"Sent the email to {to}, {h}."
+    if outcome.kind == "email" and outcome.email_outcome is not None:
+        return _email_outcome_speech(outcome.email_outcome)
+    clean = unwrap_tool_output(outcome.detail)
+    return f"Done — {clean}, {h}." if clean else f"Done, {h}."
+
+
+async def _resolve_with_referent_gate(intent: str, message: str, resolved_via: str, h: str, aid: str) -> dict:
+    """Layer 0 + Layer 1 — the wrong-card SEAL. Reads the AUTHORITATIVE live APPROVE set and
+    resolves ONLY when exactly one target is unambiguous AND it is the card the master was shown:
+      - >1 live card → REFUSE + name the choices (never guess which the master meant).
+      - the single live card is NOT the presented one (`aid`) → the shown card is gone; ACK stale,
+        NEVER substitute a different live card (closes the expiry-race / TOCTOU substitution hole).
+      - the single live card IS `aid` but the master's WORDS name a different target → REFUSE.
+      - the single live card IS `aid` + a bare/matching command → resolve it.
+    Referent selection is deterministic code; the strong judge only classified intent. Both
+    approve and reject are sealed; an irreversible action can never resolve a card not referred to."""
+    from app.agent.approval_dispatch import resolve_and_dispatch
+    from app.approvals_service import describe_card, list_pending_cards
+
+    live = await list_pending_cards()  # pending + unexpired; the queue holds APPROVE-tier only
+    verb = "approve" if intent == "approve" else "reject"
+
+    # >1 live → ambiguous → REFUSE + name the choices. NOTHING is resolved.
+    if len(live) > 1:
+        choices = "; ".join(describe_card(c) for c in live[:5])
+        more = f", and {len(live) - 5} more" if len(live) > 5 else ""
+        # Point to the buttons, not a question — until the Stage-2 among-many matcher ships, a
+        # spoken/typed answer would just refuse again (the gate can't disambiguate from chat).
+        reply = (f"You have {len(live)} awaiting your approval, {h}: {choices}{more}. "
+                 f"Please tap Approve or Reject on the card you mean — with several pending I can't "
+                 f"safely tell which from a chat command yet.")
+        logger.info("card_resolution_refused", intent=intent, live=len(live), reason="ambiguous")
+        return {"messages": [AIMessage(content=reply)], "final_response": reply, "card_handled": True}
+
+    # 0 live, OR the single live card is NOT the one the master was shown → the shown card is gone;
+    # ACK stale and NEVER substitute a different card (the expiry-race / TOCTOU substitution hole).
+    if not live or live[0].approval_id != aid:
+        reply = f"That one's already taken care of, {h}."
+        logger.info("card_resolution_stale_no_substitute", intent=intent, live=len(live))
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"decision_status": "stale"}, "card_handled": True}
+
+    target = live[0]  # == the presented card, and the ONLY live one
+    # The master's WORDS must not name a DIFFERENT target than this card (kind or named content).
+    if _names_mismatched_target(message, target):
+        reply = (f"The only one awaiting approval is {describe_card(target)}, {h} — that's not what "
+                 f"you named. Shall I {verb} that one, or did you mean something else?")
+        logger.info("card_resolution_refused", intent=intent, live=1, reason="named_mismatch")
+        return {"messages": [AIMessage(content=reply)], "final_response": reply, "card_handled": True}
+
+    outcome = await resolve_and_dispatch(
+        target.approval_id, intent, resolved_via, {"approved": intent == "approve"}, ground_thread=False
+    )
+    if outcome.status == "not_claimed":
+        reply = f"That one's already taken care of, {h}."
+        return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                "card_outcome": {"approval_id": target.approval_id, "decision_status": "stale"},
+                "card_handled": True}
+    flip = "approved" if intent == "approve" else "rejected"
+    reply = _clean_resolution_reply(outcome, intent, target, h)
+    logger.info("card_resolution_resolved", approval_id=target.approval_id, intent=intent, status=outcome.status)
+    return {"messages": [AIMessage(content=reply)], "final_response": reply,
+            "card_outcome": {"approval_id": target.approval_id, "decision_status": flip,
+                             "thread_id": outcome.thread_id}, "card_handled": True}
+
+
 async def card_resolution_node(state: AgentState) -> dict:
     """Step A (L1): presented-card interactions run THROUGH the graph, so they persist
     (kills D2/NV1) and a question about a card gets a REAL agent answer (kills D3).
@@ -947,12 +1102,7 @@ async def card_resolution_node(state: AgentState) -> dict:
     if not aid:
         return {}  # no card → straight to the agent (no-op pass-through)
 
-    from app.agent.approval_dispatch import resolve_and_dispatch
-    from app.agent.runner import (
-        _card_context_line,
-        _judge_presented,
-        _presented_outcome_speech,
-    )
+    from app.agent.runner import _card_context_line, _judge_presented
 
     h = settings.MASTER_HONORIFIC
     message = state.get("user_message", "") or ""
@@ -985,24 +1135,13 @@ async def card_resolution_node(state: AgentState) -> dict:
         return {"card_context": _card_context_line(judged.row) if judged.row else "",
                 "card_handled": False}
 
-    # approve / reject → the atomic claim (at-most-once) + deterministic outcome reply.
-    # ground_thread=False: THIS turn writes the outcome reply into the thread itself, so the
-    # generic grounding must NOT also write it (a chat-queued tool card's thread_id IS this
-    # conversation thread → would double-write). The durable row-persist still runs (HUD).
+    # approve / reject → the wrong-card SEAL (D15/D16). The client `aid` was used ONLY to
+    # classify intent above; the RESOLVE TARGET comes from the authoritative live set, and an
+    # ambiguous/mismatched command REFUSES (never guesses) — so a stale pointer can never send
+    # the wrong card. ground_thread=False: this turn writes the outcome reply itself (no
+    # double-write); the row-persist still feeds the HUD.
     if intent in ("approve", "reject"):
-        outcome = await resolve_and_dispatch(
-            aid, intent, resolved_via, {"approved": intent == "approve"}, ground_thread=False
-        )
-        if outcome.status == "not_claimed":  # lost the claim → never double-execute
-            reply = f"That one's already taken care of, {h}."
-            return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                    "card_outcome": {"approval_id": aid, "decision_status": "stale"}, "card_handled": True}
-        flip = "approved" if intent == "approve" else "rejected"
-        reply = _presented_outcome_speech(outcome, intent)
-        logger.info("card_resolution_resolved", approval_id=aid, intent=intent, status=outcome.status)
-        return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_outcome": {"approval_id": aid, "decision_status": flip,
-                                 "thread_id": outcome.thread_id}, "card_handled": True}
+        return await _resolve_with_referent_gate(intent, message, resolved_via, h, aid)
 
     # skip → DB-inert client nav (the row stays pending, reappears on reload).
     if intent == "skip":
@@ -1282,6 +1421,49 @@ async def _find_pending_approval_by_content(
         if (payload or {}).get("tool_args") == tool_args:
             return row_id
     return None
+
+
+async def _supersede_prior_email_card(thread_id: str, tool_name: str, tool_args: dict) -> int:
+    """Liveness hygiene (NOT the safety mechanism — Layer 1's referent gate is): when a REVISED
+    draft is re-queued for the same (email_send, recipient, subject), DISCARD the prior pending
+    card so the queue doesn't accumulate stale duplicates of one email (E2 supersedes E1 — the
+    D15 trigger). Keyed on SUBJECT too, so two genuinely-DIFFERENT emails to the same person
+    (different subject) are NOT superseded (master's call: gentle, not a hard uniqueness
+    constraint). Scoped to email_send (the observed revision case). Returns # discarded."""
+    if tool_name != "email_send":
+        return 0
+    from email.utils import parseaddr
+
+    def _norm_to(v: str) -> str:  # parse "Name <addr>" → addr so a reformatted revision still matches
+        return parseaddr(v or "")[1].strip().lower()
+
+    def _norm_subj(v: str) -> str:
+        return " ".join((v or "").split()).lower()
+
+    to = _norm_to(tool_args.get("to"))
+    subject = _norm_subj(tool_args.get("subject"))
+    if not to:
+        return 0
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(PendingApproval).where(
+                PendingApproval.thread_id == thread_id,
+                PendingApproval.action_type == "email_send",
+                PendingApproval.status == "pending",
+            )
+        )).scalars().all()
+        n = 0
+        for row in rows:
+            targs = (row.payload or {}).get("tool_args") or {}
+            if _norm_to(targs.get("to")) == to and _norm_subj(targs.get("subject")) == subject:
+                row.status = "discarded"
+                row.resolved_at = datetime.now(UTC)
+                row.resolved_via = "superseded"
+                n += 1
+        if n:
+            await session.commit()
+            logger.info("email_card_superseded", thread_id=thread_id, discarded=n)
+    return n
 
 
 async def _discard_pending_approval(thread_id: str, interrupt_id: str) -> None:

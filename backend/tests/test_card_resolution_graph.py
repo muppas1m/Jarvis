@@ -77,6 +77,15 @@ async def _make_email_card(card_thread):
         return str(row.id)
 
 
+async def _wipe_pending():
+    """Clean slate for the wrong-card referent gate: in production it reads the GLOBAL live set
+    (list_pending_cards = the unified queue), so an integration test that expects count==1 must be
+    the only pending card in the (isolated) test DB — other tests' residue would make it ambiguous."""
+    async with async_session() as s:
+        await s.execute(delete(PendingApproval).where(PendingApproval.status == "pending"))
+        await s.commit()
+
+
 async def _cleanup(thread_id):
     async with async_session() as s:
         await s.execute(delete(PendingApproval).where(PendingApproval.thread_id == thread_id))
@@ -110,6 +119,7 @@ def _hist_text(hist):
 async def test_approve_through_graph_persists_and_claims(real_checkpointer, monkeypatch):
     """D2 + L1: approve via stream_turn now runs IN the graph → the exchange PERSISTS and
     the atomic claim (resolve_and_dispatch) ran. The card flip event is reconstructed."""
+    await _wipe_pending()  # the gate reads the global live set → keep this card the only one
     thread_id = f"web:test-cardres-{uuid.uuid4().hex[:8]}"
     aid = await _make_card(thread_id)
     try:
@@ -149,6 +159,7 @@ async def test_approve_no_double_write_real_dispatch(real_checkpointer, monkeypa
     still marked executed (the HUD record survives a crash before the turn checkpoint)."""
     from app.agent.nodes import ToolExecResult
 
+    await _wipe_pending()  # the gate reads the global live set → keep this card the only one
     thread_id = f"web:test-carddbl-{uuid.uuid4().hex[:8]}"
     aid = await _make_card(thread_id)
     try:
@@ -238,3 +249,43 @@ async def test_edit_through_graph_emits_card_thread_id(real_checkpointer, monkey
     finally:
         await _cleanup(conv_thread)
         await _cleanup(card_thread)
+
+
+async def test_supersede_prior_email_card_discards_revision():
+    """Liveness (the D15 duplicate-target trigger): re-queuing a REVISED draft for the same
+    (email_send, recipient, subject) discards the prior pending card (E2 supersedes E1); a
+    genuinely-DIFFERENT email (different subject) to the same person survives (gentle, not a
+    hard uniqueness constraint)."""
+    from app.agent.nodes import _supersede_prior_email_card
+
+    thread = f"web:test-supersede-{uuid.uuid4().hex[:8]}"
+
+    async def _email_card(subject, body):
+        async with async_session() as s:
+            row = PendingApproval(
+                thread_id=thread, interrupt_id=uuid.uuid4().hex, action_type="email_send",
+                description="d",
+                payload={"tool_name": "email_send",
+                         "tool_args": {"to": "fernandes@yahoo.me", "subject": subject, "body": body}},
+                expires_at=datetime.now(UTC) + timedelta(hours=24))
+            s.add(row)
+            await s.commit()
+            await s.refresh(row)
+            return str(row.id)
+
+    e1 = await _email_card("Amazon Delivery Pickup", "Hi [Your Name]")
+    other = await _email_card("Lunch next week", "Different email")
+    try:
+        n = await _supersede_prior_email_card(
+            thread, "email_send",
+            {"to": "fernandes@yahoo.me", "subject": "Amazon Delivery Pickup", "body": "Hi Mahesh"})
+        assert n == 1
+        async with async_session() as s:
+            e1_row = (await s.execute(
+                select(PendingApproval).where(PendingApproval.id == uuid.UUID(e1)))).scalar_one()
+            other_row = (await s.execute(
+                select(PendingApproval).where(PendingApproval.id == uuid.UUID(other)))).scalar_one()
+        assert e1_row.status == "discarded"     # the revision superseded it
+        assert other_row.status == "pending"    # a different-subject email to the same person survives
+    finally:
+        await _cleanup(thread)

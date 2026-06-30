@@ -279,8 +279,10 @@ def _tool_decide_envelope(thread_id: str, outcome: Any) -> dict[str, Any]:
     confirmation (e.g. "Email sent to X", "Event created …", or a [QUEUED]-class
     failure marker)."""
     if outcome.status == "executed":
+        from app.agent.sanitizer import unwrap_tool_output
         return _decide_envelope(
-            thread_id, "complete" if outcome.success else "error", outcome.detail
+            thread_id, "complete" if outcome.success else "error",
+            unwrap_tool_output(outcome.detail),  # D18: strip the agent-only untrusted wrapper
         )
     if outcome.status == "rejected":
         return _decide_envelope(thread_id, "complete", "Discarded, Sir.")

@@ -751,6 +751,12 @@ async def _judge_presented(
         row = await _load_approval_by_id(approval_id)
         if row is None or row.status != "pending":
             return None
+        # Expiry guard (wrong-card seal): the hourly sweeper can lag, leaving an EXPIRED row at
+        # status='pending'. list_pending_cards() filters expires_at>now, so an expired presented
+        # card would be admitted here but ABSENT from the gate's live set — risking a wrong-card
+        # substitution. Treat an expired row as stale (gone) so the turn acks, never re-targets.
+        if getattr(row, "expires_at", None) is not None and row.expires_at <= datetime.now(UTC):
+            return None
         payload = row.payload or {}
         if _is_email_row(row):
             tool_name = row.action_type
@@ -858,21 +864,6 @@ async def _requeue_revised_email(row: Any, revised_draft: str) -> dict[str, Any]
     from app.approvals_service import to_unified_card
 
     return to_unified_card(approval).model_dump()
-
-
-def _presented_outcome_speech(outcome: Any, intent: str) -> str:
-    """The spoken/typed line for a resolved presented card: the draft-on-"go" line for
-    a heads-up card, the inbound-email taxonomy for a send, the tool's result for a tool."""
-    h = settings.MASTER_HONORIFIC
-    # Heads-up "go"→draft / "leave it" — its own copy ("I've drafted it…" / "Left in your
-    # inbox…"), not the send taxonomy (nothing was sent).
-    if outcome.kind == "draft_request":
-        return outcome.detail or f"Done, {h}."
-    if intent == "reject":
-        return f"Discarded, {h}."
-    if outcome.kind == "email":
-        return _email_outcome_speech(outcome.email_outcome)
-    return outcome.detail or f"Done, {h}."
 
 
 def _decision_resolved_event(thread_id: str, approval_id: str, status: str) -> dict[str, Any]:

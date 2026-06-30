@@ -106,9 +106,12 @@ async def resolve_and_dispatch(
 
 
 def _clean_detail(detail: str) -> str:
-    """A short, human, single-line outcome detail — strip a leading ``[TAG]`` marker
-    (``[ERROR]`` / ``[QUEUED]`` …), collapse whitespace, cap length."""
-    s = re.sub(r"^\s*\[[A-Z_]+\]\s*", "", detail or "")
+    """A short, human, single-line outcome detail — strip the agent-only
+    ``<tool_output trust="untrusted">`` wrapper (D18 — never show it to the master), a leading
+    ``[TAG]`` marker (``[ERROR]`` / ``[QUEUED]`` …), collapse whitespace, cap length."""
+    from app.agent.sanitizer import unwrap_tool_output
+    s = unwrap_tool_output(detail or "")
+    s = re.sub(r"^\s*\[[A-Z_]+\]\s*", "", s)
     return " ".join(s.split())[:1000]
 
 
@@ -242,10 +245,12 @@ def alert_text_for(outcome: ApprovalDispatchOutcome) -> str | None:
     if outcome.kind == "draft_request":
         return outcome.detail or None  # "drafted / left / couldn't draft"
     if outcome.kind == "tool":
+        from app.agent.sanitizer import unwrap_tool_output
+        detail = unwrap_tool_output(outcome.detail)  # D18: never leak the agent-only wrapper
         if outcome.status == "executed":
             if outcome.uncertain:
-                return f"⚠️ {outcome.detail}"
-            return outcome.detail if outcome.success else f"❌ {outcome.detail}"
+                return f"⚠️ {detail}"
+            return detail if outcome.success else f"❌ {detail}"
         if outcome.status == "blocked":
             return "❌ That action isn't permitted."
     return None  # rejected / row_missing / not_claimed → no follow-up
