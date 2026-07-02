@@ -261,6 +261,27 @@ def _is_email_shaped(text: str) -> bool:
     return bool(_SALUTATION.search(t)) and bool(_SIGNOFF.search(t))
 
 
+# A1 Fix 4 — the agent, following the [QUEUED] marker's instruction, often relays "I've queued it for
+# your approval" itself. When queued_finish then appends the deterministic read-back, that would ack
+# the queue TWICE. This detects such an ack so the preserved content collapses to the read-back only.
+# FIRST alt = the primary ack the marker instructs ("I've queued it … for approval"); the [^.?!] guard
+# keeps it from spanning into an unrelated later sentence. SECOND alt = the card-STATE phrasings
+# ("awaiting/pending your approval"). Deliberately NOT a bare "for approval" — that over-matches a
+# genuine remainder ("the board needs the budget for approval") and would make queued_finish silently
+# DROP real content (the review-caught Fix-4 hole).
+_QUEUE_ACK = re.compile(
+    r"\bqueued\b[^.?!]{0,80}?\bapprov|\b(?:awaiting|pending)\s+(?:your\s+)?approval\b",
+    re.IGNORECASE,
+)
+
+
+def _is_queue_ack(text: str) -> bool:
+    """True when the text is a 'queued it for your approval' ack — so the read-back doesn't double-say
+    it. A genuine compound remainder ('2 plus 2 is 4', 'the budget needs approval') → False (it must
+    NOT collapse real content; the double-ack is the only thing this suppresses)."""
+    return bool(_QUEUE_ACK.search(text or ""))
+
+
 def _in_compose_email_context(state: AgentState, k: int = 4) -> bool:
     """Did the master express email-compose intent in the current OR a recent prior turn? Scanning
     the recent user turns is what catches the multi-turn follow-up drop ("okay send it" / "bob@x.com"
@@ -599,6 +620,19 @@ _QUEUED_MARKER = (
     "queued it for their approval; do NOT say it is sent / done / created / scheduled."
 )
 
+# A1 (natural loop) — the NO_PROGRESS marker: a re-emit of an action ALREADY queued this turn (L0
+# signature hit) OR a reused row (already-queued / content-dedup) — NO new card was minted. Distinct
+# from QUEUED_MARKER_TAG so `should_continue_tools` can tell "a fresh card was queued" from "nothing
+# new happened", and so the runner does NOT re-surface a duplicate card event on a re-emit
+# (`_queued_approval_event` keys on QUEUED_MARKER_TAG). It is a VERBATIM-re-emit guard only — the
+# structural drift defense is that a pure-queue round ends the turn (no continuation pass to drift in),
+# NOT this marker (do not turn it into a drift-catching dedup — that would re-break two-emails-to-Bob).
+NO_PROGRESS_TAG = "[ALREADY_QUEUED]"
+_NO_PROGRESS_MARKER = (
+    NO_PROGRESS_TAG + " The `{tool}` action was ALREADY queued for the master's approval earlier "
+    "this turn — no new card was created. Tell the master it's already queued; do NOT re-queue it."
+)
+
 
 # ============================================================================
 # Node 3 — tool_executor (one tool call per invocation; loops via the graph)
@@ -735,11 +769,17 @@ async def tool_executor_node(state: AgentState) -> dict:
         sigs = list(state.get("queued_signatures") or [])
         sig = _queue_signature(tool_name, tool_args)
         if sig in sigs:
+            # VERBATIM re-emit of an action already queued THIS turn → NO_PROGRESS (no new card, no
+            # re-ping). Its card is already in queued_this_turn (recorded when first queued this turn,
+            # since queued_signatures is turn-reset → a sig-hit can only be same-turn). A1: this makes
+            # a pure-re-emit round terminate at should_continue_tools instead of routing back.
             logger.info("queued_signature_hit_skip", thread_id=thread_id, tool_name=tool_name)
             await _log_audit(thread_id, tool_name, level, tool_args, success=False, error="QUEUED_DEDUP")
             return {"messages": [ToolMessage(
-                content=_QUEUED_MARKER.format(tool=tool_name), tool_call_id=tool_call_id)]}
+                content=_NO_PROGRESS_MARKER.format(tool=tool_name), tool_call_id=tool_call_id)]}
 
+        minted_new = False   # A1: True ONLY when a NEW card row is created (the else branch) → the
+        #                      progress signal that keeps QUEUED distinct from NO_PROGRESS.
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
         if approval_id is not None:
             logger.info(
@@ -755,6 +795,7 @@ async def tool_executor_node(state: AgentState) -> dict:
                 thread_id=thread_id, tool_name=tool_name,
             )
         else:
+            minted_new = True
             # Liveness: a re-queued REVISION of the same email (same recipient+subject)
             # supersedes the prior pending card, so the queue doesn't stack stale duplicates
             # (the D15 duplicate-target trigger). Gentle — different-subject emails survive.
@@ -778,16 +819,25 @@ async def tool_executor_node(state: AgentState) -> dict:
             )
         # Audit the QUEUE event (not an execute — the tool has NOT run).
         await _log_audit(
-            thread_id, tool_name, level, tool_args, success=False, error="QUEUED",
+            thread_id, tool_name, level, tool_args, success=False,
+            error="QUEUED" if minted_new else "QUEUED_DEDUP",
         )
+        # A1 marker split: a NEW card → QUEUED (progress); a reused row → NO_PROGRESS (no new card),
+        # so should_continue_tools can tell a fresh queue from a re-emit and the runner doesn't
+        # re-surface a duplicate card event. Fixes 2+3: record the row PK in queued_this_turn on
+        # EVERY branch (fresh OR reused) — read-prior-accumulate (never a bare overwrite, or a
+        # two-APPROVE round drops the first card from the read-back) — so the deterministic read-back
+        # NAMES every card touched this turn, even the deduped ones.
+        marker = _QUEUED_MARKER if minted_new else _NO_PROGRESS_MARKER
         return {
             "messages": [
                 ToolMessage(
-                    content=_QUEUED_MARKER.format(tool=tool_name),
+                    content=marker.format(tool=tool_name),
                     tool_call_id=tool_call_id,
                 )
             ],
             "queued_signatures": sigs + [sig],  # L0: record so a re-emit this turn is deduped
+            "queued_this_turn": list(state.get("queued_this_turn") or []) + [str(approval_id)],
         }
 
     # ---- execute (SAFE or NOTIFY — APPROVE is queued above, never reaches here)
@@ -802,20 +852,21 @@ async def tool_executor_node(state: AgentState) -> dict:
 
 
 def should_continue_tools(state: AgentState) -> str:
-    """Routing after `tool_executor`:
+    """Routing after `tool_executor` (A1 — the natural agentic loop):
       - unprocessed tool calls remain in the latest round → loop back to drain them;
-      - the WHOLE round resolved to terminal [QUEUED] approvals → END the turn
-        (`queued_finish`), NOT back to the agent — see below;
-      - otherwise (a non-QUEUED result the agent must react to) → back to `agent`.
+      - the round carries a genuine SAFE-read/execute result the agent must synthesize → `agent`
+        (the loop runs naturally — a real N-part compound with a read completes);
+      - the round carries NOTHING to consume (every result is a queue marker — fresh `[QUEUED]`
+        and/or `[ALREADY_QUEUED]`) → END the turn (`queued_finish`).
 
-    ROOT FIX (duplicate-cards bug): an APPROVE-tier tool QUEUEs and returns a [QUEUED]
-    ToolMessage; the action is now parked awaiting the master, with nothing for the agent to
-    react to. Routing back to agent_node let it RE-QUEUE the same action round after round
-    (directly + via the #3 backstop) → 5 identical cards. When every result of the round is
-    [QUEUED], the agent's job for those actions is done → end the turn so no further round can
-    re-queue. A round that queues TWO DIFFERENT actions drains both in the per-call executor
-    before this runs (both [QUEUED] → end); a MIXED round (SAFE read + APPROVE) has a non-QUEUED
-    result the agent legitimately consumes → back to agent."""
+    The RULE is "nothing to consume ends the turn", not "no progress ends the turn": a fresh
+    `[QUEUED]` IS progress, but the turn ends because there is nothing for the agent to react to.
+    Ending a pure-queue round is the STRUCTURAL drift defense against the 5-duplicate-cards bug —
+    with no continuation pass, a weak model gets no round in which to drift-re-emit a near-duplicate
+    card. (The marker split only catches VERBATIM re-emits via L0; the loop-kill floor catches
+    drift. Do NOT loosen the dedup to catch drift — that re-breaks two-different-emails-to-Bob.)
+    A MIXED round (SAFE read + APPROVE queue) has a non-queue result → `agent`; the queued card is
+    still named at termination via `queued_this_turn` (the mixed-round read-back A1 adds)."""
     last_ai_msg = None
     for m in reversed(state["messages"]):
         if isinstance(m, AIMessage) and m.tool_calls:
@@ -838,28 +889,55 @@ def should_continue_tools(state: AgentState) -> str:
         m for m in state["messages"]
         if isinstance(m, ToolMessage) and m.tool_call_id in round_ids
     ]
-    if round_results and all(
-        isinstance(m.content, str) and m.content.startswith(QUEUED_MARKER_TAG)
-        for m in round_results
-    ):
-        return "queued_finish"   # all parked for approval — end the turn (no re-queue)
-    return "agent"
+    if round_results and all(_is_queue_marker(m) for m in round_results):
+        return "queued_finish"   # nothing to consume → end the turn (safety floor + re-emit spin)
+    return "agent"               # a read/execute result to synthesize (or an odd empty round)
 
 
-async def _readback_for_queued(tool_call_ids: list, h: str) -> str:
-    """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the cards just
-    queued by this round, fetched by their interrupt_id (= the tool_call_id). describe_card gives
-    "an email to X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays
-    fixed on the llama primary. Falls back to a generic ack if the rows can't be read."""
+def _is_queue_marker(m: BaseMessage) -> bool:
+    """A1 — a ToolMessage that parked an approval (fresh [QUEUED]) or re-emitted an already-queued
+    one ([ALREADY_QUEUED]): nothing for the agent to consume. Anything else (a SAFE-read/execute
+    result, an error) is consumable → routes back to the agent."""
+    content = getattr(m, "content", None)
+    return isinstance(content, str) and (
+        content.startswith(QUEUED_MARKER_TAG) or content.startswith(NO_PROGRESS_TAG)
+    )
+
+
+async def _readback_for_queued(row_ids: list, h: str) -> str:
+    """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the approval cards
+    TOUCHED this turn (`queued_this_turn` — row PKs), fetched by id. describe_card gives "an email to
+    X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays fixed on the
+    llama primary REGARDLESS of the new termination. Falls back to a generic ack if the rows can't be
+    read. (A1 keys on the row PK, not the tool_call_id, so the read-back fires from ANY terminal round
+    — the pure-queue terminate AND the mixed-round natural-answer path — not only the queuing round.
+    De-dups + preserves queue order; a same-card id can appear twice when a content-dedup re-emit
+    re-records it.)"""
+    import uuid as _uuid
+
     from app.approvals_service import describe_card, to_unified_card
-    if not tool_call_ids:
+    if not row_ids:
         return f"I've queued it for your approval, {h}."
     try:
+        pks = []
+        for rid in row_ids:
+            try:
+                pks.append(rid if isinstance(rid, _uuid.UUID) else _uuid.UUID(str(rid)))
+            except (ValueError, AttributeError, TypeError):
+                continue
         async with async_session() as session:
             rows = (await session.execute(
-                select(PendingApproval).where(PendingApproval.interrupt_id.in_(list(tool_call_ids)))
+                select(PendingApproval).where(PendingApproval.id.in_(pks))
             )).scalars().all()
-        cards = [to_unified_card(r) for r in rows if r.status == "pending"]
+        by_id = {str(r.id): r for r in rows if r.status == "pending"}
+        seen: set[str] = set()
+        cards = []
+        for rid in row_ids:                    # preserve queue order; the id-IN result is unordered
+            key = str(rid)
+            if key in seen or key not in by_id:
+                continue
+            seen.add(key)
+            cards.append(to_unified_card(by_id[key]))
     except Exception as exc:  # noqa: BLE001 — never break the turn on the read-back fetch
         logger.warning("readback_fetch_failed", error=str(exc))
         cards = []
@@ -876,25 +954,35 @@ async def _readback_for_queued(tool_call_ids: list, h: str) -> str:
 
 
 async def queued_finish_node(state: AgentState) -> dict:
-    """End the turn after an all-[QUEUED] tool round — the deterministic LOOP TERMINATOR (kept;
-    retiring it re-opens the non-termination the root fix closed) AND the L1 read-back.
+    """A1 terminal node — the deterministic LOOP TERMINATOR (kept) AND the D1 read-back, now fired
+    from BOTH terminal paths: a pure-queue round (`should_continue_tools`) AND a natural answer with
+    cards queued this turn (`should_continue`). The read-back NAMES the cards via `queued_this_turn`
+    (row PKs), model-independent — so D1 survives the new termination on the weak llama.
 
-    The reply is a DETERMINISTIC read-back that NAMES the queued cards (`_readback_for_queued`,
-    constraint #1 — the guarantee, not the model), so D1 (the canned "I've queued both") is fixed
-    without depending on the llama primary. A GENUINE non-queue answer (a compound's other half,
-    e.g. "…and what's 2+2") is PRESERVED — but NOT email-shaped prose (the card IS the draft). The
-    read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's tool_calls
-    message → no orphaned tool_call / Jun-11 poisoning)."""
+    A GENUINE non-queue answer (a compound's other half, e.g. "…and what's 2+2", or the mixed-round
+    natural answer) is PRESERVED with the read-back appended — but NOT email-shaped prose (the card
+    IS the draft) and NOT a bare queue-ack (else the ack + the read-back say the same thing twice —
+    Fix 4). The read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's
+    tool_calls message → no orphaned tool_call)."""
     h = settings.MASTER_HONORIFIC
-    last_ai = next(
-        (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.tool_calls),
-        None,
-    )
-    round_ids = [tc["id"] for tc in last_ai.tool_calls] if last_ai else []
-    read_back = await _readback_for_queued(round_ids, h)
+    read_back = await _readback_for_queued(list(state.get("queued_this_turn") or []), h)
 
-    content = (last_ai.content if last_ai and isinstance(last_ai.content, str) else "").strip()
-    final = f"{content}\n\n{read_back}" if (content and not _is_email_shaped(content)) else read_back
+    # The genuine answer to preserve: the natural answer (final_response — set by agent_node on a
+    # no-tool-call terminal, turn-reset so never stale) else the last content-bearing AIMessage of
+    # THIS turn (stop at this turn's HumanMessage so a prior turn's answer never leaks in — Fix 1).
+    content = (state.get("final_response") or "").strip()
+    if not content:
+        for m in reversed(state.get("messages") or []):
+            if isinstance(m, HumanMessage):
+                break                          # reached this turn's user message — don't walk prior turns
+            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                content = m.content.strip()
+                break
+    # Fix 4 — keep the preserved content only if it's a GENUINE remainder: not email-shaped prose
+    # (the card holds it) and not itself a "queued for approval" ack (the deterministic read-back is
+    # the single canonical ack).
+    keep = bool(content) and not _is_email_shaped(content) and not _is_queue_ack(content)
+    final = f"{content}\n\n{read_back}" if keep else read_back
     return {"messages": [AIMessage(content=read_back)], "final_response": final}
 
 
@@ -1365,10 +1453,18 @@ async def compact_node(state: AgentState) -> dict:
 # Conditional edge after agent_node — tool_executor or persist?
 # ============================================================================
 def should_continue(state: AgentState) -> str:
-    """Routing function for the agent → ? edge."""
+    """Routing after `agent`:
+      - the agent emitted tool_calls → drain them (`tool_executor`);
+      - a NATURAL answer (no tool_calls) with cards queued THIS turn → `queued_finish` so the
+        deterministic read-back still fires (A1: the mixed-round path — the agent queued in an
+        earlier round, consumed a read, and now answers — must still name the queued card, not
+        slip straight to persist without a read-back);
+      - a natural answer with nothing queued → `persist` (a plain turn)."""
     last = state["messages"][-1] if state["messages"] else None
     if isinstance(last, AIMessage) and last.tool_calls:
         return "tool_executor"
+    if state.get("queued_this_turn"):
+        return "queued_finish"
     return "persist"
 
 

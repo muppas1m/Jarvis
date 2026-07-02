@@ -35,11 +35,15 @@ def test_queue_signature_calendar():
 
 # --- L1 deterministic read-back (DB-backed) ----------------------------------
 async def _seed(thread, cid, action_type, payload):
+    """Seed a pending card; return its row PK (str) — A1 keys the read-back on the row id, not cid."""
     async with async_session() as s:
-        s.add(PendingApproval(
+        row = PendingApproval(
             thread_id=thread, interrupt_id=cid, action_type=action_type, description="d",
-            payload=payload, expires_at=datetime.now(UTC) + timedelta(hours=24)))
+            payload=payload, expires_at=datetime.now(UTC) + timedelta(hours=24))
+        s.add(row)
         await s.commit()
+        await s.refresh(row)
+        return str(row.id)
 
 
 async def _cleanup(thread):
@@ -53,18 +57,18 @@ def _qmsg(cid):
 
 
 async def test_readback_names_queued_cards():
-    """D1 fix: an all-[QUEUED] round → the reply NAMES the cards, deterministically (no model),
-    not the old canned 'I've queued both for your approval, Sir'."""
+    """D1 fix: a terminal queued round → the reply NAMES the cards, deterministically (no model),
+    not the old canned 'I've queued both for your approval, Sir'. A1: keyed on queued_this_turn."""
     thread = f"web:test-readback-{uuid.uuid4().hex[:8]}"
-    await _seed(thread, "c1", "email_send",
+    id1 = await _seed(thread, "c1", "email_send",
                 {"tool_name": "email_send", "tool_args": {"to": "supriya@gmail.com", "subject": "Reminder", "body": "x"}})
-    await _seed(thread, "c2", "calendar_create",
+    id2 = await _seed(thread, "c2", "calendar_create",
                 {"tool_name": "calendar_create", "tool_args": {"title": "Dinner Party", "start_iso": "2026-07-05T17:00:00+00:00"}})
     try:
         ai = AIMessage(content="", tool_calls=[
             {"name": "email_send", "args": {}, "id": "c1"},
             {"name": "calendar_create", "args": {}, "id": "c2"}])
-        out = await queued_finish_node({"messages": [ai, _qmsg("c1"), _qmsg("c2")]})
+        out = await queued_finish_node({"messages": [ai, _qmsg("c1"), _qmsg("c2")], "queued_this_turn": [id1, id2]})
         reply = out["final_response"].lower()
         assert "supriya" in reply                                  # names the email card
         assert "dinner party" in reply or "calendar" in reply      # names the calendar card
@@ -75,11 +79,11 @@ async def test_readback_names_queued_cards():
 
 async def test_readback_single_card_names_it():
     thread = f"web:test-readback1-{uuid.uuid4().hex[:8]}"
-    await _seed(thread, "c1", "email_send",
+    id1 = await _seed(thread, "c1", "email_send",
                 {"tool_name": "email_send", "tool_args": {"to": "bob@x.com", "subject": "Hi", "body": "x"}})
     try:
         ai = AIMessage(content="", tool_calls=[{"name": "email_send", "args": {}, "id": "c1"}])
-        out = await queued_finish_node({"messages": [ai, _qmsg("c1")]})
+        out = await queued_finish_node({"messages": [ai, _qmsg("c1")], "queued_this_turn": [id1]})
         assert "bob@x.com" in out["final_response"]
     finally:
         await _cleanup(thread)
@@ -90,11 +94,11 @@ async def test_readback_compound_preserves_answer_and_toolcalls():
     finalize — the read-back is APPENDED as its own message, never rewriting the tool_calls AIMessage
     (no orphaned tool_call / Jun-11 poisoning)."""
     thread = f"web:test-compound-{uuid.uuid4().hex[:8]}"
-    await _seed(thread, "c1", "email_send",
+    id1 = await _seed(thread, "c1", "email_send",
                 {"tool_name": "email_send", "tool_args": {"to": "bob@x.com", "subject": "Hi", "body": "x"}})
     try:
         ai = AIMessage(content="2 plus 2 is 4.", tool_calls=[{"name": "email_send", "args": {}, "id": "c1"}])
-        out = await queued_finish_node({"messages": [ai, _qmsg("c1")]})
+        out = await queued_finish_node({"messages": [ai, _qmsg("c1")], "queued_this_turn": [id1]})
         assert "2 plus 2 is 4" in out["final_response"]              # genuine answer preserved
         assert "bob@x.com" in out["final_response"]                  # read-back appended
         assert all(not getattr(m, "tool_calls", None) for m in out["messages"])  # appended msg has NO tool_calls

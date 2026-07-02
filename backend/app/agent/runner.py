@@ -105,6 +105,27 @@ def _log_turn_error(thread_id: str, exc: BaseException, where: str) -> str:
     return "I hit an internal error. Please try again."
 
 
+async def _queued_readback_envelope(thread_id: str) -> dict[str, Any] | None:
+    """A1 Fix 5 — if the turn QUEUED approval cards before it errored / hit the recursion cap, NAME
+    them deterministically (the D1 read-back guarantee) instead of a raw 'stuck in a loop' / 'internal
+    error': the rows are durable, so the master hears what's pending, not a dead end. Reads
+    `queued_this_turn` off the last checkpoint (each tool_executor super-step persists it). Returns
+    None when nothing was queued (→ the caller falls back to the plain error message)."""
+    try:
+        snap = await graph().aget_state({"configurable": {"thread_id": thread_id}})
+        queued = list((getattr(snap, "values", None) or {}).get("queued_this_turn") or [])
+    except Exception as exc:  # noqa: BLE001 — the recovery path must never raise
+        logger.warning("queued_readback_state_read_failed", thread_id=thread_id, error=str(exc))
+        return None
+    if not queued:
+        return None
+    from app.agent.nodes import _readback_for_queued
+    text = await _readback_for_queued(queued, settings.MASTER_HONORIFIC)
+    env = _error_envelope(thread_id, text, stop_reason="queued_before_error")
+    env["status"] = "complete"   # the cards ARE queued — a real outcome, not a failure
+    return env
+
+
 def _config_with_handler(thread_id: str) -> tuple[dict, Any | None]:
     """Per-call config + the langfuse handler reference (so we can pull
     trace_id off it after the run). Returns (config, handler_or_None)."""
@@ -260,6 +281,9 @@ async def run_turn(
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
+        "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
+        #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         # Card-resolution fields reset per turn (replace reducer persists them in the
         # checkpoint; a stale value would re-inject a dead card note / re-emit an old
         # decision_resolved). run_turn (Telegram) never carries a presented card.
@@ -279,6 +303,9 @@ async def run_turn(
             "turn_complete", thread_id=thread_id, status="error",
             stop_reason=_stop_reason_for_error(exc), tool_calls=None,
         )
+        rb = await _queued_readback_envelope(thread_id)   # Fix 5 — name any cards queued before the fault
+        if rb is not None:
+            return rb
         return _error_envelope(thread_id, msg, stop_reason=_stop_reason_for_error(exc))
 
     duration_ms = int((time.monotonic() - started_ms) * 1000)
@@ -372,6 +399,9 @@ async def stream_turn(
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
+        "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
+        #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         "presented_approval_id": presented_approval_id or "",
         "presented_via": "web",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
@@ -416,11 +446,15 @@ async def stream_turn(
                                 yield ev
     except Exception as exc:
         msg = _log_turn_error(thread_id, exc, "graph_stream_failed")
-        yield {
-            "type": "error",
-            "content": msg,
-            "stop_reason": _stop_reason_for_error(exc),
-        }
+        rb = await _queued_readback_envelope(thread_id)   # Fix 5 — name any cards queued before the fault
+        if rb is not None:
+            yield {"type": "done", "content": _terminal_payload(rb)}
+        else:
+            yield {
+                "type": "error",
+                "content": msg,
+                "stop_reason": _stop_reason_for_error(exc),
+            }
         return
     finally:
         stream_tokens.reset(flag)
@@ -981,6 +1015,9 @@ async def voice_turn(
         "turn_started_at": datetime.now(UTC).isoformat(),
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
+        "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
+        #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         "presented_approval_id": presented_approval_id or "",
         "presented_via": "voice",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
@@ -1103,6 +1140,13 @@ async def voice_turn(
 
     if error_exc is not None:
         msg = _log_turn_error(thread_id, error_exc, "voice_stream_failed")
+        rb = await _queued_readback_envelope(thread_id)   # Fix 5 — speak/name cards queued before the fault
+        if rb is not None:
+            ev = await _speak(rb["response"])
+            if ev:
+                yield ev
+            yield {"type": "done", "content": _terminal_payload(rb)}
+            return
         ev = await _speak(msg)
         if ev:
             yield ev

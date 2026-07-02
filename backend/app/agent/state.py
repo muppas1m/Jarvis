@@ -61,6 +61,13 @@ class AgentState(TypedDict, total=False):
     # marker instead of a duplicate card (robust to subject/body regeneration). Step A does
     # NOT read or write this; it is declared here as the agreed shape only.
     queued_signatures: list[str]
+    # A1 (natural loop) — the row PKs (str) of approval cards TOUCHED this turn (freshly created
+    # OR reused via already-queued / content-dedup). The DETERMINISTIC read-back (queued_finish)
+    # names these via describe_card, so the D1 guarantee survives the new termination on the weak
+    # llama. Plain replace-reducer list, WRITTEN read-prior-accumulate
+    # (`list(state.get("queued_this_turn") or []) + [id]`) exactly like queued_signatures, and RESET
+    # []-per-turn in all 3 initial_state dicts — an accumulate reducer would defeat that reset.
+    queued_this_turn: list[str]
 
     # --- presented-card resolution (Step A — card interactions THROUGH the graph) ---
     # `presented_approval_id` is the card the master is currently viewing (passed in by

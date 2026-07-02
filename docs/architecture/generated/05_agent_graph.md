@@ -24,6 +24,7 @@ graph TD;
 	__end__([<p>__end__</p>]):::last
 	__start__ --> memory_load;
 	agent -.-> persist;
+	agent -.-> queued_finish;
 	agent -.-> tool_executor;
 	card_resolution -.-> agent;
 	card_resolution -.-> persist;

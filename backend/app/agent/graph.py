@@ -111,13 +111,15 @@ def build_graph():
                                   |                  └─ no            -> agent
                                   |
                                   |     agent -> [should_continue]
-                                  |       ├─ tool_calls? -> tool_executor
-                                  |       └─ no          -> persist
+                                  |       ├─ tool_calls?       -> tool_executor
+                                  |       ├─ queued this turn? -> queued_finish (read-back)
+                                  |       └─ else              -> persist
                                   |
-                                  |     tool_executor -> [should_continue_tools]
-                                  |       ├─ more pending? -> tool_executor
-                                  |       ├─ all [QUEUED]  -> queued_finish -> persist
-                                  └───────└─ else          -> agent
+                                  |     tool_executor -> [should_continue_tools]  (A1 natural loop)
+                                  |       ├─ more pending?          -> tool_executor
+                                  |       ├─ nothing to consume     -> queued_finish -> persist
+                                  |       │  (all [QUEUED]/[ALREADY_QUEUED] — the safety floor)
+                                  └───────└─ read/execute result    -> agent
 
         persist -> compact -> END
 
@@ -156,6 +158,9 @@ def build_graph():
         should_continue,
         {
             "tool_executor": "tool_executor",
+            # A1: a natural answer with cards queued this turn ends via queued_finish (the
+            # deterministic read-back), not straight to persist — the mixed-round read-back path.
+            "queued_finish": "queued_finish",
             "persist": "persist",
         },
     )
