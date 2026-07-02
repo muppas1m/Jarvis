@@ -30,7 +30,7 @@ app/
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
 │   ├── decision_resolver.py — Natural-language resolution of a pending decision (A2 Piece 2).
 │   ├── graph.py — StateGraph wiring + AsyncPostgresSaver checkpointer.
-│   ├── message_repair.py — Message-history repair — orphaned tool_call → synthetic ToolMessage.
+│   ├── message_repair.py — Message-history repair — wire-shape normalization for tool calls (D22/D23 class).
 │   ├── nodes.py — Graph nodes — the four steps of an agent turn.
 │   ├── prompts.py — System-prompt construction.
 │   ├── rate_limits.py — Per-turn / per-conversation rate limiting for the agent loop.
@@ -154,6 +154,7 @@ scripts/
 ├── gen_architecture.py — Architecture-doc generator — introspects the LIVE code and emits Markdown +
 ├── google_oauth.py — One-time Google OAuth refresh-token bootstrap.
 ├── issue_jwt.py — Mint an HS256 JWT for the master so we can curl protected endpoints
+├── repair_poisoned_thread.py — Repair a committed thread poisoned by malformed tool-call residue (D22).
 ├── reset_thread.py — Reset (delete) a conversation thread's checkpoint state.
 ├── seed_profile.py — Seed (or re-seed) the master's profile row.
 ├── setup_gmail_watch.py — One-shot Gmail watch registration. Phase 2 Task 2.2 closer.

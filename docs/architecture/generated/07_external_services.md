@@ -29,7 +29,6 @@ Every external / infrastructure dependency the system talks to. Interconnection 
 | Provider |
 |---|
 | google |
-| groq |
 | openai |
 
 

@@ -64,6 +64,28 @@ def _is_function_leak(result: Any) -> bool:
     return looks_like_function_leak(_result_text(result))
 
 
+def _is_invalid_tool_response(result: Any) -> bool:
+    """Shape 3 of the malformed-tool-call family — PARSED-BUT-INVALID (the D22/D23
+    mint, trpv0ek1t): the provider accepted a malformed call (no exception — shape
+    1 misses it) and there's no `<function…>` text (shape 2 misses it), but
+    langchain parsed it into `invalid_tool_calls` — `.tool_calls` stays empty while
+    the raw call survives in `additional_kwargs["tool_calls"]`, which ChatLiteLLM's
+    serializer RESURRECTS unanswerable on the next request → 400 → thread brick.
+    Detect it like the other two shapes: malformed primary → re-issue on the
+    fallback for a REAL answer (same single-re-issue bound, `_reissue_*`)."""
+    if getattr(result, "invalid_tool_calls", None):
+        return True
+    parsed = {
+        (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+        for tc in (getattr(result, "tool_calls", None) or [])
+    }
+    ak = getattr(result, "additional_kwargs", None) or {}
+    return any(
+        (c.get("id") if isinstance(c, dict) else getattr(c, "id", None)) not in parsed
+        for c in (ak.get("tool_calls") or [])
+    )
+
+
 def _default_retry_predicate(exc: BaseException) -> bool:
     """Should this primary-LLM exception trigger fallback to the secondary?
 
@@ -139,6 +161,10 @@ class FallbackChatLLM(Runnable):
         if _is_function_leak(result):
             self._log_leak(result)
             return self._reissue_invoke(input, config, kwargs)
+        # …or return a parsed-but-INVALID tool call (D22/D23 mint shape)?
+        if _is_invalid_tool_response(result):
+            self._log_invalid(result)
+            return self._reissue_invoke(input, config, kwargs)
         record_llm_result(True, via_fallback=False)  # primary answered cleanly
         return result
 
@@ -153,6 +179,10 @@ class FallbackChatLLM(Runnable):
             return await self._reissue_ainvoke(input, config, kwargs)
         if _is_function_leak(result):
             self._log_leak(result)
+            return await self._reissue_ainvoke(input, config, kwargs)
+        # …or return a parsed-but-INVALID tool call (D22/D23 mint shape)?
+        if _is_invalid_tool_response(result):
+            self._log_invalid(result)
             return await self._reissue_ainvoke(input, config, kwargs)
         record_llm_result(True, via_fallback=False)  # primary answered cleanly
         return result
@@ -184,6 +214,20 @@ class FallbackChatLLM(Runnable):
         logger.warning(
             "agent_llm_function_leak_fallback",
             preview=_result_text(result)[:200],
+        )
+
+    def _log_invalid(self, result: Any) -> None:
+        """The primary returned a parsed-but-INVALID tool call (shape 3 — the D22
+        poison mint). Logged distinctly so the poison-mint rate is monitorable."""
+        logger.warning(
+            "agent_llm_invalid_toolcall_fallback",
+            invalid=[
+                {
+                    "name": (tc.get("name") if isinstance(tc, dict) else None),
+                    "id": (tc.get("id") if isinstance(tc, dict) else None),
+                }
+                for tc in (getattr(result, "invalid_tool_calls", None) or [])
+            ][:5],
         )
 
     def _log_fallback(self, exc: BaseException) -> None:

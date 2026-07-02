@@ -50,7 +50,10 @@ from langchain_core.messages import (
 from langchain_litellm import ChatLiteLLM
 from sqlalchemy import select, update
 
-from app.agent.message_repair import repair_orphaned_tool_calls
+from app.agent.message_repair import (
+    repair_orphaned_tool_calls,
+    strip_divergent_tool_call_residue,
+)
 from app.agent.prompts import build_system_prompt
 from app.agent.rate_limits import rate_limiter
 from app.agent.safety import SafetyClassifier, SafetyLevel
@@ -112,7 +115,7 @@ async def memory_load_node(state: AgentState) -> dict:
         logger.warning("briefing_checkin_state_failed", error=str(exc))
 
     logger.info("node_timing", node="memory_load", ms=int((time.monotonic() - _t0) * 1000))
-    return {
+    update = {
         "user_profile_always_on": context["user_profile_always_on"],
         "user_profile_on_demand": context["user_profile_on_demand"],
         "relevant_memories": context["relevant_memories"],
@@ -120,6 +123,27 @@ async def memory_load_node(state: AgentState) -> dict:
         "briefing_proactive": proactive,
         "briefing_offer": offer,
     }
+
+    # D22 durable heal — THE single checkpoint-load point (every turn on all 3 surfaces
+    # starts here). Any committed AIMessage carrying malformed/divergent tool-call residue
+    # (llama's parse-failed call in invalid_tool_calls / additional_kwargs — the shape that
+    # bricked web:master) is replaced IN THE CHECKPOINT via an add_messages same-id update,
+    # so no downstream consumer ever sees it and the thread heals itself at turn start.
+    # Healthy ak-mirrors of real parsed tool_calls are untouched (strip is divergent-only).
+    healed = [
+        fixed
+        for m in (state.get("messages") or [])
+        if (fixed := strip_divergent_tool_call_residue(m)) is not None
+    ]
+    if healed:
+        logger.warning(
+            "thread_poison_healed",
+            thread_id=state.get("thread_id"),
+            count=len(healed),
+            message_ids=[m.id for m in healed],
+        )
+        update["messages"] = healed
+    return update
 
 
 # ============================================================================
@@ -467,6 +491,29 @@ async def agent_node(state: AgentState) -> dict:
         if cleaned != response.content:
             logger.warning("agent_response_function_leak_stripped")
             response = response.model_copy(update={"content": cleaned})
+
+    # D22 mint guard (belt-and-suspenders behind FallbackChatLLM's shape-3 re-issue): if the
+    # SURVIVING response still carries malformed tool-call residue (both models malformed — the
+    # re-issue is bounded to one), strip it BEFORE it can persist and poison the thread. The
+    # trpv0ek1t brick was exactly this shape reaching the checkpoint. D23 floor: a stripped
+    # response with no tool_calls and no content must never persist as a silent BLANK reply.
+    if isinstance(response, AIMessage):
+        stripped = strip_divergent_tool_call_residue(response)
+        if stripped is not None:
+            logger.warning(
+                "agent_response_invalid_toolcalls_stripped",
+                invalid_ids=[_tc_id for tc in (response.invalid_tool_calls or [])
+                             if (_tc_id := (tc.get("id") if isinstance(tc, dict) else None))],
+            )
+            response = stripped
+            if not response.tool_calls and not (
+                response.content if isinstance(response.content, str) else ""
+            ).strip():
+                h = settings.MASTER_HONORIFIC
+                response = response.model_copy(update={"content": (
+                    f"I couldn't produce a proper response there, {h} — "
+                    f"could you say that again?"
+                )})
 
     # #3 — force a card when the model described an email instead of calling email_send.
     if isinstance(response, AIMessage):

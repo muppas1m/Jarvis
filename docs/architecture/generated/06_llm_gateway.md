@@ -10,8 +10,8 @@ Every chat completion routes through `app/llm/gateway.py:LLMGateway.complete()`.
 
 | Slot | Model ID | Provider |
 |---|---|---|
-| `primary` | `groq/llama-3.3-70b-versatile` | groq |
-| `fast` | `groq/llama-3.1-8b-instant` | groq |
+| `primary` | `openai/gpt-4o-mini` | openai |
+| `fast` | `openai/gpt-4o-mini` | openai |
 | `fallback` | `openai/gpt-4o-mini` | openai |
 | `contextualizer` | `gemini/gemini-2.5-flash-lite` | google |
 | `extractor` | `gemini/gemini-2.5-flash-lite` | google |
