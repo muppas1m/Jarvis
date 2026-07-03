@@ -951,7 +951,21 @@ def _is_queue_marker(m: BaseMessage) -> bool:
     )
 
 
-async def _readback_for_queued(row_ids: list, h: str) -> str:
+def _minted_new_this_turn(messages: list) -> bool:
+    """D24 — did THIS turn mint a NEW approval card? The A1 marker split encodes it in the
+    round's ToolMessages: a fresh mint returns `[QUEUED]`; every dedup branch (L0 sig-hit /
+    already-queued / content-dedup) returns `[ALREADY_QUEUED]`. Reversed scan bounded at this
+    turn's HumanMessage (the Fix-1 boundary), so a PRIOR turn's mint never counts."""
+    for m in reversed(messages or []):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage) and isinstance(m.content, str) \
+                and m.content.startswith(QUEUED_MARKER_TAG):
+            return True
+    return False
+
+
+async def _readback_for_queued(row_ids: list, h: str, minted_new: bool = True) -> str:
     """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the approval cards
     TOUCHED this turn (`queued_this_turn` — row PKs), fetched by id. describe_card gives "an email to
     X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays fixed on the
@@ -959,12 +973,19 @@ async def _readback_for_queued(row_ids: list, h: str) -> str:
     read. (A1 keys on the row PK, not the tool_call_id, so the read-back fires from ANY terminal round
     — the pure-queue terminate AND the mixed-round natural-answer path — not only the queuing round.
     De-dups + preserves queue order; a same-card id can appear twice when a content-dedup re-emit
-    re-records it.)"""
+    re-records it.)
+
+    D24 (the yes-trap): the inviting tail ("— shall I go ahead?") SOLICITS consent — one committed
+    "yes" dispatches. That's right after a fresh mint, and an amplifier after a dedup-only round
+    (the master may have just REFUSED this very action; the re-emit that hit the dedup must not
+    re-offer it). `minted_new=False` → a non-soliciting acknowledgment instead. The full stateful
+    disambiguation is B1 — this is only the amplifier removal."""
     import uuid as _uuid
 
     from app.approvals_service import describe_card, to_unified_card
     if not row_ids:
-        return f"I've queued it for your approval, {h}."
+        return (f"I've queued it for your approval, {h}." if minted_new
+                else f"That's already queued awaiting your approval, {h}.")
     try:
         pks = []
         for rid in row_ids:
@@ -989,7 +1010,8 @@ async def _readback_for_queued(row_ids: list, h: str) -> str:
         logger.warning("readback_fetch_failed", error=str(exc))
         cards = []
     if not cards:
-        return f"I've queued it for your approval, {h}."
+        return (f"I've queued it for your approval, {h}." if minted_new
+                else f"That's already queued awaiting your approval, {h}.")
     phrases = [describe_card(c) for c in cards]
     if len(phrases) == 1:
         joined = phrases[0]
@@ -997,7 +1019,10 @@ async def _readback_for_queued(row_ids: list, h: str) -> str:
         joined = f"{phrases[0]} and {phrases[1]}"
     else:
         joined = "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
-    return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
+    if minted_new:
+        return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
+    verb = "is" if len(phrases) == 1 else "are"
+    return f"{joined[0].upper()}{joined[1:]} {verb} already queued awaiting your approval, {h}."
 
 
 async def queued_finish_node(state: AgentState) -> dict:
@@ -1012,7 +1037,13 @@ async def queued_finish_node(state: AgentState) -> dict:
     Fix 4). The read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's
     tool_calls message → no orphaned tool_call)."""
     h = settings.MASTER_HONORIFIC
-    read_back = await _readback_for_queued(list(state.get("queued_this_turn") or []), h)
+    # D24: solicit consent ONLY when this turn minted a NEW card. A dedup-only round (pure
+    # [ALREADY_QUEUED] — e.g. a re-emit right after the master tried to REJECT this action)
+    # gets a non-soliciting acknowledgment — never a fresh "shall I go ahead?" offer.
+    read_back = await _readback_for_queued(
+        list(state.get("queued_this_turn") or []), h,
+        minted_new=_minted_new_this_turn(state.get("messages") or []),
+    )
 
     # The genuine answer to preserve: the natural answer (final_response — set by agent_node on a
     # no-tool-call terminal, turn-reset so never stale) else the last content-bearing AIMessage of

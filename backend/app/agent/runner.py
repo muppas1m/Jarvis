@@ -113,14 +113,20 @@ async def _queued_readback_envelope(thread_id: str) -> dict[str, Any] | None:
     None when nothing was queued (→ the caller falls back to the plain error message)."""
     try:
         snap = await graph().aget_state({"configurable": {"thread_id": thread_id}})
-        queued = list((getattr(snap, "values", None) or {}).get("queued_this_turn") or [])
+        values = getattr(snap, "values", None) or {}
+        queued = list(values.get("queued_this_turn") or [])
     except Exception as exc:  # noqa: BLE001 — the recovery path must never raise
         logger.warning("queued_readback_state_read_failed", thread_id=thread_id, error=str(exc))
         return None
     if not queued:
         return None
-    from app.agent.nodes import _readback_for_queued
-    text = await _readback_for_queued(queued, settings.MASTER_HONORIFIC)
+    # D24: same solicit-only-on-new-mints rule as queued_finish — a dedup-only turn that
+    # errored must not re-offer "shall I go ahead?" for an action the master may have refused.
+    from app.agent.nodes import _minted_new_this_turn, _readback_for_queued
+    text = await _readback_for_queued(
+        queued, settings.MASTER_HONORIFIC,
+        minted_new=_minted_new_this_turn(values.get("messages") or []),
+    )
     env = _error_envelope(thread_id, text, stop_reason="queued_before_error")
     env["status"] = "complete"   # the cards ARE queued — a real outcome, not a failure
     return env
