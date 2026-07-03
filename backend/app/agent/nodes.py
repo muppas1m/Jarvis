@@ -1087,8 +1087,13 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
     tid = judged.row.thread_id
 
     # Only an email card with a draft can be revised; a tool card / heads-up → a nudge.
+    # D24 site 2 (the D14 edit-refusal): the master just asked for a CHANGE — they are explicitly
+    # NOT satisfied with the draft, so the nudge must INFORM, never solicit a send ("Shall I go
+    # ahead?" here was the yes-trap at its worst moment — one committed "yes" would dispatch the
+    # draft they were trying to edit). Honest capability statement, no invitation.
     if not (judged.is_email_card and not judged.needs_drafting):
-        nudge = f"I can only send or discard this for now, {h}. Shall I go ahead?"
+        nudge = (f"I can only send or discard this for now, {h} — "
+                 f"say the word to send it, or reject it on the card.")
         return {"messages": [AIMessage(content=nudge)], "final_response": nudge,
                 "card_outcome": {"approval_id": aid, "thread_id": tid}, "card_handled": True}
 

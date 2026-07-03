@@ -173,6 +173,31 @@ async def test_d24_dedup_only_turn_does_not_solicit(real_checkpointer):
         await _cleanup(thread)
 
 
+# --------------------------------------------------------------------------- #
+# Site 2 — the D14 edit-refusal nudge (nodes.py _card_edit_redraft)             #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_d24_site2_edit_refusal_nudge_does_not_solicit():
+    """An EDIT-intent turn on a non-revisable card ("Address them as Bro" / "trim the body",
+    s6.png): the master is explicitly NOT satisfied with the draft — the nudge must inform
+    (send-or-discard capability) without inviting a send."""
+    from types import SimpleNamespace
+
+    from app.agent.nodes import _card_edit_redraft
+
+    judged = SimpleNamespace(
+        approval_id="a1b2c3d4", is_email_card=False, needs_drafting=False,
+        row=SimpleNamespace(thread_id="web:master"), change="trim the body",
+    )
+    out = await _card_edit_redraft(judged, "trim the body")
+    low = out["final_response"].lower()
+    assert "i can only send or discard" in low          # the honest capability statement stays
+    assert "say the word to send it" in low             # informs the paths
+    for phrase in _SOLICITS:
+        assert phrase not in low, f"yes-trap at site 2: nudge still solicits ({phrase!r})"
+    assert out["card_handled"] is True                  # branch contract unchanged
+
+
 @pytest.mark.asyncio
 async def test_d24_inverse_fresh_mint_still_invites(real_checkpointer):
     thread = f"web:{_MARK}-inv"
