@@ -103,13 +103,28 @@ def _judgment(intent, row):
 
 
 def _patch_judge(monkeypatch, intent):
-    async def fake_judge(approval_id, message, recent_context=""):
+    async def fake_judge(approval_id, message, recent_context="", require_pending=True):
         async with async_session() as s:
             row = (await s.execute(
                 select(PendingApproval).where(PendingApproval.id == uuid.UUID(approval_id))
             )).scalar_one()
         return _judgment(intent, row)
     monkeypatch.setattr(runner, "_judge_presented", fake_judge)
+
+
+async def _seed_linked_message(thread_id, aid, solicited=True):
+    """A2 s2 migration: consent resolves against the CONVERSATION's jarvis-linked approval
+    message (the presented_approval_id no longer targets) — seed the message the real
+    queued_finish would have written."""
+    from langchain_core.messages import AIMessage
+    g = runner.graph()
+    await g.aupdate_state(
+        {"configurable": {"thread_id": thread_id}},
+        {"messages": [AIMessage(
+            content="I've queued it for your approval, Sir — shall I go ahead?",
+            additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [str(aid)],
+                                          "mint_class": "fresh", "solicited": solicited}})]},
+        as_node="agent")
 
 
 def _hist_text(hist):
@@ -136,6 +151,7 @@ async def test_approve_through_graph_persists_and_claims(real_checkpointer, monk
         _patch_judge(monkeypatch, "approve")
         monkeypatch.setattr(approval_dispatch, "resolve_and_dispatch", fake_rad)
 
+        await _seed_linked_message(thread_id, aid)
         events = await _collect(runner.stream_turn(
             "yes, go ahead", thread_id, "web", "u", presented_approval_id=aid))
 
@@ -171,6 +187,7 @@ async def test_approve_no_double_write_real_dispatch(real_checkpointer, monkeypa
         # mock ONLY the tool execution; the claim + dispatch + _record_outcome run for real
         monkeypatch.setattr("app.agent.nodes.execute_tool_guarded", fake_exec)
 
+        await _seed_linked_message(thread_id, aid)
         events = await _collect(runner.stream_turn(
             "yes, go ahead", thread_id, "web", "u", presented_approval_id=aid))
 
@@ -232,6 +249,7 @@ async def test_edit_through_graph_emits_card_thread_id(real_checkpointer, monkey
             return "Shorter draft."
         monkeypatch.setattr("app.email.responder.revise_draft", fake_revise)
 
+        await _seed_linked_message(conv_thread, aid)
         events = await _collect(runner.stream_turn(
             "make it shorter", conv_thread, "web", "u", presented_approval_id=aid))
 

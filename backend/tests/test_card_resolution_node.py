@@ -33,10 +33,18 @@ def _judgment(intent, *, row=None, change=""):
     )
 
 
+def _linked_msg(aid="uuid-1", solicited=True):
+    from langchain_core.messages import AIMessage
+    return AIMessage(content="I've queued it for your approval, Sir — shall I go ahead?",
+                     additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [aid],
+                                                   "mint_class": "fresh", "solicited": solicited}})
+
+
 def _state(**kw):
+    # A2 s2: the referent is the CONVERSATION's jarvis-linked message (aid is context-only)
     base = {
         "presented_approval_id": "uuid-1", "presented_via": "web",
-        "user_message": "go", "thread_id": "web:master", "messages": [],
+        "user_message": "go", "thread_id": "web:master", "messages": [_linked_msg()],
     }
     base.update(kw)
     return base
@@ -67,12 +75,15 @@ def _live_card(approval_id="uuid-1", kind="email", tool_name="email_reply", **ta
         created_at="2026-06-30T00:00:00+00:00")
 
 
-def _patch_live(monkeypatch, cards):
-    """The wrong-card SEAL reads the authoritative live set; a single matching card means the
-    gate resolves it (count==1, no kind-mismatch). >1 or none changes the gate's branch."""
-    async def fake():
+def _patch_targets(monkeypatch, cards):
+    """A2 s2: the node's live targets come from the referent's linked ids
+    (_live_linked_targets → _fetch_queued_cards); [] = stale (already resolved)."""
+    async def fake(ids):
         return list(cards)
-    monkeypatch.setattr("app.approvals_service.list_pending_cards", fake)
+    monkeypatch.setattr(nodes, "_fetch_queued_cards", fake)
+
+
+_patch_live = None  # retired with the seal's live-set matching (kept name for grep history)
 
 
 # --- no presented card → pass straight through to the agent ------------------
@@ -83,7 +94,7 @@ async def test_no_card_passes_through():
 # --- approve → the ATOMIC claim runs + outcome reply + flip state (L1) --------
 async def test_approve_goes_through_claim(monkeypatch):
     _patch_judge(monkeypatch, _judgment("approve"))
-    _patch_live(monkeypatch, [_live_card()])  # one live card → the gate resolves it
+    _patch_targets(monkeypatch, [_live_card()])  # one live card → the gate resolves it
     rec = _patch_dispatch(monkeypatch, ApprovalDispatchOutcome(
         kind="email", status="sent", success=True, thread_id="email:gmail:msg-1",
         email_outcome=EmailApprovalOutcome(status="sent", recipient="p@x.com")))
@@ -100,7 +111,7 @@ async def test_approve_goes_through_claim(monkeypatch):
 # --- approve, LOST claim (graph re-process / race) → NOT double-executed ------
 async def test_approve_lost_claim_no_double_dispatch(monkeypatch):
     _patch_judge(monkeypatch, _judgment("approve"))
-    _patch_live(monkeypatch, [_live_card()])  # one live card → gate dispatches → claim is lost
+    _patch_targets(monkeypatch, [_live_card()])  # one live card → gate dispatches → claim is lost
     _patch_dispatch(monkeypatch, ApprovalDispatchOutcome(kind="none", status="not_claimed"))
     out = await nodes.card_resolution_node(_state())
     assert out["card_handled"] is True
@@ -112,7 +123,7 @@ async def test_approve_lost_claim_no_double_dispatch(monkeypatch):
 # --- reject → claim with approved=False --------------------------------------
 async def test_reject(monkeypatch):
     _patch_judge(monkeypatch, _judgment("reject"))
-    _patch_live(monkeypatch, [_live_card()])  # one live card → the gate resolves it
+    _patch_targets(monkeypatch, [_live_card()])  # one live card → the gate resolves it
     rec = _patch_dispatch(monkeypatch, ApprovalDispatchOutcome(
         kind="email", status="rejected", thread_id="email:gmail:msg-1"))
     out = await nodes.card_resolution_node(_state(user_message="no, cancel it"))
@@ -141,7 +152,11 @@ async def test_skip_nav(monkeypatch):
 
 # --- stale / gone card → brief ack -------------------------------------------
 async def test_stale_card_acks(monkeypatch):
-    _patch_judge(monkeypatch, None)            # judge returns None for a resolved/gone card
+    """MIGRATED (A2 s2, declared): 'stale' = the linked target is no longer pending (live
+    targets empty) while the master expresses consent — the honest ack, never a substitute.
+    (A judge-None row-DELETED case now routes to the agent as a normal turn — {}.)"""
+    _patch_judge(monkeypatch, _judgment("approve"))
+    _patch_targets(monkeypatch, [])            # the linked card is already resolved
     out = await nodes.card_resolution_node(_state())
     assert out["card_handled"] is True
     assert out["card_outcome"]["decision_status"] == "stale"

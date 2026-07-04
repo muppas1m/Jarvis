@@ -758,7 +758,8 @@ class _PresentedJudgment:
 
 
 async def _judge_presented(
-    approval_id: str, message: str, recent_context: str = ""
+    approval_id: str, message: str, recent_context: str = "",
+    require_pending: bool = True,
 ) -> _PresentedJudgment | None:
     """Load the presented card + classify the message against it via the SAME
     context-aware ``resolve_decision`` (ambiguous → unclear/unrelated, NEVER approve).
@@ -779,13 +780,19 @@ async def _judge_presented(
     (row=None) adds no card reminder — never errors, never sends."""
     try:
         row = await _load_approval_by_id(approval_id)
-        if row is None or row.status != "pending":
+        if row is None:
+            return None
+        # A2 s2: the conversation-referent caller judges INTENT against a row of ANY status
+        # (liveness gates DISPATCH separately, so a resolved card still gets an honest ack
+        # instead of a blind pass-through). The legacy pending-only contract stays the default.
+        if require_pending and row.status != "pending":
             return None
         # Expiry guard (wrong-card seal): the hourly sweeper can lag, leaving an EXPIRED row at
         # status='pending'. list_pending_cards() filters expires_at>now, so an expired presented
         # card would be admitted here but ABSENT from the gate's live set — risking a wrong-card
         # substitution. Treat an expired row as stale (gone) so the turn acks, never re-targets.
-        if getattr(row, "expires_at", None) is not None and row.expires_at <= datetime.now(UTC):
+        if require_pending and getattr(row, "expires_at", None) is not None \
+                and row.expires_at <= datetime.now(UTC):
             return None
         payload = row.payload or {}
         if _is_email_row(row):

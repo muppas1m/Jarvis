@@ -131,12 +131,21 @@ async def test_readback_dedup_names_card_without_soliciting():
 
 @pytest.mark.asyncio
 async def test_readback_mint_still_invites():
+    """MIGRATED (A2 s2, declared): _readback_for_queued is now the ERROR-path contract and
+    never solicits (a bare "yes" after an error must confirm — no anchor exists). The fresh
+    INVITE lives in the terminal-composition floor (_render_approval_floor), asserted here."""
+    from app.agent.nodes import _fetch_queued_cards, _render_approval_floor
     thread = f"web:{_MARK}-tpl2"
     rid = await _seed_card(thread, "c1", "email_send",
                            {"to": "bob@x.com", "subject": "Hi", "body": "x"})
     try:
-        text = await _readback_for_queued([rid], "Sir", mint_class="fresh")
+        cards = await _fetch_queued_cards([rid])
+        text = _render_approval_floor(cards, "Sir", "fresh")
         assert "shall i go ahead" in text.lower()        # the inviting tail is mint-only
+        # …and the ERROR-path read-back for the same cards never solicits:
+        err_text = await _readback_for_queued([rid], "Sir", mint_class="fresh")
+        assert "shall i go ahead" not in err_text.lower()
+        assert "bob@x.com" in err_text                    # still names the card
     finally:
         await _cleanup(thread)
 
