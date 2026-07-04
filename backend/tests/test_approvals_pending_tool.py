@@ -120,3 +120,50 @@ async def test_identical_whether_or_not_a_card_is_surfaced():
 #  runner._summarize_pending, whose underlying renderer approvals_service.summarize_others is
 #  itself now-dead collateral, flagged for a follow-up. The approvals_pending TOOL renderer
 #  (render_for_agent) is covered by the tests above.)
+
+
+# --------------------------------------------------------------------------- #
+# D6 (A2 s0) — kind filter: "pending calendar approvals?" answers ONE kind.    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_kind_filter_calendar_excludes_emails():
+    await _seed()
+    try:
+        out = await approvals_pending(kind="calendar")
+        assert "Standup" in out or "calendar" in out.lower()   # the calendar card is there
+        assert "alice@example.com" not in out                  # the outbound email is NOT
+        assert "bob@example.com" not in out                    # the inbound reply is NOT
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_kind_filter_email_excludes_calendar():
+    await _seed()
+    try:
+        out = await approvals_pending(kind="email")
+        assert "alice@example.com" in out                      # both email kinds present
+        assert "bob@example.com" in out
+        assert "Standup" not in out                            # the calendar card is NOT
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_kind_filter_empty_returns_whole_queue():
+    await _seed()
+    try:
+        out = await approvals_pending()                        # no filter → everything
+        assert "alice@example.com" in out and "Standup" in out
+        # an unknown kind never hides the queue (fail-open read)
+        out2 = await approvals_pending(kind="bogus")
+        assert "alice@example.com" in out2 and "Standup" in out2
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_kind_filter_no_matches_honest_line():
+    # empty DB for this mark → a kind ask answers honestly, never errors
+    out = await approvals_pending(kind="calendar")
+    assert "no calendar approvals" in out.lower() or "awaiting" in out.lower()
