@@ -1176,12 +1176,17 @@ async def queued_finish_node(state: AgentState) -> dict:
     mint_class = _mint_class_this_turn(state.get("messages") or [])
     cards = await _fetch_queued_cards(queued_ids)
 
-    # s4 — the edit-no-mint HONEST FLOOR: an edit directive that produced no mint (the agent
-    # talked instead of re-emitting) must say so plainly — never imply the change applied.
+    # s4/D33 — the edit-no-mint HONEST FLOOR: an edit directive that produced no mint (the agent
+    # restated instead of re-emitting) must say so plainly AND never invite on the stale
+    # restatement. A "yes" to a surviving invite here is MATERIALLY MISINFORMED CONSENT (the
+    # master believes the card reflects the edit). So the lead is stripped of ALL solicitation —
+    # the honest floor is the only closer. (This backstop also defangs D27's dangerous subset:
+    # prose invites after an unapplied request; D27's benign-responsive subset stays B1.)
     if state.get("edit_expected") and not queued_ids:
-        lead = (state.get("final_response") or "").strip()
-        floor = f"That change didn't apply, {h} — the card is unchanged."
+        lead = _strip_solicitation((state.get("final_response") or "").strip())
+        floor = f"That change didn't apply, {h} — the card is unchanged. Tell me the change again and I'll redo it."
         final = f"{lead}\n\n{floor}".strip() if lead else floor
+        logger.info("card_edit_no_mint_floor", stripped=lead != (state.get("final_response") or "").strip())
         return {"messages": [AIMessage(content=floor)], "final_response": final,
                 "terminal_delta": floor}
 
@@ -1275,11 +1280,13 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
         targs = payload.get("tool_args") or {}
         tool = payload.get("tool_name") or (row.action_type if row is not None else "the action")
         directive = (
-            f"[EDIT DIRECTIVE] The master wants to CHANGE the queued `{tool}` action. "
-            f"Original arguments: {_json.dumps(targs, default=str)}. Requested change: "
-            f"'{judged.change or message}'. Re-emit the `{tool}` tool call NOW with the "
-            f"corrected arguments (change only what the master asked; keep the rest). The "
-            f"system will replace the old card automatically."
+            f"[EDIT DIRECTIVE — ACT, DO NOT DESCRIBE] The master is changing the queued `{tool}` "
+            f"action; the current card is now STALE. Original arguments: "
+            f"{_json.dumps(targs, default=str)}. Requested change: '{judged.change or message}'. "
+            f"Your ONLY correct response this turn is to CALL `{tool}` again with the corrected "
+            f"arguments — change only what the master asked, keep the rest; the system replaces the "
+            f"old card automatically. Do NOT restate the old card, do NOT ask for confirmation, do "
+            f"NOT say it's queued — just make the corrected `{tool}` call now."
         )
         logger.info("card_edit_reemit_directive", approval_id=aid, tool=tool)
         # D29: the directive CARRIES its target — the mint supersedes BY TARGET ID (a key-field
@@ -1516,7 +1523,14 @@ async def card_resolution_node(state: AgentState) -> dict:
     resolved_via = "voice" if voice_mode.get() else "web"
 
     ref = _conversation_referent(state.get("messages") or [])
+    # D33 — PERMANENT instrumentation (this bypass class must never be invisible again): one
+    # line for the referent walk, one for the judge entry-or-skip, every turn.
+    logger.info("card_resolution_walk",
+                referent=(ref["type"] if ref else "none"),
+                ids=len(ref["ids"]) if ref else 0,
+                offer_pending=bool(ref and ref.get("offer_pending")))
     if ref is None or (ref["type"] == "briefing" and not ref["ids"]):
+        logger.info("card_resolution_judge_skipped", reason="no_referent")
         return {}  # nothing jarvis-tagged (or a pure offer) → the agent owns the turn
 
     live = await _live_linked_targets(ref["ids"])
@@ -1530,6 +1544,7 @@ async def card_resolution_node(state: AgentState) -> dict:
         elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
             recent.append(f"Assistant: {m.content}")
     judge_id = live[0].approval_id if live else ref["ids"][0]
+    logger.info("card_resolution_judge_entered", judge_id=judge_id, live=len(live))
     judged = await _judge_presented(judge_id, message, "\n".join(recent), require_pending=False)
     if judged is None:
         return {}  # row vanished entirely → a normal agent turn
