@@ -288,6 +288,8 @@ async def run_turn(
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "terminal_delta": "",     # A2 s1b — the un-streamed terminal text (voice speaks it); turn-reset
+        "briefing_attached": False,  # A2 s1b — persist's briefing re-entrancy guard; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         # Card-resolution fields reset per turn (replace reducer persists them in the
@@ -332,10 +334,8 @@ async def run_turn(
             1 for m in (result.get("messages") or []) if isinstance(m, ToolMessage)
         ),
     )
-    if envelope.get("status") != "interrupted":
-        attach = await _briefing_attach(result)  # 5.4 — code-guaranteed brief/offer
-        if attach:
-            envelope["response"] = _append_block(envelope.get("response", ""), attach)
+    # A2 s1b: the briefing attaches IN-GRAPH (persist_node) — final_response already carries
+    # it, persisted (D19 closed). The post-graph bolt-on is gone.
     return envelope  # context already on the envelope (set in _build_envelope)
 
 
@@ -406,6 +406,8 @@ async def stream_turn(
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "terminal_delta": "",     # A2 s1b — the un-streamed terminal text (voice speaks it); turn-reset
+        "briefing_attached": False,  # A2 s1b — persist's briefing re-entrancy guard; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         "presented_approval_id": presented_approval_id or "",
@@ -495,13 +497,9 @@ async def stream_turn(
         # exactly as before — now from a PERSISTED turn.
         for ev in _card_outcome_events(thread_id, result.get("card_outcome") or {}):
             yield ev
-        # 5.4 — code-guaranteed brief/offer in the DONE payload ONLY (like the card reminder),
-        # NOT also as a live token: the client's done does patch(response), so a token + done
-        # would render it twice. The done's response is canonical → it shows exactly once.
-        attach = await _briefing_attach(result)
+        # A2 s1b: the briefing is in-graph (persist_node) → already inside the envelope's
+        # response, persisted. The done payload is canonical → it shows exactly once.
         payload = _with_reminder(_terminal_payload(envelope), card_reminder)
-        if attach:
-            payload["response"] = _append_block(payload.get("response", ""), attach)
         yield {"type": "done", "content": payload}
 
 
@@ -550,35 +548,8 @@ def _with_reminder(payload: dict[str, Any], reminder: str) -> dict[str, Any]:
     return payload
 
 
-def _append_block(base: str, block: str) -> str:
-    """Append a code-attached block (briefing / offer) as its own paragraph — the model's
-    wrapper, then the system-guaranteed content."""
-    base = (base or "").rstrip()
-    return f"{base}\n\n{block}".strip() if base else block
 
 
-async def _briefing_attach(result: dict[str, Any]) -> str:
-    """Phase 5.4 — CODE-render the proactive briefing into the reply (the model wrote only
-    the wrapper + the deliver_briefing() signal). Reads the turn-START mode + offer (stored
-    in state by memory_load_node) and the model's signal (a tool call in the final messages);
-    returns the brief (deliver) or the offer line (floor), or "" for suppress/already-done.
-    Fail-soft — a hiccup here must never break the reply."""
-    try:
-        from app.agent.briefing_state import mark_offered, render_attach
-        text, delivered = await render_attach(
-            result.get("briefing_proactive") or "suppress",
-            result.get("briefing_offer") or "",
-            result.get("messages") or [],
-        )
-        # An OFFER is a throttled proactive surface too — stamp the cooldown so a string of
-        # ordinary messages with items pending gets AT MOST ONE offer, not one per message.
-        # (A delivery already stamped it via mark_briefed inside briefing('latest').)
-        if text and not delivered:
-            await mark_offered(datetime.now(UTC))
-        return text
-    except Exception as exc:  # noqa: BLE001 — never break the reply on the briefing attach
-        logger.warning("briefing_attach_failed", error=str(exc))
-        return ""
 
 
 async def _queued_approval_event(thread_id: str, message: Any) -> dict[str, Any] | None:
@@ -1025,6 +996,8 @@ async def voice_turn(
         "tool_calls_this_turn": 0,  # reset per turn → the hourly rate check runs once (first agent pass)
         "queued_signatures": [],  # L0 in-turn idempotency — turn-scoped, MUST reset (replace reducer)
         "queued_this_turn": [],   # A1 — cards queued this turn (read-back source); MUST reset per turn
+        "terminal_delta": "",     # A2 s1b — the un-streamed terminal text (voice speaks it); turn-reset
+        "briefing_attached": False,  # A2 s1b — persist's briefing re-entrancy guard; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         "presented_approval_id": presented_approval_id or "",
@@ -1184,13 +1157,17 @@ async def voice_turn(
             yield ev
         yield {"type": "approval_required", "thread_id": thread_id, "content": interrupt}
     else:
-        # If NO agent text was streamed this turn, nothing was spoken yet — e.g. a clean
-        # "send an email to X" ends at queued_finish, whose closing is injected POST-stream and
-        # never streamed, so the card would surface silently. Speak the response now. When agent
-        # text WAS streamed (first_token), it was already spoken (incl. a compound's answer) — so
-        # don't re-speak.
+        # The ONE terminal delta (A2 s1b — closes NV7, keeps 10e7431): when NO agent text was
+        # streamed, nothing was spoken yet → speak the whole response (it includes the delta).
+        # When tokens DID stream, they were already spoken — speak ONLY the un-streamed
+        # terminal delta (the in-graph approval message + briefing), never re-speaking tokens.
+        terminal_delta = (result.get("terminal_delta") or "").strip()
         if not first_token and (envelope.get("response") or "").strip():
             ev = await _speak(envelope["response"])
+            if ev:
+                yield ev
+        elif first_token and terminal_delta:
+            ev = await _speak(terminal_delta)
             if ev:
                 yield ev
         # Step A: a presented-card resolution handled in-graph → emit the frontend events
@@ -1205,18 +1182,8 @@ async def voice_turn(
             ev = await _speak(card_reminder)
             if ev:
                 yield ev
-        # 5.4 proactive briefing: code-attach the brief/offer — SPOKEN (voice parity, the
-        # caption rides the audio event) + in the DONE payload, exactly like the card reminder.
-        # No live token: the caption comes from the audio event, and the done response is
-        # canonical — so it's heard + shown once, never twice.
-        attach = await _briefing_attach(result)
-        if attach:
-            ev = await _speak(attach)
-            if ev:
-                yield ev
+        # A2 s1b: the briefing is in-graph -> already inside the envelope's response, persisted.
         payload = _with_reminder(_terminal_payload(envelope), card_reminder)
-        if attach:
-            payload["response"] = _append_block(payload.get("response", ""), attach)
         yield {"type": "done", "content": payload}
 
 

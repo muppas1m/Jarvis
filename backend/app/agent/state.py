@@ -92,3 +92,14 @@ class AgentState(TypedDict, total=False):
 
     # --- final assistant text (set when agent emits a non-tool message) -----
     final_response: str
+
+    # --- A2 s1b — the ONE terminal delta + briefing idempotency --------------
+    # terminal_delta: the in-graph terminal text that was NEVER streamed as tokens (the
+    # queued_finish approval message + the persist-attached briefing). ONE core-computed value
+    # every channel consumes: voice speaks it post-stream when tokens already streamed (NV7);
+    # non-streamed paths get it inside final_response anyway. Turn-reset ×3; emitters ACCUMULATE
+    # (read-prior + append), never overwrite.
+    terminal_delta: str
+    # briefing_attached: persist's re-entrancy guard — the render + the mark_offered/HWM stamps
+    # fire at most once per turn even if the node re-runs. Turn-reset ×3.
+    briefing_attached: bool

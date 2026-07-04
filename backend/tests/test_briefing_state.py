@@ -67,9 +67,14 @@ def test_mode_cooldown_boundary_is_deterministic():
 
 
 def test_render_offer_per_mode():
-    assert "latest" in bs.render_offer(_state(last_seen=_NOW - timedelta(days=1), unheard=2)).lower()
+    """FLIPPED in A2 s1b-2 (declared, D21): the off-persona templates ("Oh — …" / "the latest")
+    are rewritten in-persona — composed, count-named, honorific-bearing, never an "Oh" opener."""
+    single = bs.render_offer(_state(last_seen=_NOW - timedelta(days=1), unheard=2))
+    assert "2 items await" in single                      # names the count (composed butler)
+    assert not single.startswith("Oh")
     multi = bs.render_offer(_state(last_seen=_NOW - timedelta(days=3), unheard=5))
-    assert "away 3 days" in multi and "catch you up" in multi
+    assert "away 3 days" in multi and "catch you up" in multi.lower()
+    assert "Welcome back" in multi and "5 items await" in multi.lower()
 
 
 def test_directive_surface_single_tells_model_to_signal():

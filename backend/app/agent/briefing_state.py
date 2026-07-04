@@ -135,13 +135,19 @@ def proactive_mode(state: BriefingLiveState) -> str:
 
 
 def render_offer(state: BriefingLiveState) -> str:
-    """The code-owned OFFER line (the safe floor) — attached by the runner when the turn is
-    a proactive moment but the model didn't signal a clear check-in (or it's multi-day)."""
+    """The code-owned OFFER line (the safe floor) — attached IN-GRAPH (persist_node) when the
+    turn is a proactive moment but the model didn't signal a clear check-in (or it's multi-day).
+    D21 (A2 s1b): composed, in-persona — never an "Oh —" opener; names the count so the master
+    knows the weight of the offer. (Offering a BRIEFING is not an approval solicitation — the
+    D24/D26 contract governs consent on actions, not this.)"""
     mode, away_days, _ = _assess(state)
     h = settings.MASTER_HONORIFIC
+    n = state.unheard
+    items = "One item awaits" if n == 1 else f"{n} items await"
     if mode == SURFACE_MULTIDAY:
-        return f"By the way, {h} — you've been away {away_days} days. Shall I catch you up on what came in?"
-    return f"Oh — and there's fresh news in, {h}. Shall I give you the latest?"
+        return (f"Welcome back, {h} — you've been away {away_days} days and "
+                f"{items.lower()} your attention. Shall I catch you up?")
+    return f"{items} your attention when you're ready, {h}. Shall I brief you?"
 
 
 def briefing_directive(state: BriefingLiveState) -> str:
@@ -192,8 +198,13 @@ def briefing_directive(state: BriefingLiveState) -> str:
 # deliver signal (a tool call in the final messages).                           #
 # --------------------------------------------------------------------------- #
 def _called_tool(messages, name: str) -> bool:
-    from langchain_core.messages import AIMessage
-    for m in messages or []:
+    """TURN-BOUNDED (A2 s1b — fixes the whole-history scan the docstrings always claimed):
+    walk backwards and STOP at this turn's HumanMessage, so a deliver_briefing() call from a
+    PRIOR turn can never re-trigger today's attach."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    for m in reversed(list(messages or [])):
+        if isinstance(m, HumanMessage):
+            break
         if isinstance(m, AIMessage):
             for tc in getattr(m, "tool_calls", None) or []:
                 tc_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
@@ -203,12 +214,12 @@ def _called_tool(messages, name: str) -> bool:
 
 
 def deliver_requested(messages) -> bool:
-    """The model SIGNALLED a clear check-in by calling deliver_briefing() this turn."""
+    """The model SIGNALLED a clear check-in by calling deliver_briefing() THIS turn."""
     return _called_tool(messages, "deliver_briefing")
 
 
 def brief_already_delivered(messages) -> bool:
-    """A brief already went out this turn via the explicit briefing() tool — don't double."""
+    """A brief already went out THIS turn via the explicit briefing() tool — don't double."""
     return _called_tool(messages, "briefing")
 
 

@@ -1162,7 +1162,11 @@ async def queued_finish_node(state: AgentState) -> dict:
             "mint_class": mint_class,
         }} if queued_ids else {},
     )
-    return {"messages": [approval_message], "final_response": final}
+    # A2 s1b: the approval message was never a streamed token — it joins the ONE terminal
+    # delta so voice can speak it post-stream (NV7) and every channel reads the same value.
+    delta = f"{state.get('terminal_delta') or ''}\n\n{message_text}".strip()
+    return {"messages": [approval_message], "final_response": final,
+            "terminal_delta": delta}
 
 
 # ============================================================================
@@ -1470,9 +1474,17 @@ def route_after_card(state: AgentState) -> str:
 # Node 4 — persist (Mem0 extraction at end of turn)
 # ============================================================================
 async def persist_node(state: AgentState) -> dict:
-    """End-of-turn: extract memories via Mem0. LangGraph already persisted
-    raw messages; this hands the (user, assistant) pair to Mem0 so it can
-    extract durable facts."""
+    """End-of-turn, two jobs:
+
+    1. Mem0 extraction — hands the (user, assistant) pair to Mem0 for durable facts. Uses the
+       PRE-briefing final_response (the conversational answer; briefing text is not a memory).
+    2. A2 s1b (D19) — the BRIEFING attaches IN-GRAPH as a persisted Jarvis message, replacing
+       the three post-graph runner bolt-ons that vanished on refresh and were invisible to the
+       next turn's model (an offer-acceptance "yes" finally has an in-thread referent). Same
+       determinism contract as before: the engine picked the mode at turn start (memory_load);
+       the model only signalled; the CODE renders. `briefing_attached` makes the render + the
+       mark_offered stamp re-entrant-safe; the text joins `terminal_delta` so voice speaks it
+       post-stream (the 10e7431 pattern) and every channel reads the ONE value."""
     from app.llm.eval_mode import eval_mode
 
     # Eval runs skip persistence so they don't pollute the master's Mem0.
@@ -1490,7 +1502,37 @@ async def persist_node(state: AgentState) -> dict:
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("memory_persist_failed", error=str(exc))
-    return {}
+
+    # ---- the in-graph briefing attach (D19/D21) — at most once per turn ----
+    update: dict = {}
+    if not state.get("briefing_attached"):
+        try:
+            from app.agent.briefing_state import mark_offered, render_attach
+            text, delivered = await render_attach(
+                state.get("briefing_proactive") or "suppress",
+                state.get("briefing_offer") or "",
+                state.get("messages") or [],
+            )
+            if text:
+                if not delivered:
+                    # An OFFER is a throttled proactive surface — stamp the cooldown here (a
+                    # delivery already stamped via mark_briefed inside briefing('latest')).
+                    await mark_offered(datetime.now(UTC))
+                briefing_msg = AIMessage(
+                    content=text,
+                    additional_kwargs={"jarvis": {"type": "briefing"}},
+                )
+                update = {
+                    "messages": [briefing_msg],
+                    "briefing_attached": True,
+                    "final_response": f"{final}\n\n{text}".strip() if final else text,
+                    "terminal_delta": (
+                        f"{state.get('terminal_delta') or ''}\n\n{text}".strip()
+                    ),
+                }
+        except Exception as exc:  # noqa: BLE001 — the briefing must never break the turn
+            logger.warning("briefing_attach_failed", error=str(exc))
+    return update
 
 
 # ============================================================================
@@ -1578,6 +1620,7 @@ async def _summarize_messages(existing: str, messages: list[BaseMessage]) -> str
         temperature=0.0,
     )
     return (resp["choices"][0]["message"].get("content") or "").strip()
+
 
 
 async def compact_node(state: AgentState) -> dict:
