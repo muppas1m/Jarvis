@@ -174,8 +174,10 @@ async def test_mixed_round_readback_names_card_and_keeps_answer():
 
 
 async def test_fix4_queue_ack_content_collapses_to_readback():
-    """Fix 4: if the agent's own content is a 'queued for approval' ack, the read-back does not
-    double-say it — the content collapses to the single deterministic read-back."""
+    """FLIPPED in A2 s1b (declared): the Fix-4 ack-DROP is retired — verify-and-keep. The
+    model's ack prose is KEPT; the floor fires DELTA-ONLY (the prose named Bob but not the
+    subject → the floor names the card once); the solicitation contract still guarantees
+    exactly one invitation on the fresh class."""
     thread = f"web:{_MARK}-ack"
     cid = await _seed_card(thread, "e1", {"tool_name": "email_send",
         "tool_args": {"to": "bob@x.com", "subject": "Hi", "body": "x"}})
@@ -185,9 +187,9 @@ async def test_fix4_queue_ack_content_collapses_to_readback():
                                    tool_calls=[_send("bob@x.com", "Hi", "x", "e1")]), _qm("e1")],
             "queued_this_turn": [cid]})
         r = out["final_response"].lower()
-        # the ack content is dropped → the read-back is the SOLE ack; "queued … approval" appears once.
-        assert r.count("approval") == 1, f"double-ack not collapsed: {r!r}"
-        assert "bob@x.com" in r
+        assert "i've queued the email to bob for your approval, sir." in r  # prose KEPT (affirmative)
+        assert "bob@x.com" in r                                  # floor names the card (delta)
+        assert r.count("shall i go ahead") == 1                  # exactly ONE solicitation
     finally:
         await _cleanup(thread)
 

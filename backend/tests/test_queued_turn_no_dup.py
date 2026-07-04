@@ -211,6 +211,9 @@ async def test_reissue_same_send_in_one_turn_no_duplicate(real_checkpointer):
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_queued_finish_preserves_genuine_content_not_draft_prose():
+    """FLIPPED in A2 s1b (declared): verify-and-keep replaced the email-shaped DROP. The old
+    pin asserted a restated draft was collapsed to the generic closing; the new contract is the
+    inverse bias — prose is ALWAYS kept, the deterministic floor appends delta-only."""
     qmsg = _q("c1")
 
     def ai(content):
@@ -218,12 +221,14 @@ async def test_queued_finish_preserves_genuine_content_not_draft_prose():
     # (1) a genuine inline answer/ack is KEPT as the response (compound / contextual ack)
     out = await queued_finish_node({"messages": [ai("The capital of France is Paris."), qmsg]})
     assert "capital of France is Paris" in out["final_response"]  # genuine answer preserved
-    assert "queued" in out["final_response"].lower()             # + the read-back appended (L1)
-    # (2) the draft restated as email-shaped prose → the generic closing (the card IS the draft)
+    assert "queued" in out["final_response"].lower()             # + the floor appended
+    # (2) FLIP: email-shaped prose is now KEPT (voice speaks full content per the master's
+    # ruling) — and the floor still fires because the prose didn't name the essentials.
     draft = "Subject: Hi\n\nHi Bob,\n\nHere it is.\n\nBest,\nM"
     out2 = await queued_finish_node({"messages": [ai(draft), qmsg]})
-    assert "queued it for your approval" in out2["final_response"].lower()
-    # (3) no content → the generic closing
+    assert "Here it is." in out2["final_response"]               # prose KEPT (affirmative)
+    assert "queued" in out2["final_response"].lower()            # floor appended (delta)
+    # (3) no content → the deterministic floor alone
     out3 = await queued_finish_node({"messages": [ai(""), qmsg]})
     assert "queued it for your approval" in out3["final_response"].lower()
 

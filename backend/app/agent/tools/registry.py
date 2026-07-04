@@ -43,7 +43,8 @@ logger = get_logger(__name__)
 
 
 class _ToolEntry:
-    __slots__ = ("name", "tool", "always_loaded", "description", "capability")
+    __slots__ = ("name", "tool", "always_loaded", "description", "capability",
+                 "approval_essentials")
 
     def __init__(
         self,
@@ -52,6 +53,7 @@ class _ToolEntry:
         always_loaded: bool,
         description: str,
         capability: str = "",
+        approval_essentials: list[dict] | None = None,
     ) -> None:
         self.name = name
         self.tool = tool
@@ -62,6 +64,13 @@ class _ToolEntry:
         # tool, excluded from the recital. The registry is the source of truth → the recital
         # can't drift out of sync with the actual tools.
         self.capability = capability
+        # ESSENTIALS REGISTRY (A2 s1b — a recorded roadmap standard): the payload fields an
+        # APPROVAL MESSAGE for this tool must NAME before the deterministic floor may stand
+        # down — each {"field": <tool_args key>, "kind": "recipient"|"text"|"time"}. EVERY
+        # APPROVE-tier tool declares its essentials at registration; an undeclared tool falls
+        # back to its humanized name AND logs a warning (the weak path stays visible, never
+        # the quiet norm — the reviewer's (b)-lens flags undeclared APPROVE tools).
+        self.approval_essentials = approval_essentials
 
 
 class ToolRegistry:
@@ -81,6 +90,7 @@ class ToolRegistry:
         args_schema: type[BaseModel] | None = None,
         always_loaded: bool = False,
         capability: str = "",
+        approval_essentials: list[dict] | None = None,
     ) -> None:
         """Register a tool. `handler` may be sync or async — StructuredTool
         supports both via `func=` vs `coroutine=`.
@@ -109,8 +119,15 @@ class ToolRegistry:
             always_loaded=always_loaded,
             description=description,
             capability=capability,
+            approval_essentials=approval_essentials,
         )
         logger.info("tool_registered", name=name, always_loaded=always_loaded)
+
+    def approval_essentials(self, tool_name: str) -> list[dict] | None:
+        """The tool's declared approval-message essentials (the Essentials-registry standard),
+        or None for an undeclared tool (callers fall back to the humanized name + WARN)."""
+        entry = self._entries.get(tool_name)
+        return entry.approval_essentials if entry else None
 
     def capabilities(self) -> list[str]:
         """The master-facing capability one-liners of every registered tool that declared one,

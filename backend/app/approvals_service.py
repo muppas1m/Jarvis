@@ -162,12 +162,33 @@ def _email_verb(card: UnifiedApprovalCard) -> str:
 
 def describe_card(card: UnifiedApprovalCard) -> str:
     """One short human phrase for a single card — the shared atom both renderers use.
-    email → "a reply to <to> about '<subject>'"; tool → the humanized action."""
+    email → "a reply to <to> about '<subject>'"; calendar → the event NAME + a human time
+    (A2 s1b — a bare "calendar create" tells the master nothing recognizable); other tools →
+    the humanized action."""
     if card.kind == "email":
         to = card.tool_args.get("to") or "someone"
         subj = card.tool_args.get("subject")
         return f"{_email_verb(card)} {to}" + (f" about '{subj}'" if subj else "")
+    if card.tool_name.startswith("calendar_"):
+        verb = {"calendar_create": "a calendar event", "calendar_update": "an update to the event",
+                "calendar_delete": "deleting the event"}.get(card.tool_name, card.tool_name.replace("_", " "))
+        title = (card.tool_args.get("title") or "").strip()
+        when = _human_time(card.tool_args.get("start_iso") or "")
+        out = f"{verb} '{title}'" if title else verb
+        return f"{out} at {when}" if when else out
     return card.tool_name.replace("_", " ")
+
+
+def _human_time(iso_value: str) -> str:
+    """A recognizable human form of an ISO instant ("5:00 pm on Friday, July 4") — empty on an
+    unparseable value (the caller just omits the time)."""
+    try:
+        dt = datetime.fromisoformat((iso_value or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    h12 = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return f"{h12}:{dt.minute:02d} {ampm} on {dt.strftime('%A')}, {dt.strftime('%B')} {dt.day}"
 
 
 def summarize_others(cards: list[UnifiedApprovalCard], exclude_approval_id: str, honorific: str) -> str:

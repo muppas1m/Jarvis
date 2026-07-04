@@ -444,6 +444,11 @@ def register():
         ),
         args_schema=CalendarCreateArgs,
         capability="Add a calendar event (pauses for your approval).",
+        # Essentials registry (A2 standard): name the event title + a tolerant time form.
+        approval_essentials=[
+            {"field": "title", "kind": "text"},
+            {"field": "start_iso", "kind": "time"},
+        ],
     )
     tool_registry.register(
         name="calendar_update",
@@ -459,6 +464,11 @@ def register():
         ),
         args_schema=CalendarUpdateArgs,
         capability="Reschedule or rename a calendar event (pauses for your approval).",
+        # Empty-valued fields (unchanged aspects) are skipped by the matcher.
+        approval_essentials=[
+            {"field": "title", "kind": "text"},
+            {"field": "start_iso", "kind": "time"},
+        ],
     )
     tool_registry.register(
         name="calendar_delete",
@@ -471,4 +481,8 @@ def register():
         ),
         args_schema=CalendarDeleteArgs,
         capability="Delete a calendar event (pauses for your approval).",
+        # CONSCIOUS empty declaration: the payload carries only event_id — nothing the
+        # master can recognize by name, so the deterministic floor ALWAYS fires (and no
+        # undeclared-tool warning: this is a decision, not an omission).
+        approval_essentials=[],
     )

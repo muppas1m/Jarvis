@@ -137,4 +137,10 @@ def register() -> None:
         ),
         args_schema=EmailSendArgs,
         capability="Compose and send an email (pauses for your approval).",
+        # Essentials registry (A2 standard): the approval message must NAME the recipient
+        # and the subject before the deterministic floor stands down.
+        approval_essentials=[
+            {"field": "to", "kind": "recipient"},
+            {"field": "subject", "kind": "text"},
+        ],
     )

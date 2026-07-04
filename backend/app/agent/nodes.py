@@ -285,25 +285,8 @@ def _is_email_shaped(text: str) -> bool:
     return bool(_SALUTATION.search(t)) and bool(_SIGNOFF.search(t))
 
 
-# A1 Fix 4 — the agent, following the [QUEUED] marker's instruction, often relays "I've queued it for
-# your approval" itself. When queued_finish then appends the deterministic read-back, that would ack
-# the queue TWICE. This detects such an ack so the preserved content collapses to the read-back only.
-# FIRST alt = the primary ack the marker instructs ("I've queued it … for approval"); the [^.?!] guard
-# keeps it from spanning into an unrelated later sentence. SECOND alt = the card-STATE phrasings
-# ("awaiting/pending your approval"). Deliberately NOT a bare "for approval" — that over-matches a
-# genuine remainder ("the board needs the budget for approval") and would make queued_finish silently
-# DROP real content (the review-caught Fix-4 hole).
-_QUEUE_ACK = re.compile(
-    r"\bqueued\b[^.?!]{0,80}?\bapprov|\b(?:awaiting|pending)\s+(?:your\s+)?approval\b",
-    re.IGNORECASE,
-)
-
-
-def _is_queue_ack(text: str) -> bool:
-    """True when the text is a 'queued it for your approval' ack — so the read-back doesn't double-say
-    it. A genuine compound remainder ('2 plus 2 is 4', 'the budget needs approval') → False (it must
-    NOT collapse real content; the double-ack is the only thing this suppresses)."""
-    return bool(_QUEUE_ACK.search(text or ""))
+# (A1 Fix 4's _QUEUE_ACK collapse retired in A2 s1b — verify-and-keep replaced the drop: the lead
+# is always preserved; the essentials check decides whether the floor must still name a card.)
 
 
 # A2 s1a / D26 — a model-written consent SOLICITATION ("Shall I go ahead?" / "shall I send it?" /
@@ -1023,29 +1006,15 @@ def _minted_new_this_turn(messages: list) -> bool:
     return _mint_class_this_turn(messages) == "fresh"
 
 
-async def _readback_for_queued(row_ids: list, h: str, mint_class: str = "fresh") -> str:
-    """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the approval cards
-    TOUCHED this turn (`queued_this_turn` — row PKs), fetched by id. describe_card gives "an email to
-    X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays fixed on the
-    llama primary REGARDLESS of the new termination. Falls back to a generic ack if the rows can't be
-    read. (A1 keys on the row PK, not the tool_call_id, so the read-back fires from ANY terminal round
-    — the pure-queue terminate AND the mixed-round natural-answer path — not only the queuing round.
-    De-dups + preserves queue order; a same-card id can appear twice when a content-dedup re-emit
-    re-records it.)
-
-    THE SOLICITATION CONTRACT (D24 + D26, master-ruled): consent is solicited ("— shall I go
-    ahead?") ONLY on a fresh, NON-superseding mint. mint_class="update" (a supersede-mint — the
-    body was regenerated; the master has NOT seen the new content) → inform as an update, never
-    invite. mint_class="none" (dedup-only) → the already-queued acknowledgment. Determinism in
-    the guarantee layer: the class is derived from the round's markers, never from the model."""
+async def _fetch_queued_cards(row_ids: list) -> list:
+    """The cards TOUCHED this turn (`queued_this_turn` row PKs) as UnifiedApprovalCards —
+    pending only, de-duped, queue order preserved. Fail-soft: [] on any read error (the
+    caller's floor falls back to a generic ack; never break the turn)."""
     import uuid as _uuid
 
-    from app.approvals_service import describe_card, to_unified_card
+    from app.approvals_service import to_unified_card
     if not row_ids:
-        if mint_class == "update":
-            return f"I've updated the queued action — it's awaiting your approval, {h}."
-        return (f"I've queued it for your approval, {h}." if mint_class == "fresh"
-                else f"That's already queued awaiting your approval, {h}.")
+        return []
     try:
         pks = []
         for rid in row_ids:
@@ -1066,81 +1035,127 @@ async def _readback_for_queued(row_ids: list, h: str, mint_class: str = "fresh")
                 continue
             seen.add(key)
             cards.append(to_unified_card(by_id[key]))
-    except Exception as exc:  # noqa: BLE001 — never break the turn on the read-back fetch
+        return cards
+    except Exception as exc:  # noqa: BLE001 — never break the turn on the card fetch
         logger.warning("readback_fetch_failed", error=str(exc))
-        cards = []
+        return []
+
+
+def _join_phrases(phrases: list[str]) -> str:
+    if len(phrases) == 1:
+        return phrases[0]
+    if len(phrases) == 2:
+        return f"{phrases[0]} and {phrases[1]}"
+    return "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
+
+
+def _render_approval_floor(cards: list, h: str, mint_class: str, *, invite: bool = True) -> str:
+    """The DETERMINISTIC floor over the given cards — the guarantee layer of the approval
+    message. Names every card (describe_card); the closer follows THE SOLICITATION CONTRACT
+    (D24+D26): fresh → invite (suppressible via `invite=False` when the model's lead already
+    solicited — exactly ONE solicitation per turn, code-guaranteed); update → inform ("I've
+    updated …"); none → the already-queued acknowledgment. Empty cards → a generic class ack."""
+    from app.approvals_service import describe_card
+
     if not cards:
         if mint_class == "update":
             return f"I've updated the queued action — it's awaiting your approval, {h}."
-        return (f"I've queued it for your approval, {h}." if mint_class == "fresh"
-                else f"That's already queued awaiting your approval, {h}.")
-    phrases = [describe_card(c) for c in cards]
-    if len(phrases) == 1:
-        joined = phrases[0]
-    elif len(phrases) == 2:
-        joined = f"{phrases[0]} and {phrases[1]}"
-    else:
-        joined = "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
+        if mint_class == "fresh":
+            return (f"I've queued it for your approval, {h} — shall I go ahead?" if invite
+                    else f"I've queued it for your approval, {h}.")
+        return f"That's already queued awaiting your approval, {h}."
+    joined = _join_phrases([describe_card(c) for c in cards])
     if mint_class == "fresh":
-        return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
+        if invite:
+            return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
+        return f"I've queued {joined} for your approval, {h}."
     if mint_class == "update":
-        pronoun = "it's" if len(phrases) == 1 else "they're"
+        pronoun = "it's" if len(cards) == 1 else "they're"
         return f"I've updated {joined} — {pronoun} awaiting your approval, {h}."
-    verb = "is" if len(phrases) == 1 else "are"
+    verb = "is" if len(cards) == 1 else "are"
     return f"{joined[0].upper()}{joined[1:]} {verb} already queued awaiting your approval, {h}."
 
 
-async def queued_finish_node(state: AgentState) -> dict:
-    """A1 terminal node — the deterministic LOOP TERMINATOR (kept) AND the D1 read-back, now fired
-    from BOTH terminal paths: a pure-queue round (`should_continue_tools`) AND a natural answer with
-    cards queued this turn (`should_continue`). The read-back NAMES the cards via `queued_this_turn`
-    (row PKs), model-independent — so D1 survives the new termination on the weak llama.
+def _class_closer(h: str, mint_class: str, n_cards: int) -> str:
+    """The short class-consistent closer when NO floor is needed (the model's prose named every
+    essential): the contract line without re-naming anything. Fresh → the invite; update →
+    inform; none → the already-queued line."""
+    if mint_class == "fresh":
+        return f"Shall I go ahead, {h}?"
+    if mint_class == "update":
+        return (f"It's awaiting your approval, {h}." if n_cards <= 1
+                else f"They're awaiting your approval, {h}.")
+    return (f"It's already queued awaiting your approval, {h}." if n_cards <= 1
+            else f"They're already queued awaiting your approval, {h}.")
 
-    A GENUINE non-queue answer (a compound's other half, e.g. "…and what's 2+2", or the mixed-round
-    natural answer) is PRESERVED with the read-back appended — but NOT email-shaped prose (the card
-    IS the draft) and NOT a bare queue-ack (else the ack + the read-back say the same thing twice —
-    Fix 4). The read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's
-    tool_calls message → no orphaned tool_call)."""
+
+async def _readback_for_queued(row_ids: list, h: str, mint_class: str = "fresh") -> str:
+    """The pure deterministic read-back (fetch + floor over ALL cards) — the Fix-5 error path's
+    contract (no model prose exists there) and any caller that wants the full guarantee text."""
+    cards = await _fetch_queued_cards(row_ids)
+    return _render_approval_floor(cards, h, mint_class)
+
+
+async def queued_finish_node(state: AgentState) -> dict:
+    """A2 s1b — the terminal APPROVAL MESSAGE: verify-and-keep (F2).
+
+    The model's prose is ALWAYS kept as the lead — nothing is ever dropped for being
+    email-shaped or ack-shaped (the collapse regexes are retired; a restated draft aligns with
+    the ideal: voice speaks full content). Determinism lives in the guarantee layer:
+      1. the ESSENTIALS check (per-card, structural, against the row payload via the Essentials
+         registry) decides whether the deterministic floor must name a card — the floor fires
+         DELTA-ONLY over the cards the prose did NOT name (no double-say);
+      2. THE SOLICITATION CONTRACT (D24+D26) decides the closer: fresh may invite (exactly once
+         — a lead that already solicits suppresses the code invite); update informs (and the
+         lead's solicitations are stripped — unseen content is never offered); none acknowledges.
+    The appended AIMessage carries the F1 linkage (additional_kwargs.jarvis) — it may be
+    empty-content in the one edge where the lead fully covered prose duties (the linkage still
+    persists; history render skips empty messages; B3 renders the card from the row)."""
     h = settings.MASTER_HONORIFIC
     queued_ids = list(state.get("queued_this_turn") or [])
-    # The solicitation contract (D24+D26): class derived from the round's markers, in code.
     mint_class = _mint_class_this_turn(state.get("messages") or [])
-    read_back = await _readback_for_queued(queued_ids, h, mint_class=mint_class)
+    cards = await _fetch_queued_cards(queued_ids)
 
-    # The genuine answer to preserve: the natural answer (final_response — set by agent_node on a
-    # no-tool-call terminal, turn-reset so never stale) else the last content-bearing AIMessage of
-    # THIS turn (stop at this turn's HumanMessage so a prior turn's answer never leaks in — Fix 1).
-    content = (state.get("final_response") or "").strip()
-    if not content:
+    # The lead: the model's genuine prose this turn (final_response on a natural-answer terminal,
+    # else the last content-bearing AIMessage of THIS turn — the Fix-1 HumanMessage boundary).
+    lead = (state.get("final_response") or "").strip()
+    if not lead:
         for m in reversed(state.get("messages") or []):
             if isinstance(m, HumanMessage):
-                break                          # reached this turn's user message — don't walk prior turns
-            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-                content = m.content.strip()
                 break
-    # Fix 4 — keep the preserved content only if it's a GENUINE remainder: not email-shaped prose
-    # (the card holds it) and not itself a "queued for approval" ack (the deterministic read-back is
-    # the single canonical ack).
-    keep = bool(content) and not _is_email_shaped(content) and not _is_queue_ack(content)
-    # D26 contract enforcement on the MODEL's half: on a non-fresh class, a model-written
-    # solicitation ("Shall I send it?") must not survive as the turn's final word — strip the
-    # soliciting sentence(s) from the lead; the deterministic class message is the only closer.
-    if keep and mint_class != "fresh":
-        stripped = _strip_solicitation(content)
-        if stripped != content:
+            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                lead = m.content.strip()
+                break
+    # Contract enforcement on the model's half (shipped in s1a, kept): on a non-fresh class a
+    # model-written solicitation must not survive — sentence-strip, preserve everything else.
+    if lead and mint_class != "fresh":
+        stripped = _strip_solicitation(lead)
+        if stripped != lead:
             logger.info("lead_solicitation_stripped", mint_class=mint_class)
-            content = stripped
-            keep = bool(content)
-    final = f"{content}\n\n{read_back}" if keep else read_back
+            lead = stripped
+    lead_solicits = bool(lead) and bool(_SOLICIT_SENTENCE.search(lead))  # only fresh keeps these
 
-    # A2 s1a (F1) — the approval message carries its row linkage as a code-attached, namespaced
-    # additional_kwargs key: deterministic (the model can't corrupt it), invisible at every
-    # render/speech surface (no strip functions anywhere), persistence proven by the checkpointer
-    # (D22 evidence), and SAFE — no wire converter consumes custom keys (only "tool_calls"/
-    # "function_call" are resurrected; verified in the installed ChatLiteLLM). Consent resolution
-    # (s2) extracts the target id from this field in CODE — never from model-quoted prose.
+    # The essentials delta: which cards did the prose NOT name? (Structural, per the registry.)
+    from app.agent.approval_essentials import card_essentials_named
+    unnamed = [c for c in cards
+               if not card_essentials_named(lead, c.tool_name, c.tool_args or {})] if lead else cards
+
+    if unnamed or not cards:
+        # Floor fires delta-only (or generically when the cards couldn't be read). On fresh, a
+        # lead that already solicited suppresses the floor's invite — exactly one solicitation.
+        message_text = _render_approval_floor(unnamed, h, mint_class,
+                                              invite=not lead_solicits)
+    elif mint_class == "fresh" and lead_solicits:
+        # The lead named every essential AND already invites — nothing deterministic left to
+        # say; the linkage rides an empty-content message (skipped by renderers, kept by state).
+        message_text = ""
+    else:
+        message_text = _class_closer(h, mint_class, len(cards))
+
+    final = f"{lead}\n\n{message_text}".strip() if lead and message_text else (lead or message_text)
+
     approval_message = AIMessage(
-        content=read_back,
+        content=message_text,
         additional_kwargs={"jarvis": {
             "type": "approval",
             "approval_ids": queued_ids,
