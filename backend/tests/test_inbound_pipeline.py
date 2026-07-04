@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from sqlalchemy import delete, select
 
 from app.db.engine import async_session
+from app.config import settings
 from app.db.models import EmailLog, PendingApproval
 from app.email.classifier import EmailTriageResult
 from app.email.inbound import _process_message
@@ -83,6 +84,8 @@ async def test_spam_archives_via_provider_interface(monkeypatch):
 
 
 async def test_simple_action_required_drafts_and_queues_with_original(monkeypatch):
+    """GATE ON (Phase-C future): today's simple-draft behavior — pins what C1 re-enables."""
+    monkeypatch.setattr(settings, "INBOUND_AUTO_DRAFT", True)
     mid = f"pipe-act-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(
         "app.email.inbound.classify_email",
@@ -112,6 +115,8 @@ async def test_simple_action_required_drafts_and_queues_with_original(monkeypatc
 
 
 async def test_complex_action_required_queues_headsup_without_drafting(monkeypatch):
+    """GATE ON (Phase-C future): today's heads-up behavior — pins what C1 re-enables."""
+    monkeypatch.setattr(settings, "INBOUND_AUTO_DRAFT", True)
     mid = f"pipe-cplx-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(
         "app.email.inbound.classify_email",
@@ -150,5 +155,78 @@ async def test_low_confidence_spam_downgrades_to_digest_not_archive(monkeypatch)
         await _process_message(p, _msg(mid))
         assert p.archived == []  # low-confidence spam is NOT archived
         assert digest.await_count == 1  # routed to the briefing so a misclassified real email stays visible
+    finally:
+        await _cleanup(mid)
+
+
+# --------------------------------------------------------------------------- #
+# Batch 3.3 (CANCELLED → the gate lands): inbound auto-drafting OFF by default  #
+# until Phase C — no unlinked/backward approval card is ever minted; briefings  #
+# stay fully alive.                                                             #
+# --------------------------------------------------------------------------- #
+async def test_gate_off_action_required_mints_no_card_records_briefing(monkeypatch):
+    """The default (INBOUND_AUTO_DRAFT=False): an action_required inbound mints ZERO
+    pending_approvals rows; classification is still recorded (EmailLog) and the email is
+    still surfaced as a briefing item (stays visible). No draft is generated."""
+    assert settings.INBOUND_AUTO_DRAFT is False              # the shipped default
+    mid = f"pipe-off-{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr(
+        "app.email.inbound.classify_email",
+        AsyncMock(return_value=_triage("action_required", reply_effort="simple")),
+    )
+    gen = AsyncMock(return_value="should NOT draft")
+    briefing = AsyncMock()
+    monkeypatch.setattr("app.email.inbound.generate_draft", gen)
+    monkeypatch.setattr("app.email.inbound.record_briefing_item", briefing)
+    monkeypatch.setattr("app.email.inbound.send_approval_request_to_master", AsyncMock())
+    p = _FakeProvider()
+    try:
+        await _process_message(p, _msg(mid))
+        async with async_session() as s2:
+            cards = (await s2.execute(select(PendingApproval)
+                     .where(PendingApproval.thread_id == f"email:fakemail:{mid}"))).scalars().all()
+            log = (await s2.execute(select(EmailLog)
+                   .where(EmailLog.gmail_message_id == mid))).scalar_one_or_none()
+        assert cards == []                                   # ZERO approval rows minted
+        assert log is not None and log.classification == "action_required"  # classification recorded
+        assert log.draft_response is None                    # no draft persisted either
+        assert gen.await_count == 0                          # no drafting under the gate
+        assert briefing.await_count == 1                     # still a briefing item (stays visible)
+    finally:
+        await _cleanup(mid)
+
+
+async def test_gate_off_complex_action_required_also_mints_no_card(monkeypatch):
+    mid = f"pipe-offc-{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr(
+        "app.email.inbound.classify_email",
+        AsyncMock(return_value=_triage("action_required", reply_effort="complex")),
+    )
+    monkeypatch.setattr("app.email.inbound.generate_draft", AsyncMock())
+    monkeypatch.setattr("app.email.inbound.record_briefing_item", AsyncMock())
+    monkeypatch.setattr("app.email.inbound.send_approval_request_to_master", AsyncMock())
+    p = _FakeProvider()
+    try:
+        await _process_message(p, _msg(mid))
+        async with async_session() as s2:
+            cards = (await s2.execute(select(PendingApproval)
+                     .where(PendingApproval.thread_id == f"email:fakemail:{mid}"))).scalars().all()
+        assert cards == []                                   # heads-up card also suppressed
+    finally:
+        await _cleanup(mid)
+
+
+async def test_gate_off_fyi_briefing_untouched(monkeypatch):
+    """The gate never touches the fyi/briefing path — briefings stay fully alive."""
+    mid = f"pipe-offyi-{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr("app.email.inbound.classify_email",
+                        AsyncMock(return_value=_triage("fyi")))
+    briefing = AsyncMock()
+    monkeypatch.setattr("app.email.inbound.record_briefing_item", briefing)
+    p = _FakeProvider()
+    try:
+        await _process_message(p, _msg(mid))
+        assert briefing.await_count == 1                     # fyi still records its briefing item
+        assert p.archived == []
     finally:
         await _cleanup(mid)

@@ -479,6 +479,14 @@ class Settings(BaseSettings):
     # visible rather than silently vanishing from the inbox.
     EMAIL_TRIAGE_CONFIDENCE_FLOOR: float = 0.5
 
+    # Inbound auto-drafting (action_required → an approval card). DEFAULT OFF until Phase C:
+    # inbound cards must be conversation-LINKED from day one (the standing "no code support for
+    # unlinked/backward cards" ruling), and that linkage is C1's job. Off = classification +
+    # briefing_items still run (briefings stay fully alive); only the inbound approval-card mint
+    # is suppressed. Phase C flips this deliberately once linkage exists — a MISSING env var must
+    # never silently re-enable it, so the default is False (not env-required).
+    INBOUND_AUTO_DRAFT: bool = False
+
     # --- Test-DB isolation: THE data-safety chokepoint -----------------------
     @model_validator(mode="after")
     def _isolate_test_db(self):

@@ -97,7 +97,15 @@ async def test_inbound_action_email_to_sent_reply(_rebind_async_state) -> None:
             #      the provider interface (fetch_message maps the Gmail payload). ----
             provider = GmailProvider()
             msg = await provider.fetch_message(msg_id)
-            await _process_message(provider, msg)
+            # A2 Batch-3.3 gate: inbound auto-drafting is OFF by default until Phase C. This
+            # end-to-end inbound→card→dispatch flow tests the C1-future behavior → gate ON.
+            from app.config import settings as _settings
+            _prev = _settings.INBOUND_AUTO_DRAFT
+            _settings.INBOUND_AUTO_DRAFT = True
+            try:
+                await _process_message(provider, msg)
+            finally:
+                _settings.INBOUND_AUTO_DRAFT = _prev
 
             async with async_session() as s:
                 log = (await s.execute(

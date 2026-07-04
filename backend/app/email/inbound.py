@@ -88,7 +88,8 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
     # is drafted on the master's "go"). Draft before the gate so the EmailLog row carries
     # it on first INSERT.
     draft = None
-    if triage.classification == "action_required" and triage.reply_effort == "simple":
+    if (settings.INBOUND_AUTO_DRAFT
+            and triage.classification == "action_required" and triage.reply_effort == "simple"):
         draft = await generate_draft(subject=msg.subject, sender=msg.sender, body=msg.body)
 
     # GATE: claim ownership of this message id via the EmailLog INSERT. The
@@ -136,7 +137,24 @@ async def _process_message(provider: EmailProvider, msg: InboundMessage) -> None
         )
         logger.info("email_recorded_to_briefing", subject=msg.subject, urgency=triage.urgency)
     elif route == "action_required":
-        if triage.reply_effort == "simple":
+        if not settings.INBOUND_AUTO_DRAFT:
+            # Phase-C gate: no inbound approval card is minted until inbound cards can be
+            # conversation-LINKED (C1). Classification + the briefing item above still ran, so
+            # the email stays visible; only the (unlinked, backward) approval card is suppressed.
+            # An action_required email still surfaces in the briefing HWM window as a fresh item.
+            await record_briefing_item(
+                kind="email",
+                title=msg.subject or "",
+                source=msg.sender or "",
+                preview=(msg.body or "")[:300],
+                urgency=triage.urgency,
+                occurred_at=datetime.now(UTC),
+                meta={"provider": provider.name, "message_id": msg.message_id,
+                      "action_required": True},
+            )
+            logger.info("inbound_auto_draft_disabled_card_suppressed",
+                        subject=msg.subject, reply_effort=triage.reply_effort)
+        elif triage.reply_effort == "simple":
             # Simple — already drafted; queue the draft + the original email for approval.
             await _queue_email_approval(provider.name, msg, draft=draft, needs_drafting=False)
         else:
