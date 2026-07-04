@@ -1623,6 +1623,45 @@ async def _summarize_messages(existing: str, messages: list[BaseMessage]) -> str
 
 
 
+async def _drop_pending_linked(messages: list) -> list:
+    """A2 s1c — filter OUT of the compaction window any message carrying the F1 linkage
+    (additional_kwargs.jarvis.approval_ids) to a row that is STILL pending: the message is the
+    master's conversational surface for that approval; summarizing it would orphan the pending
+    row from the conversation. One indexed query over the collected ids. Fail-SAFE: on a read
+    error, every linked message is kept (never compact what we can't verify)."""
+    import uuid as _uuid
+
+    linked: dict[int, list] = {}
+    for i, m in enumerate(messages):
+        ids = ((getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}).get("approval_ids")
+        if ids:
+            linked[i] = ids
+    if not linked:
+        return messages
+    all_ids = []
+    for ids in linked.values():
+        for rid in ids:
+            try:
+                all_ids.append(rid if isinstance(rid, _uuid.UUID) else _uuid.UUID(str(rid)))
+            except (ValueError, AttributeError, TypeError):
+                continue
+    try:
+        async with async_session() as session:
+            pending = {str(r) for r in (await session.execute(
+                select(PendingApproval.id).where(
+                    PendingApproval.id.in_(all_ids),
+                    PendingApproval.status == "pending",
+                )
+            )).scalars().all()}
+    except Exception as exc:  # noqa: BLE001 — fail-safe: keep every linked message
+        logger.warning("compaction_pending_check_failed", error=str(exc))
+        return [m for i, m in enumerate(messages) if i not in linked]
+    keep_idx = {i for i, ids in linked.items() if any(str(r) in pending for r in ids)}
+    if keep_idx:
+        logger.info("compaction_kept_pending_linked", kept=len(keep_idx))
+    return [m for i, m in enumerate(messages) if i not in keep_idx]
+
+
 async def compact_node(state: AgentState) -> dict:
     """Turn-boundary compaction. Runs AFTER persist (the turn's response is sent
     and memories are written). If the verbatim history exceeds the threshold,
@@ -1630,9 +1669,16 @@ async def compact_node(state: AgentState) -> dict:
     RemoveMessage, keeping the most recent ~KEEP_RECENT verbatim.
 
     Safety: best-effort (any failure → no compaction this turn); NEVER drops a
-    message without a successful summary; skips a thread mid-approval; only ever
-    touches already-completed turns (an interrupted turn pauses before persist, so
-    it never reaches this node)."""
+    message without a successful summary; only ever touches already-completed turns
+    (an interrupted turn pauses before persist, so it never reaches this node).
+
+    A2 s1c — APPROVAL-AWARE KEEP: a message LINKED to a still-pending approval row
+    (additional_kwargs.jarvis.approval_ids — the F1 linkage) is never summarized away;
+    the summarizer only sees content, so the link cannot survive summarization even in
+    principle (roadmap hard-part #1). Kept verbatim until its row resolves/expires (72h
+    sweep bounds the cost). NOTE (docstring corrected): the old claim "skips a thread
+    mid-approval" was FALSE at HEAD — the tail-shape guard below only catches the
+    retired blocking-interrupt shape; THIS keep-guard is the real protection."""
     if not settings.COMPACT_ENABLED:
         return {"compacted_last_turn": False}
     messages = state.get("messages") or []
@@ -1649,6 +1695,8 @@ async def compact_node(state: AgentState) -> dict:
     to_summarize, _keep = split_for_compaction(messages, settings.COMPACT_KEEP_RECENT_TOKENS)
     # RemoveMessage targets by id — only summarize+drop messages that carry one.
     removable = [m for m in to_summarize if getattr(m, "id", None)]
+    # A2 s1c — the approval-aware keep: exclude messages whose linked row is still pending.
+    removable = await _drop_pending_linked(removable)
     if not removable:
         return {"compacted_last_turn": False}
 
