@@ -43,7 +43,6 @@ def _linked_msg(aid="uuid-1", solicited=True):
 def _state(**kw):
     # A2 s2: the referent is the CONVERSATION's jarvis-linked message (aid is context-only)
     base = {
-        "presented_approval_id": "uuid-1", "presented_via": "web",
         "user_message": "go", "thread_id": "web:master", "messages": [_linked_msg()],
     }
     base.update(kw)
@@ -88,7 +87,8 @@ _patch_live = None  # retired with the seal's live-set matching (kept name for g
 
 # --- no presented card → pass straight through to the agent ------------------
 async def test_no_card_passes_through():
-    assert await nodes.card_resolution_node(_state(presented_approval_id="")) == {}
+    # A2 s3: "no card" = no jarvis-linked message in the conversation
+    assert await nodes.card_resolution_node(_state(messages=[])) == {}
 
 
 # --- approve → the ATOMIC claim runs + outcome reply + flip state (L1) --------

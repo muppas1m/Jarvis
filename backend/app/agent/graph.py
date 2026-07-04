@@ -124,7 +124,7 @@ def build_graph():
         persist -> compact -> END
 
     card_resolution (Step A): when the master is viewing an approval card
-    (presented_approval_id set), it judges their message on the STRONG model and either
+    (a jarvis-linked approval message in the conversation), it judges the message on the STRONG model and either
     resolves the card (claim-gated dispatch) IN-graph — so the exchange persists — or routes
     the turn to the agent for a normal answer. Retires the old runner short-circuits that
     never persisted (D2/NV1) and gave canned wrong-context answers (D3).

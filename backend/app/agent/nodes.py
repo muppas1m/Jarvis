@@ -1260,7 +1260,7 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
 
 # --------------------------------------------------------------------------- #
 # Wrong-card-resolution SEAL (D15/D16) — resolve the AUTHORITATIVE live target,  #
-# NOT the (possibly stale, oldest-pending) client presented_approval_id.         #
+# keyed on the conversation's jarvis linkage (the old client pointer is gone).   #
 # --------------------------------------------------------------------------- #
 _CARD_KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
 _CARD_KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
@@ -1426,7 +1426,7 @@ async def card_resolution_node(state: AgentState) -> dict:
 
     The referent for a consent-shaped message is CODE-EXTRACTED: the most recent assistant
     message carrying the F1 jarvis linkage (`_conversation_referent`) — never the client's
-    presented_approval_id (context-only until s3 deletes it), never oldest-pending, never
+    a client pointer (deleted in s3), never oldest-pending, never
     token matching. The strong-model judge (unchanged bar) classifies INTENT only; the target
     is code-owned; dispatch rides the atomic claim. The yes-collision is structural: a briefing
     OFFER more recent than the approval message owns any bare affirmative — the card can only
@@ -1440,18 +1440,13 @@ async def card_resolution_node(state: AgentState) -> dict:
 
     h = settings.MASTER_HONORIFIC
     message = state.get("user_message", "") or ""
-    resolved_via = state.get("presented_via") or "web"
-    aid = (state.get("presented_approval_id") or "").strip()
+    # A2 s3: the channel for resolved_via comes from the voice contextvar (the client
+    # coupling is gone; cards with no conversation linkage resolve via buttons/Telegram only).
+    from app.llm.stream_mode import voice_mode
+    resolved_via = "voice" if voice_mode.get() else "web"
 
     ref = _conversation_referent(state.get("messages") or [])
     if ref is None or (ref["type"] == "briefing" and not ref["ids"]):
-        pure_offer = ref is not None
-        if aid and not pure_offer:
-            # A presented, UNLINKED card (inbound/pre-A2): context to the agent, never by-word.
-            judged = await _judge_presented(aid, message, "", require_pending=False)
-            ctx = _card_context_line(judged.row) if judged and judged.row else ""
-            logger.info("card_resolution_unlinked_to_agent", approval_id=aid)
-            return {"card_context": ctx, "card_handled": False}
         return {}  # nothing jarvis-tagged (or a pure offer) → the agent owns the turn
 
     live = await _live_linked_targets(ref["ids"])
@@ -1926,26 +1921,6 @@ async def _supersede_prior_email_card(thread_id: str, tool_name: str, tool_args:
     return n
 
 
-async def _discard_pending_approval(thread_id: str, interrupt_id: str) -> None:
-    """Mark a proposal superseded by an edit (status='discarded'). The row stays
-    so the dashboard renders the card greyed in history — a record of what was
-    proposed before the master asked for the change."""
-    async with async_session() as session:
-        await session.execute(
-            update(PendingApproval)
-            .where(
-                PendingApproval.thread_id == thread_id,
-                PendingApproval.interrupt_id == interrupt_id,
-                PendingApproval.status == "pending",
-            )
-            .values(
-                status="discarded",
-                resolved_at=datetime.now(UTC),
-                resolved_via="web",
-            )
-        )
-        await session.commit()
-    logger.info("approval_discarded", thread_id=thread_id, interrupt_id=interrupt_id)
 
 
 async def _create_pending_approval(

@@ -324,15 +324,8 @@ export function useJarvis() {
       abortRef.current = ac;
       let acc = "";
 
-      // If a decision card is pending, tag the turn (voice OR typed, B2) so the
-      // backend judges this utterance against THAT card — it resolves a
-      // cross-thread inbound card; an in-thread conversation interrupt is
-      // detected server-side and takes priority, so this is ignored there.
-      const presented = itemsRef.current.find(
-        (x): x is Extract<StreamItem, { type: "decision" }> =>
-          x.type === "decision" && x.approval.status === "pending",
-      );
-      const presentedId = presented?.approval.approval_id;
+      // A2 s3: the presented-card tag is retired — consent resolves server-side against
+      // the conversation's own approval messages (the jarvis linkage), never a client pointer.
 
       try {
         const res = await fetch(voice ? "/api/voice/stream" : "/api/chat/stream", {
@@ -341,7 +334,6 @@ export function useJarvis() {
           body: JSON.stringify({
             message: trimmed,
             thread_id: threadRef.current,
-            ...(presentedId ? { presented_approval_id: presentedId } : {}),
           }),
           signal: ac.signal,
         });
@@ -632,7 +624,7 @@ export function useJarvis() {
   // in-stream — and present the oldest unseen card, but only when idle with no
   // pending card shown (never flood, never collide). Resolved cards stay in the
   // timeline; the next surfaces on the following poll. With voice on, Jarvis reads
-  // the card and the master resolves by voice (presented_approval_id) or button.
+  // the card and the master resolves by voice (the conversation's approval message) or button.
   const surfaceQueued = useCallback(async () => {
     if (!hydratedRef.current) return;
     // Don't interrupt an in-flight turn, and enforce one-at-a-time.

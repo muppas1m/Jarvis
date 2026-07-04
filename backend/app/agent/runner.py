@@ -295,8 +295,6 @@ async def run_turn(
         # Card-resolution fields reset per turn (replace reducer persists them in the
         # checkpoint; a stale value would re-inject a dead card note / re-emit an old
         # decision_resolved). run_turn (Telegram) never carries a presented card.
-        "presented_approval_id": "",
-        "presented_via": "",
         "card_context": "",
         "card_handled": False,
         "card_outcome": {},
@@ -349,7 +347,6 @@ async def stream_turn(
     thread_id: str,
     platform: str,
     channel_user_id: str,
-    presented_approval_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Token-streaming variant of run_turn over the SAME agent graph.
 
@@ -410,8 +407,6 @@ async def stream_turn(
         "briefing_attached": False,  # A2 s1b — persist's briefing re-entrancy guard; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
-        "presented_approval_id": presented_approval_id or "",
-        "presented_via": "web",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
         "card_context": "",
         "card_handled": False,
@@ -947,7 +942,6 @@ async def voice_turn(
     thread_id: str,
     platform: str,
     channel_user_id: str,
-    presented_approval_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Voice-OUT turn over the SAME graph as run_turn — but speed-tuned and spoken.
 
@@ -974,7 +968,7 @@ async def voice_turn(
         # Legacy paused-at-interrupt checkpoint backstop (see run_turn) — speak the
         # nudge, never resume. Nothing new pauses post-cutover; the drain clears any
         # pre-deploy paused checkpoint. (A spoken card is resolved hands-free via
-        # the presented_approval_id path below, through the claim-gated dispatcher.)
+        # the conversation-linked resolution path, through the claim-gated dispatcher.)
         logger.info("voice_turn_legacy_pending_checkpoint_nudge", thread_id=thread_id)
         env = _pending_interrupt_envelope(thread_id)
         ev = await _speak_text(env["response"])
@@ -1007,8 +1001,6 @@ async def voice_turn(
         "briefing_attached": False,  # A2 s1b — persist's briefing re-entrancy guard; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
-        "presented_approval_id": presented_approval_id or "",
-        "presented_via": "voice",
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
         "card_context": "",
         "card_handled": False,

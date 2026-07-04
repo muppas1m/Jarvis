@@ -69,15 +69,8 @@ class AgentState(TypedDict, total=False):
     # []-per-turn in all 3 initial_state dicts — an accumulate reducer would defeat that reset.
     queued_this_turn: list[str]
 
-    # --- presented-card resolution (Step A — card interactions THROUGH the graph) ---
-    # `presented_approval_id` is the card the master is currently viewing (passed in by
-    # the runner from the client). When set, `card_resolution_node` judges the master's
-    # message against it on the STRONG model (consent gate) and either resolves it
-    # (claim-gated dispatch) or routes the turn to the agent as a normal, persisted turn.
-    # This retires the old runner short-circuits that never persisted (D2/NV1) and gave
-    # canned wrong-context answers (D3).
-    presented_approval_id: str   # the viewed card's id, or "" when none
-    presented_via: str           # "voice" | "web" — the resolved_via for the claim gate
+    # --- card resolution (A2 s2: the referent is the conversation's jarvis linkage; the
+    # old presented_approval_id/presented_via client coupling retired in s3) ---
     # Set by card_resolution_node when it RESOLVES a card (approve/reject/edit/skip/stale),
     # read by the runner post-graph to reconstruct the frontend events (decision_resolved /
     # approval_required for an edit re-queue / presented_nav for skip). {} when the message

@@ -60,8 +60,8 @@ def _offer_msg(text="2 items await your attention when you're ready, Sir. Shall 
 
 
 def _state(message, history, thread):
-    return {"user_message": message, "thread_id": thread, "presented_approval_id": "",
-            "presented_via": "", "messages": [*history, HumanMessage(content=message)]}
+    return {"user_message": message, "thread_id": thread,
+            "messages": [*history, HumanMessage(content=message)]}
 
 
 def _spy_dispatch(monkeypatch):

@@ -138,9 +138,11 @@ class MemoryEpisode(Base):
 # HITL — pending approvals queue                                              #
 # --------------------------------------------------------------------------- #
 class PendingApproval(Base):
-    """Actions paused on a LangGraph interrupt(). Source of truth for the paused
-    state is the checkpoint; this row is a queryable index + delivery-state for
-    Telegram inline keyboards / web dashboard / expiry sweeper."""
+    """A queued APPROVE-tier action awaiting the master's decision. THE operative record
+    (A2): the payload is dispatched verbatim through the atomic claim (resolve_and_dispatch);
+    the conversation's approval MESSAGE links here by id (additional_kwargs.jarvis). The
+    old interrupt()-era note ("source of truth is the checkpoint") is retired — nothing
+    pauses; the row IS the source of truth for the pending action."""
     __tablename__ = "pending_approvals"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

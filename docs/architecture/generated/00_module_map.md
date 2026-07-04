@@ -112,7 +112,7 @@ app/
 ├── scheduler/
 │   ├── tasks/
 │   │   ├── __init__.py — Scheduled Celery tasks — autodiscovered by app.scheduler.celery_app.
-│   │   ├── approval_expiry.py — Hourly sweeper — auto-rejects approvals whose expires_at has passed.
+│   │   ├── approval_expiry.py — Hourly sweep: flip EXPIRED pending approvals to status='expired' (audit state).
 │   │   ├── email_check.py — 15-min inbox safety-net poll (provider-agnostic).
 │   │   ├── email_renew.py — Renew the provider's push subscription twice weekly + sweep recent inbox.
 │   │   ├── inbound_health.py — Inbound-email health canary.

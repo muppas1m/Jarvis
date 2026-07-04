@@ -153,7 +153,7 @@ async def test_approve_through_graph_persists_and_claims(real_checkpointer, monk
 
         await _seed_linked_message(thread_id, aid)
         events = await _collect(runner.stream_turn(
-            "yes, go ahead", thread_id, "web", "u", presented_approval_id=aid))
+            "yes, go ahead", thread_id, "web", "u"))
 
         assert rec["call"] == ("approve", "web")  # L1 — the claim ran
         assert rec["ground_thread"] is False      # the node owns the thread reply
@@ -189,7 +189,7 @@ async def test_approve_no_double_write_real_dispatch(real_checkpointer, monkeypa
 
         await _seed_linked_message(thread_id, aid)
         events = await _collect(runner.stream_turn(
-            "yes, go ahead", thread_id, "web", "u", presented_approval_id=aid))
+            "yes, go ahead", thread_id, "web", "u"))
 
         assert any(e["type"] == "decision_resolved" for e in events)
         hist = await runner.get_history(thread_id)
@@ -217,8 +217,7 @@ async def test_question_through_graph_routes_to_agent_and_persists(real_checkpoi
         llm = AIMessage(content="Tomorrow you have the 10am standup, Sir.")
         with patch("app.agent.nodes._build_chat_model", lambda *a, **k: _Scripted([llm])):
             events = await _collect(runner.stream_turn(
-                "what's on my calendar tomorrow?", thread_id, "web", "u",
-                presented_approval_id=aid))
+                "what's on my calendar tomorrow?", thread_id, "web", "u"))
 
         assert not any(e["type"] == "decision_resolved" for e in events)  # not a resolution
         hist = await runner.get_history(thread_id)
@@ -251,7 +250,7 @@ async def test_edit_through_graph_emits_card_thread_id(real_checkpointer, monkey
 
         await _seed_linked_message(conv_thread, aid)
         events = await _collect(runner.stream_turn(
-            "make it shorter", conv_thread, "web", "u", presented_approval_id=aid))
+            "make it shorter", conv_thread, "web", "u"))
 
         flips = [e for e in events if e["type"] == "decision_resolved"]
         assert flips and flips[0]["content"]["status"] == "discarded"

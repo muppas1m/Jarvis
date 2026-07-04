@@ -86,10 +86,6 @@ class ChatRequest(BaseModel):
         default=None,
         description="Override the conversation thread (debugging). If omitted, the master's canonical server-side thread is used.",
     )
-    # When a cross-thread inbound-email card is presented in the HUD, the client
-    # sends its id so a typed "send it" resolves THAT card (B2) — same gated
-    # cross-thread resolution the voice path uses. None for a normal turn.
-    presented_approval_id: str | None = Field(default=None)
 
 
 @router.post("", response_model=None)
@@ -151,7 +147,6 @@ async def chat_stream(
             thread_id=thread_id,
             platform="web",
             channel_user_id=user.user_id,
-            presented_approval_id=payload.presented_approval_id,
         ):
             yield f"data: {json.dumps(event)}\n\n"
 

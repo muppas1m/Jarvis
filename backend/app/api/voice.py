@@ -56,7 +56,6 @@ class VoiceRequest(BaseModel):
     # (resolved by sending/discarding) rather than starting a fresh turn. None
     # for a normal voice turn. The conversation thread's own interrupts are
     # detected server-side and take priority.
-    presented_approval_id: str | None = Field(default=None)
 
 
 @router.post("/stream", response_model=None)
@@ -72,7 +71,6 @@ async def voice_stream(
             thread_id=thread_id,
             platform="web",
             channel_user_id=user.user_id,
-            presented_approval_id=payload.presented_approval_id,
         ):
             yield f"data: {json.dumps(event)}\n\n"
 
@@ -152,7 +150,7 @@ async def announce_approval(
     """Speak a freshly-surfaced approval card aloud (voice mode) — an inbound email
     reply OR a chat-queued tool action. The HUD calls this when it presents a card
     so Jarvis reads it; the master then resolves by voice (→ /voice/stream with
-    presented_approval_id) or by button. Returns the spoken text + its audio, in
+    the conversation's approval message) or by button. Returns the spoken text + its audio, in
     the same shape the stream's `audio` events carry (one playback path)."""
     row = await _load_pending_approval(payload.approval_id)
     if row is None:

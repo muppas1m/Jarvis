@@ -1,5 +1,5 @@
-"""Hourly sweeper — auto-rejects approvals whose expires_at has passed.
-Resumes the paused graphs with a rejection so the agent can move on.
+"""Hourly sweep: flip EXPIRED pending approvals to status='expired' (audit state).
+Nothing resumes and nothing is rejected — there is no paused graph (interrupt() is retired);
 
 Wrapped in @critical_task because a silently-failing sweep leaves interrupted
 turns stuck mid-graph (paused on the original interrupt) AND lets stale
