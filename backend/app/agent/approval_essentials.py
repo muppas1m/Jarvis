@@ -129,3 +129,23 @@ def normalize_field(kind: str, value: str) -> str:
     if kind == "text":
         return _norm(v)
     return v.strip()
+
+
+def card_names_any_essential(prose: str, tool_name: str, tool_args) -> bool:
+    """Does the prose name AT LEAST ONE of the card's declared essentials? (The D30
+    discriminator: 'refers to something concrete' — vs `card_essentials_named`, which is the
+    floor's ALL-fields gate.) Undeclared tool → False, silently (the caller treats it as bare)."""
+    from app.agent.tools.registry import tool_registry
+
+    declared = tool_registry.approval_essentials(tool_name) or []
+    prose_norm = _norm(prose)
+    if not prose_norm:
+        return False
+    for spec in declared:
+        value = str((tool_args or {}).get(spec.get("field"), "") or "")
+        if not value.strip():
+            continue
+        matcher = _MATCHERS.get(spec.get("kind"), _named_text)
+        if matcher(prose_norm, value):
+            return True
+    return False

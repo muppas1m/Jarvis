@@ -419,9 +419,23 @@ async def enrich_delete_args(tool_args: dict) -> dict:
     try:
         ev = _service().events().get(calendarId="primary", eventId=event_id).execute()
         start = (ev.get("start") or {})
+        raw_iso = start.get("dateTime") or start.get("date") or ""
+        # D32 — ONE timezone rendering: normalize the snapshot to the MASTER's TZ at this
+        # boundary (Google may return UTC/calendar-TZ; the create path already carries the
+        # master's offset), so describe_card/_human_time/the floors render one consistent
+        # time everywhere. A wrong-seeming time on a DELETE approval invites wrong consent.
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo
+            tz_name, _ = await _resolve_timezone("")
+            parsed = _dt.fromisoformat(raw_iso.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                raw_iso = parsed.astimezone(ZoneInfo(tz_name)).isoformat()
+        except Exception as exc:  # noqa: BLE001 — TZ normalization is best-effort
+            logger.warning("calendar_delete_enrich_tz_failed", error=str(exc))
         return {**tool_args,
                 "title": ev.get("summary", ""),
-                "start_iso": start.get("dateTime") or start.get("date") or ""}
+                "start_iso": raw_iso}
     except Exception as exc:  # noqa: BLE001 — enrichment must never block the mint
         logger.warning("calendar_delete_enrich_failed", error=str(exc))
         return tool_args

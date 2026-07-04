@@ -707,6 +707,14 @@ _QUEUED_UPDATE_MARKER = (
     "haven't seen the new content yet."
 )
 
+# D29 — an edit re-emit that used the WRONG tool: nothing mints; the round terminates into
+# the edit-no-mint honest floor ("that change didn't apply — the card is unchanged").
+EDIT_MISMATCH_TAG = "[EDIT_TOOL_MISMATCH]"
+_EDIT_MISMATCH_MARKER = (
+    EDIT_MISMATCH_TAG + " The re-emitted tool `{got}` does not match the action being edited "
+    "(`{expected}`). NOTHING was changed or queued."
+)
+
 NO_PROGRESS_TAG = "[ALREADY_QUEUED]"
 _NO_PROGRESS_MARKER = (
     NO_PROGRESS_TAG + " The `{tool}` action was ALREADY queued for the master's approval earlier "
@@ -858,6 +866,17 @@ async def tool_executor_node(state: AgentState) -> dict:
             return {"messages": [ToolMessage(
                 content=_NO_PROGRESS_MARKER.format(tool=tool_name), tool_call_id=tool_call_id)]}
 
+        # D29 same-tool pin: an edit re-emit must use the TARGET's tool. A mismatch mints
+        # NOTHING (never a junk card) and ends the round → the edit-no-mint honest floor.
+        edit_tool = (state.get("edit_tool_name") or "").strip()
+        if edit_tool and tool_name != edit_tool:
+            logger.warning("edit_reemit_tool_mismatch", expected=edit_tool, got=tool_name)
+            await _log_audit(thread_id, tool_name, level, tool_args, success=False,
+                             error="EDIT_TOOL_MISMATCH")
+            return {"messages": [ToolMessage(
+                content=_EDIT_MISMATCH_MARKER.format(expected=edit_tool, got=tool_name),
+                tool_call_id=tool_call_id)]}
+
         minted_new = False   # A1: True ONLY when a NEW card row is created (the else branch) → the
         #                      progress signal that keeps QUEUED distinct from NO_PROGRESS.
         superseded = 0       # A2 s1a/D26: >0 when the fresh mint REPLACED a prior pending card
@@ -892,9 +911,18 @@ async def tool_executor_node(state: AgentState) -> dict:
                     tool_args = await enricher(tool_args)
                 except Exception as exc:  # noqa: BLE001 — enrichment never blocks the mint
                     logger.warning("approval_enricher_failed", tool=tool_name, error=str(exc))
-            superseded = await _supersede_prior_card(
-                thread_id, tool_name, tool_args,
-                exclude_ids=state.get("queued_this_turn") or [])
+            edit_target = (state.get("edit_target_id") or "").strip()
+            if edit_target:
+                # D29: an EDIT re-emit supersedes its exact target BY ID through the claim
+                # (key-matching can't see a key-field edit); key-matching below stays only
+                # for spontaneous regenerations (D26).
+                from app.api.approvals import resolve_approval
+                claimed = await resolve_approval(edit_target, "discard", "superseded")
+                superseded = 1 if claimed is not None else 0
+            else:
+                superseded = await _supersede_prior_card(
+                    thread_id, tool_name, tool_args,
+                    exclude_ids=state.get("queued_this_turn") or [])
             # Enrich the prompt with a pre-approval warning (calendar conflict
             # check today) so the master sees overlaps before deciding.
             description = _describe_action(tool_name, tool_args)
@@ -1003,6 +1031,7 @@ def _is_queue_marker(m: BaseMessage) -> bool:
         content.startswith(QUEUED_MARKER_TAG)
         or content.startswith(QUEUED_UPDATE_TAG)
         or content.startswith(NO_PROGRESS_TAG)
+        or content.startswith(EDIT_MISMATCH_TAG)   # D29: terminal → the honest floor
     )
 
 
@@ -1253,7 +1282,11 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
             f"system will replace the old card automatically."
         )
         logger.info("card_edit_reemit_directive", approval_id=aid, tool=tool)
-        return {"card_context": directive, "card_handled": False, "edit_expected": True}
+        # D29: the directive CARRIES its target — the mint supersedes BY TARGET ID (a key-field
+        # edit can never key-match) and the re-emit is pinned SAME-TOOL (a wrong-tool re-emit
+        # hits the honest floor, never a junk card).
+        return {"card_context": directive, "card_handled": False, "edit_expected": True,
+                "edit_target_id": aid, "edit_tool_name": tool}
 
     # 1. Claim-gated discard (pending→discarded) — the SAME atomic claim, so a concurrent
     #    approve can't race it. A lost claim → already resolved → ack. resolved_via threads
@@ -1386,9 +1419,15 @@ def _clean_resolution_reply(outcome: Any, intent: str, target: Any, h: str) -> s
     # already names any card tool-agnostically; tools declare, core composes.)
     if outcome.kind == "email" and outcome.email_outcome is not None:
         return _email_outcome_speech(outcome.email_outcome)
-    clean = unwrap_tool_output(outcome.detail)
     if target.kind == "email":
         return f"Sent {subj}, {h}."
+    if target.tool_name in _CALENDAR_TOOLS:
+        # D31: compose from the DESCRIBED fields — never the raw tool output (no event_id /
+        # link dumps). describe_card already names the event + the master-TZ time.
+        verb = {"calendar_create": "created", "calendar_update": "updated",
+                "calendar_delete": "deleted"}.get(target.tool_name, "handled")
+        return f"Done, {h} — {verb} {subj.replace('deleting ', '')}."
+    clean = unwrap_tool_output(outcome.detail).rstrip(".")   # D31: no ".," artifact
     return f"Done — {clean}, {h}." if clean else f"Done, {h}."
 
 
@@ -1503,6 +1542,20 @@ async def card_resolution_node(state: AgentState) -> dict:
 
     if intent in ("approve", "reject"):
         if not live:
+            # D30 (master's constraint: the JUDGE already classified — no shape-regexes here):
+            # a stale-ack is right only when the master refers to the CARD ITSELF (a BARE
+            # consent naming nothing). A message that NAMES anything ("delete the Reviewer
+            # Probe event") is a real-world request → the agent path, which provably works.
+            from app.agent.approval_essentials import card_names_any_essential
+            bare_msg = True
+            if judged.row is not None:
+                targs = (judged.row.payload or {}).get("tool_args") or {}
+                tool = (judged.row.payload or {}).get("tool_name") or judged.row.action_type
+                bare_msg = not card_names_any_essential(message, tool, targs) \
+                    and not _EMAIL_ADDR.search(message) and not _QUOTED.search(message)
+            if not bare_msg:
+                logger.info("card_resolution_stale_named_to_agent")
+                return {"card_handled": False}
             ack = f"That one's already taken care of, {h}."
             return {"messages": [AIMessage(content=ack)], "final_response": ack,
                     "card_outcome": {"approval_id": ref["ids"][0], "decision_status": "stale"},

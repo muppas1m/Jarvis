@@ -85,6 +85,10 @@ class AgentState(TypedDict, total=False):
     # s4 — an edit directive was issued this turn; if no mint follows, the terminal node says
     # so honestly ("that change didn't apply") instead of implying success. Turn-reset ×3.
     edit_expected: bool
+    # D29 — the directive's exact target + tool: the mint supersedes BY this id (never
+    # key-matching, which a key-field edit defeats) and pins the re-emit SAME-TOOL. Reset ×3.
+    edit_target_id: str
+    edit_tool_name: str
 
     # --- final assistant text (set when agent emits a non-tool message) -----
     final_response: str

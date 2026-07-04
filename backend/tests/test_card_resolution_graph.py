@@ -162,7 +162,7 @@ async def test_approve_through_graph_persists_and_claims(real_checkpointer, monk
         hist = await runner.get_history(thread_id)
         text = _hist_text(hist)
         assert "yes, go ahead" in text     # D2 — the master's words PERSISTED
-        assert "Event created" in text     # D2 — the outcome reply PERSISTED
+        assert "created a calendar event" in text   # D2 — the outcome PERSISTED (D31: humanized, no raw detail)
     finally:
         await _cleanup(thread_id)
 
@@ -194,8 +194,10 @@ async def test_approve_no_double_write_real_dispatch(real_checkpointer, monkeypa
         assert any(e["type"] == "decision_resolved" for e in events)
         hist = await runner.get_history(thread_id)
         text = _hist_text(hist)
-        # EXACTLY ONCE — not the node reply AND a "✅ Event created." grounding marker
-        assert text.count("Event created") == 1
+        # EXACTLY ONCE — not the node reply AND a grounding marker (D31: the reply is
+        # humanized; the raw detail never appears)
+        assert text.count("created a calendar event") == 1
+        assert "Event created" not in text        # raw tool detail never reaches the thread
         assert "✅" not in text  # grounding marker suppressed in-graph
         # the durable row record still flipped (HUD survives even if the turn checkpoint is lost)
         async with async_session() as s:
@@ -274,6 +276,11 @@ async def test_supersede_prior_email_card_discards_revision():
     genuinely-DIFFERENT email (different subject) to the same person survives (gentle, not a
     hard uniqueness constraint)."""
     from app.agent.nodes import _supersede_prior_card
+    from app.agent.tools import calendar_tool, email_send
+    from app.agent.tools.registry import tool_registry
+    if tool_registry.approval_meta("email_send", "supersede_key") is None:
+        email_send.register()
+        calendar_tool.register()
 
     thread = f"web:test-supersede-{uuid.uuid4().hex[:8]}"
 
