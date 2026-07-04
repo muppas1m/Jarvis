@@ -882,7 +882,19 @@ async def tool_executor_node(state: AgentState) -> dict:
             # (the D15 duplicate-target trigger). Gentle — different-subject emails survive.
             # D26: a supersede-mint REPLACES content the master may have reviewed with content
             # they have NOT — record it so the terminal message informs instead of soliciting.
-            superseded = await _supersede_prior_email_card(thread_id, tool_name, tool_args)
+            # s4: the mint-time ENRICHER (declared per tool) fills recognizable fields
+            # (calendar_delete → the doomed event's title/time) BEFORE the payload is captured.
+            enricher = None
+            from app.agent.tools.registry import tool_registry as _reg
+            enricher = _reg.approval_meta(tool_name, "approval_enricher")
+            if enricher is not None:
+                try:
+                    tool_args = await enricher(tool_args)
+                except Exception as exc:  # noqa: BLE001 — enrichment never blocks the mint
+                    logger.warning("approval_enricher_failed", tool=tool_name, error=str(exc))
+            superseded = await _supersede_prior_card(
+                thread_id, tool_name, tool_args,
+                exclude_ids=state.get("queued_this_turn") or [])
             # Enrich the prompt with a pre-approval warning (calendar conflict
             # check today) so the master sees overlaps before deciding.
             description = _describe_action(tool_name, tool_args)
@@ -1135,6 +1147,15 @@ async def queued_finish_node(state: AgentState) -> dict:
     mint_class = _mint_class_this_turn(state.get("messages") or [])
     cards = await _fetch_queued_cards(queued_ids)
 
+    # s4 — the edit-no-mint HONEST FLOOR: an edit directive that produced no mint (the agent
+    # talked instead of re-emitting) must say so plainly — never imply the change applied.
+    if state.get("edit_expected") and not queued_ids:
+        lead = (state.get("final_response") or "").strip()
+        floor = f"That change didn't apply, {h} — the card is unchanged."
+        final = f"{lead}\n\n{floor}".strip() if lead else floor
+        return {"messages": [AIMessage(content=floor)], "final_response": final,
+                "terminal_delta": floor}
+
     # The lead: the model's genuine prose this turn (final_response on a natural-answer terminal,
     # else the last content-bearing AIMessage of THIS turn — the Fix-1 HumanMessage boundary).
     lead = (state.get("final_response") or "").strip()
@@ -1213,16 +1234,26 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
     # this is cosmetic today, but the contract stays faithful for any thread_id consumer.)
     tid = judged.row.thread_id
 
-    # Only an email card with a draft can be revised; a tool card / heads-up → a nudge.
-    # D24 site 2 (the D14 edit-refusal): the master just asked for a CHANGE — they are explicitly
-    # NOT satisfied with the draft, so the nudge must INFORM, never solicit a send ("Shall I go
-    # ahead?" here was the yes-trap at its worst moment — one committed "yes" would dispatch the
-    # draft they were trying to edit). Honest capability statement, no invitation.
+    # A2 s4 — TOOL-GENERIC edit-by-word (closes D14; the D24-site-2 nudge dies with this
+    # branch): a non-revisable card (any tool card, or an email heads-up) routes to the AGENT
+    # with a re-emit directive — the agent emits the corrected tool call, the mint path's
+    # declared supersede key replaces the old card ([QUEUED_UPDATE] → ONE updated card, inform
+    # closer). "Push the dentist to 4pm" works exactly like "address them as Bro".
     if not (judged.is_email_card and not judged.needs_drafting):
-        nudge = (f"I can only send or discard this for now, {h} — "
-                 f"say the word to send it, or reject it on the card.")
-        return {"messages": [AIMessage(content=nudge)], "final_response": nudge,
-                "card_outcome": {"approval_id": aid, "thread_id": tid}, "card_handled": True}
+        import json as _json
+        row = judged.row
+        payload = (row.payload or {}) if row is not None else {}
+        targs = payload.get("tool_args") or {}
+        tool = payload.get("tool_name") or (row.action_type if row is not None else "the action")
+        directive = (
+            f"[EDIT DIRECTIVE] The master wants to CHANGE the queued `{tool}` action. "
+            f"Original arguments: {_json.dumps(targs, default=str)}. Requested change: "
+            f"'{judged.change or message}'. Re-emit the `{tool}` tool call NOW with the "
+            f"corrected arguments (change only what the master asked; keep the rest). The "
+            f"system will replace the old card automatically."
+        )
+        logger.info("card_edit_reemit_directive", approval_id=aid, tool=tool)
+        return {"card_context": directive, "card_handled": False, "edit_expected": True}
 
     # 1. Claim-gated discard (pending→discarded) — the SAME atomic claim, so a concurrent
     #    approve can't race it. A lost claim → already resolved → ack. resolved_via threads
@@ -1775,6 +1806,8 @@ def should_continue(state: AgentState) -> str:
         return "tool_executor"
     if state.get("queued_this_turn"):
         return "queued_finish"
+    if state.get("edit_expected"):
+        return "queued_finish"   # s4: the edit-no-mint honest floor lives in the terminal node
     return "persist"
 
 
@@ -1803,15 +1836,19 @@ async def _approval_warning(tool_name: str, tool_args: dict) -> str | None:
 
 
 def _pre_approve_error(tool_name: str, tool_args: dict) -> str | None:
-    """BLOCKING pre-queue validation for APPROVE-tier tools — return an agent-facing error
-    string to REFUSE queuing (so the agent reads it and asks the master to fix the input),
-    or None to proceed. Keyed on tool_name; the validation logic lives WITH the tool. Catches
-    bad input (e.g. a placeholder recipient the LLM emitted) BEFORE a card the master can only
-    reject is minted. Distinct from _approval_warning, which is a non-blocking card enricher."""
-    if tool_name == "email_send":
-        from app.agent.tools.email_send import validate_recipient
-        return validate_recipient(tool_args.get("to", ""))
-    return None
+    """BLOCKING pre-queue validation for APPROVE-tier tools — s4: the validator is DECLARED by
+    the tool (registry `approval_validator`; tools declare, core consumes — no per-tool branch
+    here). Returns an agent-facing error string to REFUSE queuing, or None to proceed.
+    Undeclared → no validation (the visible default)."""
+    from app.agent.tools.registry import tool_registry
+    validator = tool_registry.approval_meta(tool_name, "approval_validator")
+    if validator is None:
+        return None
+    try:
+        return validator(tool_args or {})
+    except Exception as exc:  # noqa: BLE001 — a broken validator must not block the mint
+        logger.warning("approval_validator_failed", tool=tool_name, error=str(exc))
+        return None
 
 
 async def _find_pending_approval(thread_id: str, interrupt_id: str) -> uuid.UUID | None:
@@ -1861,63 +1898,68 @@ async def _find_pending_approval_by_content(
 
 
 def _queue_signature(tool_name: str, tool_args: dict) -> str:
-    """L0 — the in-turn idempotency key: "the same action re-emitted this turn". Subject-
-    discriminated for email (matching supersession's (to, subject) key) so a REGENERATED same
-    email dedups but two DISTINCT emails to one recipient in a compound turn both queue;
-    (tool, start, title) for calendar; exact-args otherwise. Turn-scoped (AgentState), ADDITIVE
-    in front of the durable DB dedups — never a replacement."""
-    from email.utils import parseaddr
-    if tool_name == "email_send":
-        to = parseaddr(tool_args.get("to") or "")[1].strip().lower()
-        subj = " ".join((tool_args.get("subject") or "").split()).lower()
-        return f"email_send|{to}|{subj}"
-    if tool_name == "calendar_create":
-        start = (tool_args.get("start_iso") or "").strip()
-        title = " ".join((tool_args.get("title") or "").split()).lower()
-        return f"calendar_create|{start}|{title}"
+    """The turn-scoped L0 dedup key — s4: DECLARED by the tool (registry `dedup_signature`,
+    kind-normalized fields), so the identity of "the same action" lives with the tool. Undeclared
+    → exact sorted-args JSON (the visible, strictest default). email: (to, subject) — body
+    EXCLUDED so a regenerated body still dedups; two different-subject emails both queue."""
+    from app.agent.approval_essentials import normalize_field
+    from app.agent.tools.registry import tool_registry
+
+    declared = tool_registry.approval_meta(tool_name, "dedup_signature")
+    if declared:
+        parts = [normalize_field(spec.get("kind", "raw"), (tool_args or {}).get(spec.get("field"), ""))
+                 for spec in declared]
+        return tool_name + "|" + "|".join(parts)
     return f"{tool_name}|" + json.dumps(tool_args, sort_keys=True, default=str)
 
 
-async def _supersede_prior_email_card(thread_id: str, tool_name: str, tool_args: dict) -> int:
-    """Liveness hygiene (NOT the safety mechanism — Layer 1's referent gate is): when a REVISED
-    draft is re-queued for the same (email_send, recipient, subject), DISCARD the prior pending
-    card so the queue doesn't accumulate stale duplicates of one email (E2 supersedes E1 — the
-    D15 trigger). Keyed on SUBJECT too, so two genuinely-DIFFERENT emails to the same person
-    (different subject) are NOT superseded (master's call: gentle, not a hard uniqueness
-    constraint). Scoped to email_send (the observed revision case). Returns # discarded."""
-    if tool_name != "email_send":
+async def _supersede_prior_card(thread_id: str, tool_name: str, tool_args: dict,
+                                exclude_ids: list | None = None) -> int:
+    """Liveness hygiene, s4-generalized (NOT the safety mechanism): when a fresh mint carries
+    the SAME declared identity (registry `supersede_key`, kind-normalized) as a prior pending
+    card, DISCARD the prior one so the queue never stacks stale versions of one action —
+    tool-generic ("push the dentist to 4pm" supersedes by event_id exactly as an email revision
+    supersedes by to+subject). GUARANTEE-LAYER BOOKKEEPING ONLY (master's recorded principle):
+    same-action-or-not; all interpretation stays with the judge/agent.
+
+    THE SAME-TURN EXEMPTION (governing line 1): only PRIOR-turn cards are superseded —
+    `exclude_ids` (queued_this_turn) protects a batched compound minting two same-key actions
+    (two same-title events → TWO cards). Undeclared key → NO supersession (visible default).
+    Returns # discarded."""
+    from app.agent.approval_essentials import normalize_field
+    from app.agent.tools.registry import tool_registry
+
+    declared = tool_registry.approval_meta(tool_name, "supersede_key")
+    if not declared:
         return 0
-    from email.utils import parseaddr
-
-    def _norm_to(v: str) -> str:  # parse "Name <addr>" → addr so a reformatted revision still matches
-        return parseaddr(v or "")[1].strip().lower()
-
-    def _norm_subj(v: str) -> str:
-        return " ".join((v or "").split()).lower()
-
-    to = _norm_to(tool_args.get("to"))
-    subject = _norm_subj(tool_args.get("subject"))
-    if not to:
+    key = [normalize_field(spec.get("kind", "raw"), (tool_args or {}).get(spec.get("field"), ""))
+           for spec in declared]
+    if not any(key):
         return 0
+    excluded = {str(x) for x in (exclude_ids or [])}
     async with async_session() as session:
         rows = (await session.execute(
             select(PendingApproval).where(
                 PendingApproval.thread_id == thread_id,
-                PendingApproval.action_type == "email_send",
+                PendingApproval.action_type == tool_name,
                 PendingApproval.status == "pending",
             )
         )).scalars().all()
         n = 0
         for row in rows:
+            if str(row.id) in excluded:
+                continue                      # the same-turn exemption
             targs = (row.payload or {}).get("tool_args") or {}
-            if _norm_to(targs.get("to")) == to and _norm_subj(targs.get("subject")) == subject:
+            row_key = [normalize_field(spec.get("kind", "raw"), targs.get(spec.get("field"), ""))
+                       for spec in declared]
+            if row_key == key:
                 row.status = "discarded"
                 row.resolved_at = datetime.now(UTC)
                 row.resolved_via = "superseded"
                 n += 1
         if n:
             await session.commit()
-            logger.info("email_card_superseded", thread_id=thread_id, discarded=n)
+            logger.info("card_superseded", thread_id=thread_id, tool=tool_name, discarded=n)
     return n
 
 

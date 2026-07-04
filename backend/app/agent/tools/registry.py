@@ -44,7 +44,8 @@ logger = get_logger(__name__)
 
 class _ToolEntry:
     __slots__ = ("name", "tool", "always_loaded", "description", "capability",
-                 "approval_essentials")
+                 "approval_essentials", "approval_validator", "approval_enricher",
+                 "dedup_signature", "supersede_key")
 
     def __init__(
         self,
@@ -54,6 +55,10 @@ class _ToolEntry:
         description: str,
         capability: str = "",
         approval_essentials: list[dict] | None = None,
+        approval_validator=None,
+        approval_enricher=None,
+        dedup_signature: list[dict] | None = None,
+        supersede_key: list[dict] | None = None,
     ) -> None:
         self.name = name
         self.tool = tool
@@ -71,6 +76,20 @@ class _ToolEntry:
         # back to its humanized name AND logs a warning (the weak path stays visible, never
         # the quiet norm — the reviewer's (b)-lens flags undeclared APPROVE tools).
         self.approval_essentials = approval_essentials
+        # A2 s4 (registry promotions — tools declare, core consumes):
+        # approval_validator: async (tool_args) -> str|None — a mint-time argument REFUSAL
+        #   (e.g. email_send's bad-recipient check). None = no validation.
+        # approval_enricher: async (tool_args) -> dict — mint-time payload ENRICHMENT (e.g.
+        #   calendar_delete fetching {title, start_iso} so the approval message can NAME what
+        #   dies). Best-effort by contract; must fail open (return args unchanged).
+        # dedup_signature: the in-turn L0 dedup key fields [{"field","kind"}] (kind-normalized);
+        #   undeclared -> exact sorted-args JSON (the visible default).
+        # supersede_key: the same-action identity for cross-turn supersession
+        #   [{"field","kind"}]; undeclared -> no supersession (the visible default).
+        self.approval_validator = approval_validator
+        self.approval_enricher = approval_enricher
+        self.dedup_signature = dedup_signature
+        self.supersede_key = supersede_key
 
 
 class ToolRegistry:
@@ -91,6 +110,10 @@ class ToolRegistry:
         always_loaded: bool = False,
         capability: str = "",
         approval_essentials: list[dict] | None = None,
+        approval_validator=None,
+        approval_enricher=None,
+        dedup_signature: list[dict] | None = None,
+        supersede_key: list[dict] | None = None,
     ) -> None:
         """Register a tool. `handler` may be sync or async — StructuredTool
         supports both via `func=` vs `coroutine=`.
@@ -120,6 +143,10 @@ class ToolRegistry:
             description=description,
             capability=capability,
             approval_essentials=approval_essentials,
+            approval_validator=approval_validator,
+            approval_enricher=approval_enricher,
+            dedup_signature=dedup_signature,
+            supersede_key=supersede_key,
         )
         logger.info("tool_registered", name=name, always_loaded=always_loaded)
 
@@ -128,6 +155,12 @@ class ToolRegistry:
         or None for an undeclared tool (callers fall back to the humanized name + WARN)."""
         entry = self._entries.get(tool_name)
         return entry.approval_essentials if entry else None
+
+    def approval_meta(self, tool_name: str, field: str):
+        """A declared approval-layer field (validator/enricher/dedup_signature/supersede_key),
+        or None when undeclared — every caller has a visible fallback."""
+        entry = self._entries.get(tool_name)
+        return getattr(entry, field, None) if entry else None
 
     def capabilities(self) -> list[str]:
         """The master-facing capability one-liners of every registered tool that declared one,

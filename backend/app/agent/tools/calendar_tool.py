@@ -409,6 +409,24 @@ async def calendar_period(start: str, end: str, tz: str = "") -> CalendarPeriodR
 
 
 # ---------- Registration ----------
+async def enrich_delete_args(tool_args: dict) -> dict:
+    """s4 mint-time enrichment: snapshot the doomed event's {title, start_iso} into the payload
+    so the approval message / card / essentials can NAME what dies. Best-effort + fail-open —
+    an unfetchable event returns the args unchanged (the weak path stays visible)."""
+    event_id = (tool_args or {}).get("event_id")
+    if not event_id or (tool_args or {}).get("title"):
+        return tool_args
+    try:
+        ev = _service().events().get(calendarId="primary", eventId=event_id).execute()
+        start = (ev.get("start") or {})
+        return {**tool_args,
+                "title": ev.get("summary", ""),
+                "start_iso": start.get("dateTime") or start.get("date") or ""}
+    except Exception as exc:  # noqa: BLE001 — enrichment must never block the mint
+        logger.warning("calendar_delete_enrich_failed", error=str(exc))
+        return tool_args
+
+
 def register():
     tool_registry.register(
         name="calendar_read",
@@ -449,6 +467,13 @@ def register():
             {"field": "title", "kind": "text"},
             {"field": "start_iso", "kind": "time"},
         ],
+        dedup_signature=[{"field": "start_iso", "kind": "raw"}, {"field": "title", "kind": "text"}],
+        # Supersede by TITLE only (master-ruled, safety-asymmetric): a D26-class regeneration
+        # usually drifts the time too — a [title,start] key would miss and stack-and-invite;
+        # a same-title false supersede is an honest, visible "I've updated…" (recoverable).
+        # The SAME-TURN EXEMPTION (governing line 1) lives in the core: a batched compound
+        # minting two same-title events this turn yields TWO cards.
+        supersede_key=[{"field": "title", "kind": "text"}],
     )
     tool_registry.register(
         name="calendar_update",
@@ -469,6 +494,8 @@ def register():
             {"field": "title", "kind": "text"},
             {"field": "start_iso", "kind": "time"},
         ],
+        dedup_signature=[{"field": "event_id", "kind": "raw"}],
+        supersede_key=[{"field": "event_id", "kind": "raw"}],   # ONE event = ONE card
     )
     tool_registry.register(
         name="calendar_delete",
@@ -481,8 +508,15 @@ def register():
         ),
         args_schema=CalendarDeleteArgs,
         capability="Delete a calendar event (pauses for your approval).",
-        # CONSCIOUS empty declaration: the payload carries only event_id — nothing the
-        # master can recognize by name, so the deterministic floor ALWAYS fires (and no
-        # undeclared-tool warning: this is a decision, not an omission).
-        approval_essentials=[],
+        # s4: the mint-time ENRICHER snapshots {title, start_iso} from the calendar (a delete
+        # approval must NAME which event dies), flipping the old conscious-empty declaration
+        # to a real one. Best-effort/fail-open — unfetchable -> unenriched args -> the floor
+        # names the bare action (the weak path stays visible).
+        approval_essentials=[
+            {"field": "title", "kind": "text"},
+            {"field": "start_iso", "kind": "time"},
+        ],
+        approval_enricher=enrich_delete_args,
+        dedup_signature=[{"field": "event_id", "kind": "raw"}],
+        supersede_key=[{"field": "event_id", "kind": "raw"}],
     )

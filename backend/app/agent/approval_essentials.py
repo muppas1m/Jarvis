@@ -118,3 +118,14 @@ def essentials_named(prose: str, cards: list) -> bool:
     if not cards:
         return False
     return all(card_essentials_named(prose, c.tool_name, c.tool_args or {}) for c in cards)
+
+
+def normalize_field(kind: str, value: str) -> str:
+    """The ONE kind-normalizer the dedup signature + supersede key share (s4): recipient →
+    parseaddr'd address; text → case-folded, whitespace-collapsed; raw/other → stripped."""
+    v = str(value or "")
+    if kind == "recipient":
+        return parseaddr(v)[1].strip().lower() or _norm(v)
+    if kind == "text":
+        return _norm(v)
+    return v.strip()

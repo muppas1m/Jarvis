@@ -60,7 +60,11 @@ def test_registry_declarations_present():
         {"field": "to", "kind": "recipient"}, {"field": "subject", "kind": "text"}]
     assert tool_registry.approval_essentials("calendar_create") == [
         {"field": "title", "kind": "text"}, {"field": "start_iso", "kind": "time"}]
-    assert tool_registry.approval_essentials("calendar_delete") == []   # conscious empty
+    # FLIPPED in A2 s4 (declared): the mint-time enricher now guarantees {title, start_iso}
+    # for deletes — the conscious-empty declaration became a real one (a delete approval
+    # must NAME which event dies).
+    assert tool_registry.approval_essentials("calendar_delete") == [
+        {"field": "title", "kind": "text"}, {"field": "start_iso", "kind": "time"}]
     assert tool_registry.approval_essentials("no_such_tool") is None    # undeclared
 
 

@@ -143,4 +143,8 @@ def register() -> None:
             {"field": "to", "kind": "recipient"},
             {"field": "subject", "kind": "text"},
         ],
+        # s4 promotions: the tool declares; the core consumes (no per-tool branches in nodes).
+        approval_validator=lambda tool_args: validate_recipient(tool_args.get("to", "")),
+        dedup_signature=[{"field": "to", "kind": "recipient"}, {"field": "subject", "kind": "text"}],
+        supersede_key=[{"field": "to", "kind": "recipient"}, {"field": "subject", "kind": "text"}],
     )

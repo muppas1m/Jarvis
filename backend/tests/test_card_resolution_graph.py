@@ -273,7 +273,7 @@ async def test_supersede_prior_email_card_discards_revision():
     (email_send, recipient, subject) discards the prior pending card (E2 supersedes E1); a
     genuinely-DIFFERENT email (different subject) to the same person survives (gentle, not a
     hard uniqueness constraint)."""
-    from app.agent.nodes import _supersede_prior_email_card
+    from app.agent.nodes import _supersede_prior_card
 
     thread = f"web:test-supersede-{uuid.uuid4().hex[:8]}"
 
@@ -293,7 +293,7 @@ async def test_supersede_prior_email_card_discards_revision():
     e1 = await _email_card("Amazon Delivery Pickup", "Hi [Your Name]")
     other = await _email_card("Lunch next week", "Different email")
     try:
-        n = await _supersede_prior_email_card(
+        n = await _supersede_prior_card(
             thread, "email_send",
             {"to": "fernandes@yahoo.me", "subject": "Amazon Delivery Pickup", "body": "Hi Mahesh"})
         assert n == 1

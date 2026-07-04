@@ -82,6 +82,9 @@ class AgentState(TypedDict, total=False):
     # the RIGHT card (D3) and can note it's still pending.
     card_handled: bool
     card_context: str
+    # s4 — an edit directive was issued this turn; if no mint follows, the terminal node says
+    # so honestly ("that change didn't apply") instead of implying success. Turn-reset ×3.
+    edit_expected: bool
 
     # --- final assistant text (set when agent emits a non-tool message) -----
     final_response: str

@@ -187,24 +187,28 @@ async def test_d24_dedup_only_turn_does_not_solicit(real_checkpointer):
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_d24_site2_edit_refusal_nudge_does_not_solicit():
-    """An EDIT-intent turn on a non-revisable card ("Address them as Bro" / "trim the body",
-    s6.png): the master is explicitly NOT satisfied with the draft — the nudge must inform
-    (send-or-discard capability) without inviting a send."""
+    """MIGRATED (A2 s4, declared): the site-2 nudge BRANCH IS DEAD — edit-by-word is now
+    tool-generic (the re-emit directive → ONE updated card). The D24 class property survives:
+    an edit turn must never solicit a send. Asserted on the directive path."""
     from types import SimpleNamespace
 
     from app.agent.nodes import _card_edit_redraft
 
     judged = SimpleNamespace(
         approval_id="a1b2c3d4", is_email_card=False, needs_drafting=False,
-        row=SimpleNamespace(thread_id="web:master"), change="trim the body",
+        row=SimpleNamespace(thread_id="web:master", action_type="email_send", status="pending",
+                            description="d",
+                            payload={"tool_name": "email_send",
+                                     "tool_args": {"to": "t@x.com", "subject": "S", "body": "b"}}),
+        change="trim the body",
     )
     out = await _card_edit_redraft(judged, "trim the body")
-    low = out["final_response"].lower()
-    assert "i can only send or discard" in low          # the honest capability statement stays
-    assert "say the word to send it" in low             # informs the paths
+    assert out["card_handled"] is False                 # routes to the agent (re-emit directive)
+    assert out["edit_expected"] is True
+    low = (out["card_context"] or "").lower()
+    assert "i can only send or discard" not in low      # the nudge is gone
     for phrase in _SOLICITS:
-        assert phrase not in low, f"yes-trap at site 2: nudge still solicits ({phrase!r})"
-    assert out["card_handled"] is True                  # branch contract unchanged
+        assert phrase not in low, f"yes-trap at site 2: directive solicits ({phrase!r})"
 
 
 @pytest.mark.asyncio
