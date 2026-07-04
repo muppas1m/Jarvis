@@ -118,7 +118,7 @@ async def test_readback_dedup_names_card_without_soliciting():
     rid = await _seed_card(thread, "c1", "email_send",
                            {"to": "timmy@x.com", "subject": "Hello", "body": "x"})
     try:
-        text = await _readback_for_queued([rid], "Sir", minted_new=False)
+        text = await _readback_for_queued([rid], "Sir", mint_class="none")
         low = text.lower()
         assert "timmy@x.com" in low                     # still NAMES the card (D1 guarantee)
         assert "already queued" in low and "awaiting your approval" in low
@@ -135,7 +135,7 @@ async def test_readback_mint_still_invites():
     rid = await _seed_card(thread, "c1", "email_send",
                            {"to": "bob@x.com", "subject": "Hi", "body": "x"})
     try:
-        text = await _readback_for_queued([rid], "Sir", minted_new=True)
+        text = await _readback_for_queued([rid], "Sir", mint_class="fresh")
         assert "shall i go ahead" in text.lower()        # the inviting tail is mint-only
     finally:
         await _cleanup(thread)
@@ -143,8 +143,8 @@ async def test_readback_mint_still_invites():
 
 @pytest.mark.asyncio
 async def test_readback_fallbacks_split_too():
-    assert "?" not in await _readback_for_queued([], "Sir", minted_new=False)
-    assert "already queued" in (await _readback_for_queued([], "Sir", minted_new=False)).lower()
+    assert "?" not in await _readback_for_queued([], "Sir", mint_class="none")
+    assert "already queued" in (await _readback_for_queued([], "Sir", mint_class="none")).lower()
 
 
 # --------------------------------------------------------------------------- #

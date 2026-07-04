@@ -306,6 +306,25 @@ def _is_queue_ack(text: str) -> bool:
     return bool(_QUEUE_ACK.search(text or ""))
 
 
+# A2 s1a / D26 — a model-written consent SOLICITATION ("Shall I go ahead?" / "shall I send it?" /
+# "want me to proceed?"). On a non-fresh mint class the deterministic terminal message must be the
+# only closer — a model invite on unseen/dedup content is exactly the yes-trap.
+_SOLICIT_SENTENCE = re.compile(
+    r"\b(shall|should|do you want|would you like)\s+(i|me)\b[^.?!]*\b"
+    r"(send|go ahead|proceed|approve|dispatch|fire|submit)\b|\bgo ahead\s*\?",
+    re.IGNORECASE,
+)
+
+
+def _strip_solicitation(text: str) -> str:
+    """Remove soliciting sentence(s) from the model's lead, preserving everything else.
+    Sentence-level (never token surgery): split on end punctuation, drop the sentences that
+    invite consent, rejoin. Preserve-biased — a text with no solicitation returns unchanged."""
+    parts = re.split(r"(?<=[.?!])\s+", text or "")
+    kept = [p for p in parts if p and not _SOLICIT_SENTENCE.search(p)]
+    return " ".join(kept).strip()
+
+
 def _in_compose_email_context(state: AgentState, k: int = 4) -> bool:
     """Did the master express email-compose intent in the current OR a recent prior turn? Scanning
     the recent user turns is what catches the multi-turn follow-up drop ("okay send it" / "bob@x.com"
@@ -674,6 +693,20 @@ _QUEUED_MARKER = (
 # (`_queued_approval_event` keys on QUEUED_MARKER_TAG). It is a VERBATIM-re-emit guard only — the
 # structural drift defense is that a pure-queue round ends the turn (no continuation pass to drift in),
 # NOT this marker (do not turn it into a drift-catching dedup — that would re-break two-emails-to-Bob).
+# A2 s1a / D26 — a mint that SUPERSEDED a prior pending card (a paraphrased repeat regenerated
+# the body → sailed past the exact-match dedup → the supersede discarded the old card and minted
+# a REPLACEMENT the master has never seen). Distinct from a fresh [QUEUED] so the terminal message
+# INFORMS as an update and never solicits consent on unseen content (the solicitation contract:
+# invite ONLY on fresh, non-superseding mints). Distinct from [ALREADY_QUEUED] because a new card
+# DID mint (progress; the runner must surface it in-stream).
+QUEUED_UPDATE_TAG = "[QUEUED_UPDATE]"
+_QUEUED_UPDATE_MARKER = (
+    QUEUED_UPDATE_TAG + " The `{tool}` action REPLACED a previously queued version (the draft "
+    "was regenerated) — it is NOT done; it awaits the master's approval. Tell the master you've "
+    "UPDATED the queued action; do NOT say it is sent / done, and do NOT ask for consent — they "
+    "haven't seen the new content yet."
+)
+
 NO_PROGRESS_TAG = "[ALREADY_QUEUED]"
 _NO_PROGRESS_MARKER = (
     NO_PROGRESS_TAG + " The `{tool}` action was ALREADY queued for the master's approval earlier "
@@ -827,6 +860,7 @@ async def tool_executor_node(state: AgentState) -> dict:
 
         minted_new = False   # A1: True ONLY when a NEW card row is created (the else branch) → the
         #                      progress signal that keeps QUEUED distinct from NO_PROGRESS.
+        superseded = 0       # A2 s1a/D26: >0 when the fresh mint REPLACED a prior pending card
         approval_id = await _find_pending_approval(thread_id, interrupt_id=tool_call_id)
         if approval_id is not None:
             logger.info(
@@ -846,7 +880,9 @@ async def tool_executor_node(state: AgentState) -> dict:
             # Liveness: a re-queued REVISION of the same email (same recipient+subject)
             # supersedes the prior pending card, so the queue doesn't stack stale duplicates
             # (the D15 duplicate-target trigger). Gentle — different-subject emails survive.
-            await _supersede_prior_email_card(thread_id, tool_name, tool_args)
+            # D26: a supersede-mint REPLACES content the master may have reviewed with content
+            # they have NOT — record it so the terminal message informs instead of soliciting.
+            superseded = await _supersede_prior_email_card(thread_id, tool_name, tool_args)
             # Enrich the prompt with a pre-approval warning (calendar conflict
             # check today) so the master sees overlaps before deciding.
             description = _describe_action(tool_name, tool_args)
@@ -869,13 +905,17 @@ async def tool_executor_node(state: AgentState) -> dict:
             thread_id, tool_name, level, tool_args, success=False,
             error="QUEUED" if minted_new else "QUEUED_DEDUP",
         )
-        # A1 marker split: a NEW card → QUEUED (progress); a reused row → NO_PROGRESS (no new card),
-        # so should_continue_tools can tell a fresh queue from a re-emit and the runner doesn't
-        # re-surface a duplicate card event. Fixes 2+3: record the row PK in queued_this_turn on
-        # EVERY branch (fresh OR reused) — read-prior-accumulate (never a bare overwrite, or a
-        # two-APPROVE round drops the first card from the read-back) — so the deterministic read-back
-        # NAMES every card touched this turn, even the deduped ones.
-        marker = _QUEUED_MARKER if minted_new else _NO_PROGRESS_MARKER
+        # A1 marker split (+ A2 s1a third class): a NEW card → QUEUED (progress, invite-eligible);
+        # a SUPERSEDING new card → QUEUED_UPDATE (progress — the runner surfaces it — but consent
+        # is NEVER solicited: the master hasn't seen the regenerated content, D26); a reused row →
+        # NO_PROGRESS (no new card). Fixes 2+3: record the row PK in queued_this_turn on EVERY
+        # branch — read-prior-accumulate — so the terminal message NAMES every card touched.
+        if not minted_new:
+            marker = _NO_PROGRESS_MARKER
+        elif superseded:
+            marker = _QUEUED_UPDATE_MARKER
+        else:
+            marker = _QUEUED_MARKER
         return {
             "messages": [
                 ToolMessage(
@@ -942,30 +982,48 @@ def should_continue_tools(state: AgentState) -> str:
 
 
 def _is_queue_marker(m: BaseMessage) -> bool:
-    """A1 — a ToolMessage that parked an approval (fresh [QUEUED]) or re-emitted an already-queued
-    one ([ALREADY_QUEUED]): nothing for the agent to consume. Anything else (a SAFE-read/execute
-    result, an error) is consumable → routes back to the agent."""
+    """A1 — a ToolMessage that parked an approval (fresh [QUEUED]), replaced one
+    ([QUEUED_UPDATE]), or re-emitted an already-queued one ([ALREADY_QUEUED]): nothing for the
+    agent to consume. Anything else (a SAFE-read/execute result, an error) is consumable →
+    routes back to the agent."""
     content = getattr(m, "content", None)
     return isinstance(content, str) and (
-        content.startswith(QUEUED_MARKER_TAG) or content.startswith(NO_PROGRESS_TAG)
+        content.startswith(QUEUED_MARKER_TAG)
+        or content.startswith(QUEUED_UPDATE_TAG)
+        or content.startswith(NO_PROGRESS_TAG)
     )
 
 
-def _minted_new_this_turn(messages: list) -> bool:
-    """D24 — did THIS turn mint a NEW approval card? The A1 marker split encodes it in the
-    round's ToolMessages: a fresh mint returns `[QUEUED]`; every dedup branch (L0 sig-hit /
-    already-queued / content-dedup) returns `[ALREADY_QUEUED]`. Reversed scan bounded at this
+def _mint_class_this_turn(messages: list) -> str:
+    """D24 + D26 — WHAT did this turn mint? Drives the terminal message's solicitation contract:
+      - "fresh"  → at least one NEW card and NO superseding mint → the invite is allowed;
+      - "update" → any mint REPLACED a prior pending card ([QUEUED_UPDATE]) → INFORM as an
+                   update, never solicit (the master hasn't seen the regenerated content; a
+                   mixed fresh+update turn is also "update" — one invite covering unseen
+                   content is exactly the D26 trap);
+      - "none"   → only [ALREADY_QUEUED] dedup echoes → the already-queued acknowledgment.
+    Encoded in the round's ToolMessage markers (the A1 split); reversed scan bounded at this
     turn's HumanMessage (the Fix-1 boundary), so a PRIOR turn's mint never counts."""
+    saw_fresh = False
     for m in reversed(messages or []):
         if isinstance(m, HumanMessage):
             break
-        if isinstance(m, ToolMessage) and isinstance(m.content, str) \
-                and m.content.startswith(QUEUED_MARKER_TAG):
-            return True
-    return False
+        content = getattr(m, "content", None)
+        if not (isinstance(m, ToolMessage) and isinstance(content, str)):
+            continue
+        if content.startswith(QUEUED_UPDATE_TAG):
+            return "update"          # any update ⇒ the whole turn must not solicit
+        if content.startswith(QUEUED_MARKER_TAG):
+            saw_fresh = True
+    return "fresh" if saw_fresh else "none"
 
 
-async def _readback_for_queued(row_ids: list, h: str, minted_new: bool = True) -> str:
+def _minted_new_this_turn(messages: list) -> bool:
+    """D24 back-compat shim — True only for a PURELY fresh mint turn (invite-eligible)."""
+    return _mint_class_this_turn(messages) == "fresh"
+
+
+async def _readback_for_queued(row_ids: list, h: str, mint_class: str = "fresh") -> str:
     """L1 — the DETERMINISTIC read-back (the GUARANTEE, not the LLM prose): NAME the approval cards
     TOUCHED this turn (`queued_this_turn` — row PKs), fetched by id. describe_card gives "an email to
     X about 'Y'" / the humanized tool action. Never depends on the model, so D1 stays fixed on the
@@ -975,16 +1033,18 @@ async def _readback_for_queued(row_ids: list, h: str, minted_new: bool = True) -
     De-dups + preserves queue order; a same-card id can appear twice when a content-dedup re-emit
     re-records it.)
 
-    D24 (the yes-trap): the inviting tail ("— shall I go ahead?") SOLICITS consent — one committed
-    "yes" dispatches. That's right after a fresh mint, and an amplifier after a dedup-only round
-    (the master may have just REFUSED this very action; the re-emit that hit the dedup must not
-    re-offer it). `minted_new=False` → a non-soliciting acknowledgment instead. The full stateful
-    disambiguation is B1 — this is only the amplifier removal."""
+    THE SOLICITATION CONTRACT (D24 + D26, master-ruled): consent is solicited ("— shall I go
+    ahead?") ONLY on a fresh, NON-superseding mint. mint_class="update" (a supersede-mint — the
+    body was regenerated; the master has NOT seen the new content) → inform as an update, never
+    invite. mint_class="none" (dedup-only) → the already-queued acknowledgment. Determinism in
+    the guarantee layer: the class is derived from the round's markers, never from the model."""
     import uuid as _uuid
 
     from app.approvals_service import describe_card, to_unified_card
     if not row_ids:
-        return (f"I've queued it for your approval, {h}." if minted_new
+        if mint_class == "update":
+            return f"I've updated the queued action — it's awaiting your approval, {h}."
+        return (f"I've queued it for your approval, {h}." if mint_class == "fresh"
                 else f"That's already queued awaiting your approval, {h}.")
     try:
         pks = []
@@ -1010,7 +1070,9 @@ async def _readback_for_queued(row_ids: list, h: str, minted_new: bool = True) -
         logger.warning("readback_fetch_failed", error=str(exc))
         cards = []
     if not cards:
-        return (f"I've queued it for your approval, {h}." if minted_new
+        if mint_class == "update":
+            return f"I've updated the queued action — it's awaiting your approval, {h}."
+        return (f"I've queued it for your approval, {h}." if mint_class == "fresh"
                 else f"That's already queued awaiting your approval, {h}.")
     phrases = [describe_card(c) for c in cards]
     if len(phrases) == 1:
@@ -1019,8 +1081,11 @@ async def _readback_for_queued(row_ids: list, h: str, minted_new: bool = True) -
         joined = f"{phrases[0]} and {phrases[1]}"
     else:
         joined = "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
-    if minted_new:
+    if mint_class == "fresh":
         return f"I've queued {joined} for your approval, {h} — shall I go ahead?"
+    if mint_class == "update":
+        pronoun = "it's" if len(phrases) == 1 else "they're"
+        return f"I've updated {joined} — {pronoun} awaiting your approval, {h}."
     verb = "is" if len(phrases) == 1 else "are"
     return f"{joined[0].upper()}{joined[1:]} {verb} already queued awaiting your approval, {h}."
 
@@ -1037,13 +1102,10 @@ async def queued_finish_node(state: AgentState) -> dict:
     Fix 4). The read-back is APPENDED as its OWN AIMessage (constraint #3 — never rewrite the agent's
     tool_calls message → no orphaned tool_call)."""
     h = settings.MASTER_HONORIFIC
-    # D24: solicit consent ONLY when this turn minted a NEW card. A dedup-only round (pure
-    # [ALREADY_QUEUED] — e.g. a re-emit right after the master tried to REJECT this action)
-    # gets a non-soliciting acknowledgment — never a fresh "shall I go ahead?" offer.
-    read_back = await _readback_for_queued(
-        list(state.get("queued_this_turn") or []), h,
-        minted_new=_minted_new_this_turn(state.get("messages") or []),
-    )
+    queued_ids = list(state.get("queued_this_turn") or [])
+    # The solicitation contract (D24+D26): class derived from the round's markers, in code.
+    mint_class = _mint_class_this_turn(state.get("messages") or [])
+    read_back = await _readback_for_queued(queued_ids, h, mint_class=mint_class)
 
     # The genuine answer to preserve: the natural answer (final_response — set by agent_node on a
     # no-tool-call terminal, turn-reset so never stale) else the last content-bearing AIMessage of
@@ -1060,8 +1122,32 @@ async def queued_finish_node(state: AgentState) -> dict:
     # (the card holds it) and not itself a "queued for approval" ack (the deterministic read-back is
     # the single canonical ack).
     keep = bool(content) and not _is_email_shaped(content) and not _is_queue_ack(content)
+    # D26 contract enforcement on the MODEL's half: on a non-fresh class, a model-written
+    # solicitation ("Shall I send it?") must not survive as the turn's final word — strip the
+    # soliciting sentence(s) from the lead; the deterministic class message is the only closer.
+    if keep and mint_class != "fresh":
+        stripped = _strip_solicitation(content)
+        if stripped != content:
+            logger.info("lead_solicitation_stripped", mint_class=mint_class)
+            content = stripped
+            keep = bool(content)
     final = f"{content}\n\n{read_back}" if keep else read_back
-    return {"messages": [AIMessage(content=read_back)], "final_response": final}
+
+    # A2 s1a (F1) — the approval message carries its row linkage as a code-attached, namespaced
+    # additional_kwargs key: deterministic (the model can't corrupt it), invisible at every
+    # render/speech surface (no strip functions anywhere), persistence proven by the checkpointer
+    # (D22 evidence), and SAFE — no wire converter consumes custom keys (only "tool_calls"/
+    # "function_call" are resurrected; verified in the installed ChatLiteLLM). Consent resolution
+    # (s2) extracts the target id from this field in CODE — never from model-quoted prose.
+    approval_message = AIMessage(
+        content=read_back,
+        additional_kwargs={"jarvis": {
+            "type": "approval",
+            "approval_ids": queued_ids,
+            "mint_class": mint_class,
+        }} if queued_ids else {},
+    )
+    return {"messages": [approval_message], "final_response": final}
 
 
 # ============================================================================

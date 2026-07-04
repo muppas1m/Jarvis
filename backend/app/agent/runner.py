@@ -120,12 +120,12 @@ async def _queued_readback_envelope(thread_id: str) -> dict[str, Any] | None:
         return None
     if not queued:
         return None
-    # D24: same solicit-only-on-new-mints rule as queued_finish — a dedup-only turn that
-    # errored must not re-offer "shall I go ahead?" for an action the master may have refused.
-    from app.agent.nodes import _minted_new_this_turn, _readback_for_queued
+    # D24+D26: the same solicitation contract as queued_finish — a dedup-only or SUPERSEDE-mint
+    # turn that errored must not re-offer consent (unseen/refused content); class from markers.
+    from app.agent.nodes import _mint_class_this_turn, _readback_for_queued
     text = await _readback_for_queued(
         queued, settings.MASTER_HONORIFIC,
-        minted_new=_minted_new_this_turn(values.get("messages") or []),
+        mint_class=_mint_class_this_turn(values.get("messages") or []),
     )
     env = _error_envelope(thread_id, text, stop_reason="queued_before_error")
     env["status"] = "complete"   # the cards ARE queued — a real outcome, not a failure
@@ -594,12 +594,15 @@ async def _queued_approval_event(thread_id: str, message: Any) -> dict[str, Any]
     through the identical path as a polled card. SURFACING ONLY — it reads the row,
     never claims or dispatches. Best-effort: None on a non-queued message or a missing
     row (the poll is the durable fallback; this never breaks the turn)."""
-    from app.agent.nodes import QUEUED_MARKER_TAG
+    from app.agent.nodes import QUEUED_MARKER_TAG, QUEUED_UPDATE_TAG
 
     content = getattr(message, "content", "")
     tool_call_id = getattr(message, "tool_call_id", None)
+    # Both MINT markers surface a card in-stream: a fresh [QUEUED] and a D26 supersede-mint
+    # [QUEUED_UPDATE] (a NEW row exists either way; [ALREADY_QUEUED] minted nothing → no event).
     if not (isinstance(message, ToolMessage) and tool_call_id
-            and isinstance(content, str) and content.startswith(QUEUED_MARKER_TAG)):
+            and isinstance(content, str)
+            and (content.startswith(QUEUED_MARKER_TAG) or content.startswith(QUEUED_UPDATE_TAG))):
         return None
 
     from sqlalchemy import select
