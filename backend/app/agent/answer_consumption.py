@@ -112,7 +112,7 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
 
 
 def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried_intent: str,
-                   *, hedged: bool = False) -> ConsumeDecision:
+                   *, hedged: bool = False, committed: bool = False) -> ConsumeDecision:
     """Resolve the master's ANSWER to an open question.
 
     answer         — the master's reply text (for SELECTION parsing).
@@ -189,6 +189,12 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
     # non-committal here: the carried intent can never manufacture a dispatch from it — any
     # carried verb, approve OR reject ("hmm maybe" manufactures no send and no discard).
     if answer_verb not in _VERBS and answer_verb != "none":
+        return ConsumeDecision("confirm", carried_intent, (), tuple(ids), "noncommittal")
+    # Step-2.2 INVERTED POLARITY: a bare "none" may carry the question's intent ONLY when the
+    # deterministic committed-affirmation floor matched. The absence of a verb is never consent
+    # — "works for me" / "sounds good" / "👍" / a degenerate judge response all land here and
+    # RE-CONFIRM. (The open non-committed set can't be enumerated; the committed set can.)
+    if answer_verb == "none" and not committed:
         return ConsumeDecision("confirm", carried_intent, (), tuple(ids), "noncommittal")
     if len(candidates) == 1:
         return ConsumeDecision("dispatch", verb, (ids[0],), (), "singleton")

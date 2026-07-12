@@ -355,7 +355,7 @@ async def test_committed_yes_to_single_candidate_question_dispatches_despite_oth
     r_other = await _seed(thread, "calendar_update",
                           {"event_id": "e", "title": "Standup", "start_iso": "2026-07-20T13:00:00-04:00"})
     rec = _spy_dispatch(monkeypatch)
-    _verb(monkeypatch, "none")                                 # bare assent → carried approve governs
+    _verb2(monkeypatch, "none", committed=True)                # a real "yes" = floor-committed
     q = AIMessage(content="Just to confirm, Sir — approve the email to chintu?", id="q-anchor",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1], "kind": ""}})
@@ -507,7 +507,7 @@ async def test_reject_inversion_dead_bare_yes_to_reject_question_rejects(monkeyp
     thread = f"web:{_MARK}-inv"
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     rec = _spy_dispatch(monkeypatch)
-    _verb(monkeypatch, "none")                                 # card-agnostic: bare assent = none
+    _verb2(monkeypatch, "none", committed=True)                # a real "yes" = floor-committed
     q = AIMessage(content="Just to confirm, Sir — discard the email to chintu?", id="q-inv",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "reject", "candidate_ids": [r1], "kind": ""}})
@@ -533,5 +533,58 @@ async def test_hedged_consume_dispatch_blocked_by_the_gate(monkeypatch):
     try:
         await nodes.card_resolution_node(_state("do them all later", [_linked([r1, r2]), q], thread))
         assert rec["calls"] == []
+    finally:
+        await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.2 — the info route + the inverted bare-dispatch polarity (node level)  #
+# --------------------------------------------------------------------------- #
+def _verb2(monkeypatch, verb, hedged=False, change="", committed=False):
+    from types import SimpleNamespace as NS
+
+    async def fake(user_message, question, recent_context=""):
+        return NS(verb=verb, hedged=hedged, change=change, committed=committed)
+    import app.agent.decision_resolver as dr
+    monkeypatch.setattr(dr, "resolve_answer_verb", fake)
+
+
+@pytest.mark.asyncio
+async def test_info_request_routes_to_agent_question_stays_open(monkeypatch):
+    """'read it back to me' → the AGENT answers (no dispatch, no re-ask) and the question
+    stays OPEN so the following 'yes' still consumes it."""
+    thread = f"web:{_MARK}-info"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _verb2(monkeypatch, "info")
+    q = AIMessage(content="Just to confirm — approve the email to chintu?", id="q-info",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [r1], "kind": ""}})
+    try:
+        out = await nodes.card_resolution_node(
+            _state("read it back to me", [_linked([r1], solicited=False), q], thread))
+        assert rec["calls"] == []                              # NO send on an info request
+        assert out.get("card_handled") is not True             # the agent answers it
+        stamped = [m for m in out.get("messages", []) if getattr(m, "id", None) == q.id]
+        assert not stamped                                     # the question is NOT stamped — stays open
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_none_singleton_reconfirms_at_node(monkeypatch):
+    """'works for me' (none, unhedged, NOT committed) on a 1-candidate question → re-confirm."""
+    thread = f"web:{_MARK}-uncmt"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _verb2(monkeypatch, "none", committed=False)
+    q = AIMessage(content="Just to confirm — approve the email?", id="q-uncmt",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [r1], "kind": ""}})
+    try:
+        out = await nodes.card_resolution_node(
+            _state("works for me", [_linked([r1], solicited=False), q], thread))
+        assert rec["calls"] == []
+        assert _question_msgs(out), "must re-confirm with an open question"
     finally:
         await _cleanup(thread)

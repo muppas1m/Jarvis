@@ -381,9 +381,11 @@ def test_h2_unmatched_quoted_selector_is_no_match():
 # carried intent; the non-committal boundary lives on the HEDGED axis           #
 # --------------------------------------------------------------------------- #
 def test_none_unhedged_singleton_dispatches_carried_verb():
-    """Bare committed 'yes' to a reject question: verb=none, hedged=False → the carried
-    reject dispatches (the reviewer's inversion red-bar at resolver level)."""
-    d = resolve_answer("yes", [_email()], answer_verb="none", carried_intent="reject")
+    """Bare committed 'yes' to a reject question: verb=none + COMMITTED (the floor matched)
+    → the carried reject dispatches. (Step-2.2 migration: committed is now required —
+    the inverted polarity; a real 'yes' earns it deterministically from the floor.)"""
+    d = resolve_answer("yes", [_email()], answer_verb="none", carried_intent="reject",
+                       committed=True)
     assert d.action == "dispatch" and d.verb == "reject" and d.selection == ("email",)
 
 
@@ -397,3 +399,28 @@ def test_unclear_still_noncommittal_for_the_direct_vocabulary():
     """The old direct-judge vocabulary keeps its F4 meaning: unclear + no selector → re-ask."""
     d = resolve_answer("ok", [_email()], answer_verb="unclear", carried_intent="approve")
     assert d.action == "confirm" and d.reason == "noncommittal"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.2 — inverted polarity: bare dispatch requires COMMITTED; none alone    #
+# is never consent                                                              #
+# --------------------------------------------------------------------------- #
+def test_none_uncommitted_never_dispatches_carried():
+    """'works for me' judged none+unhedged but NOT committed → re-confirm (the inversion:
+    absence of a verb is never consent)."""
+    d = resolve_answer("works for me", [_email()], answer_verb="none", carried_intent="approve",
+                       hedged=False, committed=False)
+    assert d.action == "confirm" and d.selection == ()
+
+
+def test_none_committed_dispatches_carried():
+    """The committed floor is the ONLY bare-branch dispatch enabler."""
+    d = resolve_answer("yes", [_email()], answer_verb="none", carried_intent="reject",
+                       hedged=False, committed=True)
+    assert d.action == "dispatch" and d.verb == "reject"
+
+
+def test_committed_but_multi_still_reconfirms():
+    d = resolve_answer("yes", [_cal(), _email()], answer_verb="none", carried_intent="approve",
+                       hedged=False, committed=True)
+    assert d.action == "confirm"           # CH-3 stands above the committed floor

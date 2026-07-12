@@ -176,8 +176,22 @@ async def resolve_decision(
 # B1.0 step-2.1 — the CARD-AGNOSTIC answer-verb judge (the question-consume     #
 # path's verb source).                                                          #
 # --------------------------------------------------------------------------- #
-AnswerVerb = Literal["approve", "reject", "edit", "skip", "none", "unrelated"]
-_VALID_ANSWER_VERBS = ("approve", "reject", "edit", "skip", "none", "unrelated")
+AnswerVerb = Literal["approve", "reject", "edit", "skip", "none", "info", "unrelated"]
+_VALID_ANSWER_VERBS = ("approve", "reject", "edit", "skip", "none", "info", "unrelated")
+
+# Step-2.2 — the COMMITTED-AFFIRMATION floor (inverted polarity, master-ratified set): the
+# bare-branch dispatch of a question's carried intent requires an explicit POSITIVE COMMITTED
+# affirmation from this CLOSED deterministic set (whole-message match, punctuation stripped).
+# Pure assent forms ONLY — they carry the QUESTION's verb ("go ahead" on a discard-confirm
+# discards). Action verbs ("send it") are deliberately NOT here: they reach the model and
+# override as explicit verbs (CH-2). The absence of a verb is never consent — everything
+# outside this set re-confirms. ("👍" and other emoji are outside → re-confirm; say the word
+# to enumerate them.)
+_COMMITTED_AFFIRMATIONS = frozenset({
+    "yes", "yes sir", "yes please", "go ahead", "go ahead please", "go for it", "proceed",
+    "do it", "please do", "confirmed", "confirm", "approved", "approve", "accepted", "accept",
+    "that works", "correct", "affirmative", "absolutely", "definitely",
+})
 
 
 @dataclass(frozen=True)
@@ -185,6 +199,9 @@ class AnswerVerbResolution:
     verb: AnswerVerb
     hedged: bool = False
     change: str = ""
+    # True ONLY via the deterministic committed floor — the sole enabler of a bare-branch
+    # carried-intent dispatch. The model can never set it (guarantee layer owns it).
+    committed: bool = False
 
 
 _ANSWER_VERB_PROMPT = """The assistant asked the master a question about pending action(s) and the master replied. You are shown ONLY the reply — not the question and not the cards, ON PURPOSE: the deterministic layer owns which item is meant and what the question asked; you classify only what the reply's OWN WORDS express. There is nothing here to borrow a verb from — if the reply does not itself command a verb, it has none.
@@ -193,17 +210,18 @@ MASTER'S REPLY
   "{user_message}"
 
 Classify the reply's OWN verb — what the reply itself commands, independent of any particular item:
-- "approve": the reply itself commands the action to RUN — "send it", "go ahead and send", "do it", "book it", "approved".
+- "approve": ONLY when the reply contains an explicit ACTION COMMAND — a verb acting on the item: "send it", "go ahead and send", "book it", "fire it off", "actually approve it". Agreement or assent WITHOUT an action verb — "yes", "works for me", "sounds good", "aye", "fine by me", a thumbs-up emoji — is NOT approve: it is "none" (the deterministic layer alone decides whether assent may act; if you call assent "approve" you bypass that layer).
 - "reject": the reply itself commands cancel/discard — "reject both", "cancel", "don't send", "scrap it", "discard the calendar one".
 - "edit": the reply asks for a CHANGE before proceeding — "make it shorter", "change the time to 6pm". Put the change in "change".
 - "skip": the reply defers navigation explicitly — "skip", "skip this one".
+- "info": the reply ASKS ABOUT the pending item(s) THEMSELVES — "read it back to me", "what does it say?", "is that the right address?", "who is it to?", "when is it scheduled?". A question about the item is NEVER assent — the assistant should ANSWER it. A question about ANYTHING ELSE ("what's the weather?", "show me my inbox") is "unrelated", not "info".
 - "none": the reply expresses NO verb of its own — it merely AFFIRMS the question ("yes", "yeah go ahead" as bare assent) or SELECTS/IDENTIFIES items ("both", "all of them", "the calendar one", "the one to Timmy", "yes, that's the budget one"). A verb comes ONLY from the reply's own words. When in doubt between "none" and a verb, choose "none".
 - "unrelated": the reply is about something else entirely ("what's the weather?", "show me my inbox").
 
 ALSO judge "hedged": true when the reply is anything short of COMMITTED — it defers/hedges/postpones ("maybe", "perhaps", "later", "not now", "hold off", "do them all later", "maybe after lunch", conditional/future framing) OR it is a non-committal casual token or deflection ("ok", "okay", "k", "sure", "cool", "fine", "alright", "why not", "I guess", "I guess so", "up to you", "whatever you think", "if you think so") — even if it also affirms, selects, or commands. A hedged or casual reply is never a fireable go-ahead. COMMITTED replies → false: the deliberate "yes", "yeah go ahead", "go for it", "do it", "both", "reject both", "the calendar one".
 
 Respond with JSON only:
-{{"verb": "approve|reject|edit|skip|none|unrelated", "hedged": true|false, "change": "<the requested change, or empty unless verb is edit>"}}"""
+{{"verb": "approve|reject|edit|skip|none|info|unrelated", "hedged": true|false, "change": "<the requested change, or empty unless verb is edit>"}}"""
 
 
 async def resolve_answer_verb(
@@ -217,7 +235,15 @@ async def resolve_answer_verb(
     affirmative or bare selection is "none" — it never manufactures a verb; the consume layer
     applies the question's carried intent. Failure → verb="none" + hedged=True (a resolver
     failure can only RE-CONFIRM, never dispatch)."""
+    norm = " ".join(re.sub(r"[^a-z ]", " ", (user_message or "").lower()).split())
+    if norm in _COMMITTED_AFFIRMATIONS:
+        # The guarantee floor — the ONLY source of committed=True (deterministic, no model).
+        logger.info("answer_verb_resolved", verb="none", hedged=False, has_change=False,
+                    floor="committed_affirmation")
+        return AnswerVerbResolution(verb="none", hedged=False, committed=True)
     if _is_bare_filler(user_message):
+        # Fast-path (subsumed by the inversion — uncommitted none re-confirms anyway; this
+        # just skips the model call for the enumerated filler class).
         logger.info("answer_verb_resolved", verb="none", hedged=True, has_change=False,
                     floor="bare_filler")
         return AnswerVerbResolution(verb="none", hedged=True)
@@ -235,12 +261,15 @@ async def resolve_answer_verb(
         )
         data = json.loads(response["choices"][0]["message"].get("content") or "")
         verb = data.get("verb")
-        if verb not in _VALID_ANSWER_VERBS:
+        coerced = verb not in _VALID_ANSWER_VERBS
+        if coerced:
             verb = "none"
         change = (data.get("change") or "").strip() if verb == "edit" else ""
         if verb == "edit" and not change:
             verb = "none"                 # an edit with no concrete change is not actionable
-        hedged = bool(data.get("hedged", False))
+        # FAIL-CLOSED (step-2.2): a degenerate/wrong-schema response (missing verb, a sibling
+        # judge's keys) forces hedged=True — a coerced none can never look dispatch-capable.
+        hedged = True if coerced else bool(data.get("hedged", False))
         logger.info("answer_verb_resolved", verb=verb, hedged=hedged, has_change=bool(change))
         return AnswerVerbResolution(verb=verb, hedged=hedged, change=change)
     except Exception as exc:  # noqa: BLE001 — a failed judge can only re-confirm

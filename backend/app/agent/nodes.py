@@ -1631,6 +1631,11 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
     # hallucinated approve override a carried reject). Fail-open = none+hedged → re-confirm.
     logger.info("card_resolution_judge_entered", judge_id="answer_verb", live=-1)
     res = await resolve_answer_verb(message, ref.get("text") or "")
+    if res.verb == "info":
+        # Step-2.2 — an info request ("read it back to me", "what does it say?") is answered by
+        # the AGENT; the question stays OPEN (no stamp) so the following "yes" still consumes it.
+        logger.info("question_info_request_to_agent")
+        return {"card_handled": False}
 
     # Consent scope (review HIGH-1): "both"/"all"/bare answers act on the choices the QUESTION
     # NAMED — never the whole thread. The widened conversation universe exists ONLY so an
@@ -1645,7 +1650,8 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
             logger.info("question_offer_precedence")
             return {"card_handled": False}
 
-    decision = resolve_answer(message, live, res.verb, ref["intent"], hedged=res.hedged)
+    decision = resolve_answer(message, live, res.verb, ref["intent"], hedged=res.hedged,
+                              committed=bool(getattr(res, "committed", False)))
     if decision.action == "confirm" and decision.reason == "no_match":
         # CH-4 reach — the answer named a kind/name absent from the question's set: try the
         # WIDENED universe (every approval linkage in the conversation). Only an explicit
@@ -1659,7 +1665,8 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
         ordered = [i for i in ids if not (i in seen or seen.add(i))]
         widened = await _fetch_queued_cards(ordered)
         if len(widened) > len(live):
-            wide = resolve_answer(message, widened, res.verb, ref["intent"], hedged=res.hedged)
+            wide = resolve_answer(message, widened, res.verb, ref["intent"], hedged=res.hedged,
+                                  committed=bool(getattr(res, "committed", False)))
             if wide.action == "dispatch" and wide.reason == "narrowed_singleton":
                 decision, live = wide, widened
                 logger.info("question_reach_beyond_set", target=wide.selection[0])

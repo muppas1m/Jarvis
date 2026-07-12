@@ -305,3 +305,67 @@ async def test_filler_built_into_a_command_still_reaches_the_model():
     """'ok, send it' is NOT a bare filler — the command approves (the floor is exact-match)."""
     res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, "ok, send it", _PROD_CTX)
     assert res.intent == "approve"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.2 — INVERTED POLARITY: bare-branch dispatch requires a POSITIVE        #
+# COMMITTED AFFIRMATION (closed deterministic set); absence of a verb is never  #
+# consent. Info requests route to the agent. Fail-CLOSED on degenerate output.  #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["read it back to me", "what does it say?",
+                                 "is that the right address?"])
+async def test_info_requests_are_classified_info_5_runs(msg):
+    """CRITICAL red-bar: an info request must come back verb='info' (→ the agent answers),
+    NEVER a dispatchable none/approve — stable across 5 live runs."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for i in range(5):
+        res = await resolve_answer_verb(msg, "")
+        assert res.verb == "info", f"run {i}: {msg!r} → {res}"
+        assert res.committed is False
+
+
+@pytest.mark.parametrize("msg", ["works for me", "sounds good", "ok cool", "ya", "aye"])
+async def test_casual_assent_outside_the_floor_is_never_dispatch_capable_5_runs(msg):
+    """The 'sure 4/6' class: casual assent NOT in the committed set must never come back
+    dispatch-capable — not an approve verb, not committed — 5 live runs each."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for i in range(5):
+        res = await resolve_answer_verb(msg, "")
+        assert res.verb != "approve", f"run {i}: {msg!r} → verb=approve: {res}"
+        assert res.committed is False, f"run {i}: {msg!r} committed: {res}"
+
+
+async def test_thumbs_up_is_not_committed():
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb("👍", "")
+    assert res.committed is False and res.verb != "approve"
+
+
+@pytest.mark.parametrize("msg", ["yes", "Yes.", "yes sir", "go ahead", "confirmed",
+                                 "approved", "that works", "go for it"])
+async def test_committed_affirmations_are_deterministically_committed(msg):
+    """The closed set (proposed for ratification): whole-message match → committed=True,
+    verb none, hedged False — deterministic, no model in the loop."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for _ in range(3):
+        res = await resolve_answer_verb(msg, "")
+        assert res.committed is True and res.verb == "none" and res.hedged is False, f"{msg!r} → {res}"
+
+
+async def test_fail_closed_on_degenerate_judge_output(monkeypatch):
+    """A wrong-schema / sibling-key / empty JSON coerces to none + hedged=True (fail-CLOSED) —
+    only a model-emitted or floor-matched committed assent can ever dispatch."""
+    from app.agent import decision_resolver as dr
+    for payload in ('{"intent": "approve"}', '{}', '{"verb": "banana"}'):
+        async def fake_complete(**kwargs):
+            return {"choices": [{"message": {"content": payload}}]}
+        monkeypatch.setattr(dr.llm_gateway, "complete", fake_complete)
+        res = await dr.resolve_answer_verb("whatever you like", "")
+        assert res.verb in ("none",) and res.hedged is True and res.committed is False, \
+            f"{payload!r} → {res} (fail-open!)"
+
+
+async def test_golden_send_it_still_overrides():
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb("actually approve it", "")
+    assert res.verb == "approve"           # CH-2 override survives the inversion
