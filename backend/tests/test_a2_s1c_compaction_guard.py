@@ -89,3 +89,41 @@ async def test_read_error_fails_safe_keeps_linked():
     with patch("app.agent.nodes.async_session", side_effect=RuntimeError("db down")):
         removable = await _drop_pending_linked(window)
     assert [m.content for m in removable] == ["a"]              # linked one kept
+
+
+# --------------------------------------------------------------------------- #
+# B1.0 CH-7 (second half) — the un-consumed OFFER keep-rule: the most recent    #
+# briefing-tagged message is never compacted (compacting it flips offer_pending #
+# False → a bare "yes" meant for the OFFER would dispatch a CARD).              #
+# --------------------------------------------------------------------------- #
+def _offer(text="2 items await, Sir. Shall I brief you?"):
+    return AIMessage(content=text, additional_kwargs={"jarvis": {"type": "briefing"}})
+
+
+@pytest.mark.asyncio
+async def test_ch7_most_recent_offer_survives_compaction():
+    thread = f"web:{_MARK}-ch7"
+    rid = await _seed(thread)
+    try:
+        offer = _offer()
+        window = [AIMessage(content="old chatter"), _linked(rid), offer,
+                  AIMessage(content="more chatter")]
+        removable = await _drop_pending_linked(window)
+        assert offer not in removable, "the un-consumed offer was compactable (CH-7)"
+        # and the walk outcome is preserved: offer more recent than the approval → pending
+        from app.agent.nodes import _conversation_referent
+        kept_like = [m for m in window if m not in removable]
+        ref = _conversation_referent(kept_like)
+        assert ref["type"] == "approval" and ref["offer_pending"] is True
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_ch7_only_the_most_recent_offer_is_kept():
+    """Older briefing messages are inert for the walk — they compact normally."""
+    old_offer, new_offer = _offer("old offer"), _offer("new offer")
+    window = [old_offer, AIMessage(content="chat"), new_offer]
+    removable = await _drop_pending_linked(window)
+    assert old_offer in removable                              # inert → compacts
+    assert new_offer not in removable                          # the active one is kept

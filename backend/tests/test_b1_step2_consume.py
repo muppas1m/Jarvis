@@ -588,3 +588,49 @@ async def test_uncommitted_none_singleton_reconfirms_at_node(monkeypatch):
         assert _question_msgs(out), "must re-confirm with an open question"
     finally:
         await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# B1.1 — issue-5: a named kind reaches a live card OUTSIDE the referent's set   #
+# on the DIRECT path (the 9cc01f1c class, reproduced locally)                   #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_b11_issue5_named_calendar_resolves_across_linkages(monkeypatch):
+    """Referent = the (solicited) EMAIL approval message; a live calendar card is linked by an
+    OLDER approval message. 'Now approve that pending calendar approval' must resolve the
+    CALENDAR card — never re-mint, never 'already queued', never unresolvable."""
+    thread = f"web:{_MARK}-i5"
+    r_cal = await _seed(thread, "calendar_update",
+                        {"event_id": "e", "title": "Lunch with friends", "start_iso": "2026-07-19T17:00:00-04:00"})
+    r_email = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge(monkeypatch, "approve")
+    try:
+        out = await nodes.card_resolution_node(
+            _state("Now approve that pending calendar approval",
+                   [_linked([r_cal]), _linked([r_email])], thread))
+        assert rec["calls"] == [(r_cal, "approve")], f"issue-5 not closed: {rec['calls']}"
+        assert (out.get("card_outcomes") or [{}])[0].get("approval_id") == r_cal
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b11_named_kind_matching_two_cards_asks_which(monkeypatch):
+    thread = f"web:{_MARK}-i5b"
+    c1 = await _seed(thread, "calendar_update",
+                     {"event_id": "e1", "title": "Lunch with friends", "start_iso": "2026-07-19T17:00:00-04:00"})
+    c2 = await _seed(thread, "calendar_create",
+                     {"title": "Standup", "start_iso": "2026-07-21T13:00:00-04:00"})
+    r_email = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge(monkeypatch, "approve")
+    try:
+        out = await nodes.card_resolution_node(
+            _state("approve the calendar one",
+                   [_linked([c1]), _linked([c2]), _linked([r_email])], thread))
+        assert rec["calls"] == []                              # two calendars → never guess
+        qs = _question_msgs(out)
+        assert qs and set(qs[0].additional_kwargs["jarvis"]["candidate_ids"]) == {c1, c2}
+    finally:
+        await _cleanup(thread)

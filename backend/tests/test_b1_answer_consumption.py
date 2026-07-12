@@ -234,8 +234,10 @@ def test_f51_idiomatic_all_never_dispatches_all(idiom):
     assert d.selection == ()
 
 
+# ("all three" migrated to the B1.1 cardinality tests — a stated count over a 2-card set is
+# now a #3 cardinality mismatch → confirm; "all three" of THREE dispatches, pinned in b11.)
 @pytest.mark.parametrize("explicit", ["both", "approve them all", "all of them",
-                                      "reject all of them", "all three"])
+                                      "reject all of them"])
 def test_f51_true_selector_forms_still_dispatch_all(explicit):
     d = resolve_answer(explicit, [_cal(), _email()],
                        answer_verb="unclear" if explicit == "both" else "approve",
@@ -337,13 +339,15 @@ def test_unhedged_default_keeps_the_golden_path():
 # Step 2 — the INTERIM mixed-kind-all guard (B1.1 addendum): a kind-qualified   #
 # "all" over a set containing OTHER kinds re-confirms until B1.1 can scope it   #
 # --------------------------------------------------------------------------- #
-def test_kind_qualified_all_over_mixed_set_reconfirms():
-    """'approve both emails' over [e1,e2,cal] → confirm (never dispatches the calendar card)."""
+def test_kind_qualified_all_over_mixed_set_never_rides_the_other_kind():
+    """B1.1 migration (the interim mixed_kind_all confirm retired for the REAL fix): 'both
+    emails' over [e1,e2,cal] now dispatches EXACTLY the emails — the safety property this pin
+    has always guarded is that the calendar card never rides."""
     d = resolve_answer("approve both emails, send them",
                        [_email("e1"), _email("e2", to="amy@x.com", subject="Budget"), _cal()],
                        answer_verb="approve", carried_intent="approve")
-    assert d.action == "confirm", f"scope-exceeding all dispatched: {d}"
-    assert d.selection == () and d.reason == "mixed_kind_all"
+    assert "cal" not in d.selection, f"scope-exceeding all: {d}"
+    assert d.action == "dispatch" and set(d.selection) == {"e1", "e2"}
 
 
 def test_bare_both_on_mixed_set_still_dispatches_all():
@@ -424,3 +428,54 @@ def test_committed_but_multi_still_reconfirms():
     d = resolve_answer("yes", [_cal(), _email()], answer_verb="none", carried_intent="approve",
                        hedged=False, committed=True)
     assert d.action == "confirm"           # CH-3 stands above the committed floor
+
+
+# --------------------------------------------------------------------------- #
+# B1.1 — #1 kind-narrow-then-all: "both emails" acts on exactly the emails      #
+# (replaces the interim mixed_kind_all re-confirm with the real fix)            #
+# --------------------------------------------------------------------------- #
+def test_b11_both_emails_dispatches_exactly_the_emails():
+    d = resolve_answer("approve both emails, send them",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="Budget"), _cal()],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "dispatch" and set(d.selection) == {"e1", "e2"}, f"{d}"
+    assert "cal" not in d.selection                            # the calendar card never rides
+
+
+def test_b11_kind_all_with_no_such_kind_confirms():
+    d = resolve_answer("reject both calendar events", [_email("e1"), _email("e2", to="amy@x.com", subject="B")],
+                       answer_verb="reject", carried_intent="reject")
+    assert d.action == "confirm" and d.selection == ()
+
+
+# --------------------------------------------------------------------------- #
+# B1.1 — #3 cardinality: the stated count must equal the (narrowed) universe    #
+# --------------------------------------------------------------------------- #
+def test_b11_the_two_emails_of_exactly_two_dispatches():
+    d = resolve_answer("reject the two emails",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="Budget"), _cal()],
+                       answer_verb="reject", carried_intent="reject")
+    assert d.action == "dispatch" and set(d.selection) == {"e1", "e2"}
+
+
+def test_b11_the_two_emails_of_three_confirms():
+    d = resolve_answer("reject the two emails",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="B"),
+                        _email("e3", to="joe@x.com", subject="P")],
+                       answer_verb="reject", carried_intent="reject")
+    assert d.action == "confirm" and d.selection == ()
+
+
+def test_b11_the_two_of_one_never_singleton_dispatches():
+    """'the two emails' with ONE live email must confirm — never dispatch the lone card."""
+    d = resolve_answer("send the two emails", [_email("e1"), _cal()],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == ()
+
+
+def test_b11_all_three_of_three_dispatches():
+    d = resolve_answer("approve all three",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="B"),
+                        _email("e3", to="joe@x.com", subject="P")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "dispatch" and len(d.selection) == 3

@@ -1541,7 +1541,8 @@ def _dispatch_consent_gate(message: str, targets: list, hedged: bool, intent: st
 
 async def _resolve_conversation_target(intent: str, message: str, resolved_via: str,
                                         h: str, live: list, anchored: bool,
-                                        hedged: bool = False) -> dict:
+                                        hedged: bool = False,
+                                        universe: list | None = None) -> dict:
     """A2 s2 — resolve consent against the CONVERSATION's target (the F1-linked live cards of
     the most recent approval message). The seal's invariants, re-keyed:
       - >1 live linked target → refuse HONESTLY naming the choices (B1 owns disambiguation);
@@ -1565,11 +1566,39 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
 
     target = live[0]
     if _confirm_worthy_mismatch(message, target):
-        reply = (f"Just to be sure, {h} — the pending one here is {describe_card(target)}. "
-                 f"Did you mean that one?")
-        logger.info("card_resolution_confirm", intent=intent, reason="naming_backstop")
-        return {"messages": [_question_message(reply, intent, [target.approval_id])],
-                "final_response": reply, "card_handled": True}
+        # B1.1 — the master may be naming a DIFFERENT live card than this referent's (issue-5:
+        # "approve that pending CALENDAR approval" while the referent is the email). Select by
+        # kind/name across EVERY live linked card in the conversation; a unique match RETARGETS
+        # and falls through the normal consent chain (bare/anchor/gate — the seal unweakened);
+        # >1 → a disambiguation question; no match → the existing confirm (never guess).
+        if universe and len(universe) > len(live):
+            from app.agent.answer_consumption import resolve_answer
+            sel = resolve_answer(message, universe, intent, intent)
+            by = {c.approval_id: c for c in universe}
+            if (sel.action == "dispatch" and len(sel.selection) == 1
+                    and sel.selection[0] != target.approval_id and sel.selection[0] in by):
+                target = by[sel.selection[0]]
+                logger.info("kind_scoped_retarget", target=target.approval_id)
+            elif sel.action == "confirm" and len(sel.choices) > 1:
+                chosen = [by[i] for i in sel.choices if i in by]
+                named = "; ".join(describe_card(c) for c in chosen[:5])
+                reply = f"To be precise, {h} — {named}. Which one did you mean?"
+                logger.info("card_resolution_confirm", intent=intent, reason="kind_scoped_ambiguous")
+                return {"messages": [_question_message(reply, intent,
+                                                       [c.approval_id for c in chosen])],
+                        "final_response": reply, "card_handled": True}
+            else:
+                reply = (f"Just to be sure, {h} — the pending one here is {describe_card(target)}. "
+                         f"Did you mean that one?")
+                logger.info("card_resolution_confirm", intent=intent, reason="naming_backstop")
+                return {"messages": [_question_message(reply, intent, [target.approval_id])],
+                        "final_response": reply, "card_handled": True}
+        else:
+            reply = (f"Just to be sure, {h} — the pending one here is {describe_card(target)}. "
+                     f"Did you mean that one?")
+            logger.info("card_resolution_confirm", intent=intent, reason="naming_backstop")
+            return {"messages": [_question_message(reply, intent, [target.approval_id])],
+                    "final_response": reply, "card_handled": True}
 
     from app.agent.approval_essentials import card_essentials_named
     bare = not card_essentials_named(message, target.tool_name, target.tool_args or {})
@@ -1841,9 +1870,21 @@ async def card_resolution_node(state: AgentState) -> dict:
                 logger.info("card_resolution_offer_precedence")
                 return {"card_context": _card_context_line(judged.row) if judged.row else "",
                         "card_handled": False}   # the agent answers the OFFER; card untouched
+        # B1.1 — the conversation-wide live universe (every approval linkage + open-question
+        # candidates), for kind-scoped retargeting when the message names a different card.
+        uni_ids = list(ref["ids"])
+        for m in state.get("messages") or []:
+            meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+            if meta.get("type") == "approval":
+                uni_ids.extend(str(i) for i in meta.get("approval_ids") or [])
+            elif meta.get("type") == "question" and meta.get("state") == "open":
+                uni_ids.extend(str(i) for i in meta.get("candidate_ids") or [])
+        seen_u: set = set()
+        uni_ids = [i for i in uni_ids if not (i in seen_u or seen_u.add(i))]
+        universe = await _fetch_queued_cards(uni_ids) if len(uni_ids) > len(ref["ids"]) else live
         return await _resolve_conversation_target(
             intent, message, resolved_via, h, live, anchored=ref["solicited"],
-            hedged=bool(getattr(judged, "hedged", False)))
+            hedged=bool(getattr(judged, "hedged", False)), universe=universe)
 
     if intent == "skip":
         reply = f"Skipped, {h}."
@@ -2033,6 +2074,7 @@ async def _drop_pending_linked(messages: list) -> list:
     import uuid as _uuid
 
     linked: dict[int, list] = {}
+    last_offer_idx = -1
     for i, m in enumerate(messages):
         meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
         ids = meta.get("approval_ids")
@@ -2042,8 +2084,17 @@ async def _drop_pending_linked(messages: list) -> list:
             ids = meta.get("candidate_ids")
         if ids:
             linked[i] = ids
-    if not linked:
+        # CH-7 (offer half) — the MOST RECENT briefing-tagged message is the active offer for
+        # the walk's offer_pending; compacting it would flip a bare "yes" from the offer onto a
+        # card (a consent regression). It has no PendingApproval row, so it needs its own keep
+        # rule. Older briefing messages are inert for the walk and compact normally. (When
+        # B1-brief adds state offered|delivered, this refines to state=="offered".)
+        if meta.get("type") == "briefing":
+            last_offer_idx = i
+    if not linked and last_offer_idx < 0:
         return messages
+    if not linked:
+        return [m for i, m in enumerate(messages) if i != last_offer_idx]
     all_ids = []
     for ids in linked.values():
         for rid in ids:
@@ -2061,8 +2112,10 @@ async def _drop_pending_linked(messages: list) -> list:
             )).scalars().all()}
     except Exception as exc:  # noqa: BLE001 — fail-safe: keep every linked message
         logger.warning("compaction_pending_check_failed", error=str(exc))
-        return [m for i, m in enumerate(messages) if i not in linked]
+        return [m for i, m in enumerate(messages) if i not in linked and i != last_offer_idx]
     keep_idx = {i for i, ids in linked.items() if any(str(r) in pending for r in ids)}
+    if last_offer_idx >= 0:
+        keep_idx.add(last_offer_idx)          # CH-7: the active offer is never summarized
     if keep_idx:
         logger.info("compaction_kept_pending_linked", kept=len(keep_idx))
     return [m for i, m in enumerate(messages) if i not in keep_idx]

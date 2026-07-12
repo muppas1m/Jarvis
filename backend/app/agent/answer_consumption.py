@@ -49,8 +49,12 @@ _VERBS = frozenset({"approve", "reject", "edit", "skip"})
 # Precision, not semantics — the intent was always explicit all/both; anything less re-confirms
 # (kind-scoped + cardinality-checked selection is B1.1).
 _ALL_SELECTOR = re.compile(
-    r"\b(both|them all|all of (them|these|those)|all (two|three|four|five)( of them)?)\b",
-    re.IGNORECASE)
+    r"\b(both|them all|all of (them|these|those))\b", re.IGNORECASE)
+# B1.1 #3 — a STATED COUNT is a cardinality claim, verified against the (kind-narrowed)
+# universe: "the two emails" of exactly two acts as all-of-them; of three (or one) it
+# re-confirms — a count that doesn't match is never a dispatch.
+_CARDINAL_SELECTOR = re.compile(r"\b(?:the|all)\s+(?P<num>two|three|four|five)\b", re.IGNORECASE)
+_CARDINALS = {"two": 2, "three": 3, "four": 4, "five": 5}
 _KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
 _KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
 _CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
@@ -88,16 +92,31 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
                               kind/name is not among the candidates → the caller confirms);
       ("none", [])          — no selector at all (a bare answer)."""
     msg = answer or ""
-    if _ALL_SELECTOR.search(msg):
-        return "all", [c.approval_id for c in candidates]
-
     want_cal = bool(_KIND_CALENDAR.search(msg))
     want_email = bool(_KIND_EMAIL.search(msg))
-    matched: list[str] = []
-    for c in candidates:
+
+    def _kind_ok(c) -> bool:
         is_cal = getattr(c, "tool_name", "") in _CALENDAR_TOOLS
         is_email = getattr(c, "kind", "") == "email"
-        kind_hit = (want_cal and is_cal) or (want_email and is_email)
+        return (want_cal and is_cal) or (want_email and is_email)
+
+    # B1.1 #1 — kind-narrow FIRST: "both EMAILS" acts within the named kind, never beyond it
+    # (the sweep's scope-exceeding-all, now fixed for real; the interim mixed_kind_all confirm
+    # retires). No kind named → the pool is the whole candidate set (bare "both" unchanged).
+    pool = [c for c in candidates if _kind_ok(c)] if (want_cal or want_email) else list(candidates)
+
+    m_cardinal = _CARDINAL_SELECTOR.search(msg)
+    if _ALL_SELECTOR.search(msg) or m_cardinal:
+        if not pool:
+            return "filter", []            # a kind named with no such card live → no_match
+        if m_cardinal and _CARDINALS[m_cardinal.group("num").lower()] != len(pool):
+            # #3 — the stated count doesn't match the universe → never a dispatch.
+            return "mismatch", [c.approval_id for c in pool]
+        return "all", [c.approval_id for c in pool]
+
+    matched: list[str] = []
+    for c in candidates:
+        kind_hit = _kind_ok(c)
         name_hit = card_names_any_essential(msg, getattr(c, "tool_name", ""), getattr(c, "tool_args", None) or {})
         if kind_hit or name_hit:
             matched.append(c.approval_id)
@@ -157,21 +176,13 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
         return ConsumeDecision("confirm", verb, (), tuple(ids), "hedged")
 
     # --- the dispatch gate ---
+    if sel_kind == "mismatch":
+        # B1.1 #3 — the stated count ≠ the (narrowed) universe: confirm naming the pool.
+        return ConsumeDecision("confirm", verb, (), tuple(matched), "cardinality_mismatch")
     if sel_kind == "all":
-        # INTERIM until B1.1 (kind-scoped selection): a KIND-QUALIFIED all ("both emails") over a
-        # set containing OTHER kinds must re-confirm — dispatching would exceed the master's
-        # expressed selection (the red-team's scope-exceeding-all). A bare "both"/"all of them"
-        # (no kind word) keeps the frozen dispatch-all (the I2 "I mean both" acceptance); a
-        # homogeneous set matching the named kind dispatches (the qualifier adds nothing).
-        if _KIND_CALENDAR.search(answer) or _KIND_EMAIL.search(answer):
-            want_cal = bool(_KIND_CALENDAR.search(answer))
-            want_email = bool(_KIND_EMAIL.search(answer))
-            for c in candidates:
-                is_cal = getattr(c, "tool_name", "") in _CALENDAR_TOOLS
-                is_email = getattr(c, "kind", "") == "email"
-                if not ((want_cal and is_cal) or (want_email and is_email)):
-                    return ConsumeDecision("confirm", verb, (), tuple(ids), "mixed_kind_all")
-        return ConsumeDecision("dispatch", verb, tuple(ids), (), "explicit_all")
+        # B1.1 #1 — `matched` IS the kind-narrowed pool ("both emails" = exactly the emails;
+        # bare "both" = every candidate). The interim mixed_kind_all guard retired with this.
+        return ConsumeDecision("dispatch", verb, tuple(matched), (), "explicit_all")
 
     if sel_kind == "filter":
         if len(matched) == 1:
