@@ -193,3 +193,115 @@ async def test_committed_answers_are_not_hedged(msg):
                                  {"to": "chintu@gmail.com", "subject": "Lunch Invitation"},
                                  None, msg, _WHICH_CTX)
     assert res.hedged is False, f"{msg!r} wrongly hedged: {res}"
+
+
+# --------------------------------------------------------------------------- #
+# B1.0 step-2.1 — the CARD-AGNOSTIC verb judge (live, stability-asserted)       #
+# --------------------------------------------------------------------------- #
+_REJECT_Q = ("There are 2 of those pending, Sir — an update to the event 'Lunch with friends'; "
+             "an email to chintu@gmail.com about 'Lunch Invitation'. Which should I discard — or both?")
+_CONFIRM_REJECT_Q = "Just to confirm, Sir — discard the email to chintu@gmail.com about 'Lunch Invitation'?"
+
+
+@pytest.mark.parametrize("msg", ["the calendar one", "both", "the one to chintu"])
+async def test_bare_selection_never_manufactures_a_verb_5_runs(msg):
+    """A bare selection expresses NO verb of its own — verb='none' (→ the carried intent),
+    STABLE across 5 live runs (the run-varying unclear/unrelated/approve class is dead)."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for i in range(5):
+        res = await resolve_answer_verb(msg, _REJECT_Q, "")
+        assert res.verb == "none", f"run {i}: {msg!r} manufactured verb={res.verb!r}"
+
+
+async def test_bare_yes_to_a_reject_question_never_approves_5_runs():
+    """'yes' consenting to a REJECT question is consent to the ASK — verb='none' → the carried
+    reject governs. It must NEVER come back 'approve' (the send-what-I-wanted-deleted inversion)."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for i in range(5):
+        res = await resolve_answer_verb("yes", _CONFIRM_REJECT_Q, "")
+        assert res.verb in ("none", "reject"), f"run {i}: 'yes' → verb={res.verb!r}"
+        assert res.verb != "approve"
+
+
+async def test_explicit_verbs_override_card_agnostically():
+    from app.agent.decision_resolver import resolve_answer_verb
+    for msg, want in [("reject both", "reject"), ("actually cancel both", "reject"),
+                      ("send it", "approve"), ("change the time to 6pm", "edit")]:
+        res = await resolve_answer_verb(msg, _REJECT_Q, "")
+        assert res.verb == want, f"{msg!r} → {res.verb!r}"
+
+
+async def test_off_topic_answer_is_unrelated():
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb("what's the weather tomorrow?", _REJECT_Q, "")
+    assert res.verb == "unrelated"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 (3) — the broadened hedge net (live) + the no-fireable-send seal     #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["do them all later", "later", "not now", "hold off",
+                                 "maybe", "maybe do them all later"])
+async def test_deferral_phrasings_are_hedged_on_the_answer_judge(msg):
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb(msg, _REJECT_Q, "")
+    assert res.hedged is True, f"{msg!r} not hedged: {res}"
+
+
+@pytest.mark.parametrize("msg", ["do them all later", "not now", "hold off", "maybe",
+                                 "send it, maybe after lunch"])
+async def test_hedged_never_coexists_with_a_fireable_approve(msg):
+    """The seal for BOTH paths: no phrasing may come back (intent=approve, hedged=False) from
+    the presented-card judge — a hedged/deferred reply can never be a fireable send."""
+    res = await resolve_decision("email_send",
+                                 {"to": "chintu@gmail.com", "subject": "Lunch Invitation"},
+                                 None, msg, _PROD_CTX)
+    assert not (res.intent == "approve" and res.hedged is False), f"{msg!r} → fireable: {res}"
+
+
+@pytest.mark.parametrize("msg", ["hmm, maybe", "up to you", "ok", "yeah maybe later", "sure"])
+async def test_noncommittal_fillers_are_hedged_on_the_answer_judge(msg):
+    """The F4 boundary on the consume path lives on the HEDGED axis now: every non-committal
+    filler/deflection must come back hedged=True (verb none + unhedged would dispatch carried)."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb(msg, "")
+    assert res.hedged is True, f"{msg!r} not hedged: {res}"
+
+
+async def test_committed_yes_is_unhedged_5_runs():
+    """The counterpart: a committed bare 'yes' is none+UNhedged (→ the carried intent
+    dispatches), stable across 5 live runs."""
+    from app.agent.decision_resolver import resolve_answer_verb
+    for i in range(5):
+        res = await resolve_answer_verb("yes", "")
+        assert res.verb in ("none", "approve") and res.hedged is False, f"run {i}: {res}"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 — the DETERMINISTIC bare-filler floor (guarantee layer, no LLM):     #
+# the enumerated casual tokens can never be fireable, on either judge, ever.    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["sure", "ok", "Okay.", "k", "yeah", "yep", "cool",
+                                 "fine", "alright", "why not", "I guess so", "up to you",
+                                 "fine by me", "Sure!"])
+async def test_bare_filler_floor_is_deterministic_on_the_decision_judge(msg):
+    """The doctrine's enumerated fillers short-circuit in CODE — intent=unclear, hedged=True,
+    every run, no model in the loop (the 'sure'→approve 4/6-fireable wobble is dead)."""
+    for _ in range(3):
+        res = await resolve_decision("calendar_delete", {"event_id": "e1", "title": "Q3 Review"},
+                                     "Delete the 'Q3 Review' event", msg, _PROD_CTX)
+        assert res.intent == "unclear" and res.hedged is True, f"{msg!r} → {res}"
+
+
+@pytest.mark.parametrize("msg", ["sure", "ok", "up to you", "yeah"])
+async def test_bare_filler_floor_on_the_answer_judge(msg):
+    from app.agent.decision_resolver import resolve_answer_verb
+    for _ in range(3):
+        res = await resolve_answer_verb(msg, "")
+        assert res.verb == "none" and res.hedged is True, f"{msg!r} → {res}"
+
+
+async def test_filler_built_into_a_command_still_reaches_the_model():
+    """'ok, send it' is NOT a bare filler — the command approves (the floor is exact-match)."""
+    res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, "ok, send it", _PROD_CTX)
+    assert res.intent == "approve"

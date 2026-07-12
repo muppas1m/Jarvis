@@ -34,6 +34,7 @@ reject / edit / skip / show_others are all SAFE (nothing sends). Any failure →
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -85,10 +86,34 @@ CRITICAL — the ONE test before you choose "approve": is the reply an UNAMBIGUO
 - A PASSIVE / DEFLECTING reply — "I guess so", "whatever you think", "up to you", "if you think so". Handing the decision back to YOU is not a yes.
 When in ANY doubt, "unclear" — the safe landing is always re-ask.
 
-ALSO judge one independent axis — "hedged": is the reply COMMITTED or does it HEDGE/DEFER? "hedged" is true when the reply defers or hedges — "maybe", "maybe later", "perhaps", "I guess we could", "possibly", "at some point", conditional/future framing — EVEN IF it names a selection or sounds affirmative ("maybe do them all later" → hedged true). A committed reply ("both", "yes", "go ahead", "reject it") → hedged false. This axis is independent of intent.
+ALSO judge one independent axis — "hedged": is the reply COMMITTED or does it HEDGE/DEFER? "hedged" is true when the reply defers, hedges, or postpones — "maybe", "maybe later", "perhaps", "I guess we could", "possibly", "at some point", "later", "not now", "hold off", "do them all later", "maybe after lunch", conditional/future framing — EVEN IF it names a selection, sounds affirmative, or contains a command ("send it, maybe after lunch" → hedged true; "do them all later" → hedged true). A DEFERRAL is never a fireable go-ahead. A committed reply ("both", "yes", "go ahead", "reject it") → hedged false. This axis is independent of intent.
 
 Respond with JSON only:
 {{"intent": "approve|reject|edit|skip|show_others|unclear|unrelated", "change": "<the requested change, or empty unless intent is edit>", "hedged": true|false}}"""
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 — the DETERMINISTIC bare-filler floor (guarantee layer). The consent
+# doctrine ENUMERATES these tokens ("ok"/"sure"/"k" re-ask — the same bar on
+# every flow); live probing showed the model boundary wobbles FIREABLE on them
+# ("sure" → approve+unhedged 4/6 runs on a delete). An enumerated class belongs
+# in code: a message that IS one of these (whole-message match, punctuation
+# stripped) short-circuits to re-ask/hedged without a model call — deterministic,
+# model-migration-proof (NV4), and the judge still owns every unenumerated
+# phrasing. "yes" is deliberately NOT here (the deliberate word that approves);
+# a filler BUILT INTO a command ("ok, send it") does not match and reaches the
+# model as before.
+# --------------------------------------------------------------------------- #
+_BARE_FILLERS = frozenset({
+    "ok", "okay", "k", "kk", "yeah", "yep", "yup", "sure", "sure thing", "cool", "great",
+    "perfect", "nice", "mm", "mhm", "alright", "fine", "fine by me", "why not", "i guess",
+    "i guess so", "up to you", "whatever you think", "if you think so",
+})
+
+
+def _is_bare_filler(message: str) -> bool:
+    t = re.sub(r"[^a-z ]", " ", (message or "").lower())
+    return " ".join(t.split()) in _BARE_FILLERS
 
 
 def _details(tool_args: dict, description: str | None) -> str:
@@ -111,6 +136,10 @@ async def resolve_decision(
     "I guess so") → ``unclear`` (re-ask); a topic echo / different topic → never
     approves (``unclear`` / ``unrelated``). Any failure degrades to ``unrelated``
     (never an auto-approve)."""
+    if _is_bare_filler(user_message):
+        logger.info("decision_resolved", intent="unclear", has_change=False, hedged=True,
+                    floor="bare_filler")
+        return DecisionResolution(intent="unclear", hedged=True)
     prompt = _RESOLVER_PROMPT.format(
         tool_name=tool_name,
         details=_details(tool_args, description),
@@ -141,3 +170,79 @@ async def resolve_decision(
     except Exception as exc:  # noqa: BLE001 — never auto-approve on a resolver failure
         logger.warning("decision_resolver_failed", error=f"{type(exc).__name__}: {exc}")
         return DecisionResolution(intent="unrelated")
+
+
+# --------------------------------------------------------------------------- #
+# B1.0 step-2.1 — the CARD-AGNOSTIC answer-verb judge (the question-consume     #
+# path's verb source).                                                          #
+# --------------------------------------------------------------------------- #
+AnswerVerb = Literal["approve", "reject", "edit", "skip", "none", "unrelated"]
+_VALID_ANSWER_VERBS = ("approve", "reject", "edit", "skip", "none", "unrelated")
+
+
+@dataclass(frozen=True)
+class AnswerVerbResolution:
+    verb: AnswerVerb
+    hedged: bool = False
+    change: str = ""
+
+
+_ANSWER_VERB_PROMPT = """The assistant asked the master a question about pending action(s) and the master replied. You are shown ONLY the reply — not the question and not the cards, ON PURPOSE: the deterministic layer owns which item is meant and what the question asked; you classify only what the reply's OWN WORDS express. There is nothing here to borrow a verb from — if the reply does not itself command a verb, it has none.
+
+MASTER'S REPLY
+  "{user_message}"
+
+Classify the reply's OWN verb — what the reply itself commands, independent of any particular item:
+- "approve": the reply itself commands the action to RUN — "send it", "go ahead and send", "do it", "book it", "approved".
+- "reject": the reply itself commands cancel/discard — "reject both", "cancel", "don't send", "scrap it", "discard the calendar one".
+- "edit": the reply asks for a CHANGE before proceeding — "make it shorter", "change the time to 6pm". Put the change in "change".
+- "skip": the reply defers navigation explicitly — "skip", "skip this one".
+- "none": the reply expresses NO verb of its own — it merely AFFIRMS the question ("yes", "yeah go ahead" as bare assent) or SELECTS/IDENTIFIES items ("both", "all of them", "the calendar one", "the one to Timmy", "yes, that's the budget one"). A verb comes ONLY from the reply's own words. When in doubt between "none" and a verb, choose "none".
+- "unrelated": the reply is about something else entirely ("what's the weather?", "show me my inbox").
+
+ALSO judge "hedged": true when the reply is anything short of COMMITTED — it defers/hedges/postpones ("maybe", "perhaps", "later", "not now", "hold off", "do them all later", "maybe after lunch", conditional/future framing) OR it is a non-committal casual token or deflection ("ok", "okay", "k", "sure", "cool", "fine", "alright", "why not", "I guess", "I guess so", "up to you", "whatever you think", "if you think so") — even if it also affirms, selects, or commands. A hedged or casual reply is never a fireable go-ahead. COMMITTED replies → false: the deliberate "yes", "yeah go ahead", "go for it", "do it", "both", "reject both", "the calendar one".
+
+Respond with JSON only:
+{{"verb": "approve|reject|edit|skip|none|unrelated", "hedged": true|false, "change": "<the requested change, or empty unless verb is edit>"}}"""
+
+
+async def resolve_answer_verb(
+    user_message: str,
+    question: str,
+    recent_context: str = "",
+) -> AnswerVerbResolution:
+    """Classify the master's ANSWER to an open question — CARD-AGNOSTICALLY (step-2.1 root
+    fix): the judge never sees card facts, so the verb cannot vary by which card it was judged
+    against (the run-varying unclear/unrelated/hallucinated-approve class is dead). A bare
+    affirmative or bare selection is "none" — it never manufactures a verb; the consume layer
+    applies the question's carried intent. Failure → verb="none" + hedged=True (a resolver
+    failure can only RE-CONFIRM, never dispatch)."""
+    if _is_bare_filler(user_message):
+        logger.info("answer_verb_resolved", verb="none", hedged=True, has_change=False,
+                    floor="bare_filler")
+        return AnswerVerbResolution(verb="none", hedged=True)
+    # The question/context are deliberately NOT shown to the model (nothing to borrow a verb
+    # from — the borrowing failure was live-proven); the signature keeps them for telemetry.
+    prompt = _ANSWER_VERB_PROMPT.format(user_message=user_message.strip())
+    try:
+        response = await llm_gateway.complete(
+            messages=[{"role": "user", "content": prompt}],
+            task_type="classification",
+            force_model="decision",       # the same strong slot — this gates dispatch
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            tool_name_context="answer_verb_resolve",
+        )
+        data = json.loads(response["choices"][0]["message"].get("content") or "")
+        verb = data.get("verb")
+        if verb not in _VALID_ANSWER_VERBS:
+            verb = "none"
+        change = (data.get("change") or "").strip() if verb == "edit" else ""
+        if verb == "edit" and not change:
+            verb = "none"                 # an edit with no concrete change is not actionable
+        hedged = bool(data.get("hedged", False))
+        logger.info("answer_verb_resolved", verb=verb, hedged=hedged, has_change=bool(change))
+        return AnswerVerbResolution(verb=verb, hedged=hedged, change=change)
+    except Exception as exc:  # noqa: BLE001 — a failed judge can only re-confirm
+        logger.warning("answer_verb_resolver_failed", error=f"{type(exc).__name__}: {exc}")
+        return AnswerVerbResolution(verb="none", hedged=True)

@@ -1405,7 +1405,8 @@ def _conversation_referent(messages: list) -> dict | None:
             return {"type": "question", "ids": [str(i) for i in meta.get("candidate_ids") or []],
                     "intent": meta.get("intent") or "approve", "solicited": True,
                     "offer_pending": offer_seen, "question_id": getattr(m, "id", None),
-                    "change": meta.get("change") or ""}
+                    "change": meta.get("change") or "",
+                    "text": m.content if isinstance(m.content, str) else ""}
         if mtype == "approval" and meta.get("approval_ids"):
             return {"type": "approval", "ids": [str(i) for i in meta["approval_ids"]],
                     "solicited": bool(meta.get("solicited")), "offer_pending": offer_seen}
@@ -1509,8 +1510,38 @@ def _multi_resolution_reply(results: list, verb: str, h: str) -> str:
     return f"Here's how that went, {h}: " + "; ".join(parts) + "."
 
 
+def _dispatch_consent_gate(message: str, targets: list, hedged: bool, intent: str, h: str) -> dict | None:
+    """Step-2.1 — THE one consent gate every dispatch surface passes IMMEDIATELY before
+    resolve_and_dispatch (both the direct path and the question-consume path): a HEDGED answer
+    re-confirms (a deferral is never a fireable go-ahead), and a message naming something a
+    target ISN'T re-confirms (the wrong-card seal, per target). Returns the re-confirm update
+    (an OPEN question) or None → proceed. Structural — no reply is ever a dispatch substitute."""
+    from app.approvals_service import describe_card
+
+    reason = ""
+    if hedged:
+        reason = "hedged"
+    else:
+        for t in targets:
+            if _confirm_worthy_mismatch(message, t):
+                reason = "naming_mismatch"
+                break
+    if not reason:
+        return None
+    if len(targets) == 1:
+        reply = (f"Just to be sure, {h} — the pending one here is {describe_card(targets[0])}. "
+                 f"A clear word either way and I'll act on it.")
+    else:
+        named = "; ".join(describe_card(t) for t in targets[:5])
+        reply = f"To be precise, {h} — {named}. A clear word on which, and I'll act on it."
+    logger.info("dispatch_consent_gate_blocked", reason=reason, n=len(targets))
+    return {"messages": [_question_message(reply, intent, [t.approval_id for t in targets])],
+            "final_response": reply, "card_handled": True}
+
+
 async def _resolve_conversation_target(intent: str, message: str, resolved_via: str,
-                                        h: str, live: list, anchored: bool) -> dict:
+                                        h: str, live: list, anchored: bool,
+                                        hedged: bool = False) -> dict:
     """A2 s2 — resolve consent against the CONVERSATION's target (the F1-linked live cards of
     the most recent approval message). The seal's invariants, re-keyed:
       - >1 live linked target → refuse HONESTLY naming the choices (B1 owns disambiguation);
@@ -1551,6 +1582,10 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
         return {"messages": [_question_message(reply, "approve", [target.approval_id])],
                 "final_response": reply, "card_handled": True}
 
+    gate = _dispatch_consent_gate(message, [target], hedged, intent, h)
+    if gate is not None:
+        return gate
+
     outcome = await resolve_and_dispatch(
         target.approval_id, intent, resolved_via,
         {"approved": intent == "approve"}, ground_thread=False,
@@ -1585,22 +1620,17 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
     an abandon that releases the turn to the agent. The spent question is stamped in place (R1)."""
     from app.agent.answer_consumption import resolve_answer
     from app.agent.approval_dispatch import resolve_and_dispatch
-    from app.agent.runner import _judge_presented, _load_approval_by_id
+    from app.agent.decision_resolver import resolve_answer_verb
+    from app.agent.runner import _load_approval_by_id
 
     if not ref["ids"]:
         return {}  # CH-8 keeps 0-candidate floors untagged; a degenerate tag → agent turn
 
-    recent: list[str] = []
-    for m in (state.get("messages") or [])[-6:]:
-        if isinstance(m, HumanMessage) and isinstance(m.content, str):
-            recent.append(f"User: {m.content}")
-        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-            recent.append(f"Assistant: {m.content}")
-    logger.info("card_resolution_judge_entered", judge_id=ref["ids"][0], live=-1)
-    judged = await _judge_presented(ref["ids"][0], message, "\n".join(recent),
-                                    require_pending=False)
-    if judged is None:
-        return {}
+    # Step-2.1 root fix — the VERB is judged CARD-AGNOSTICALLY (the answer's own words only;
+    # never against a single card's facts, which made bare selections run-varying and let a
+    # hallucinated approve override a carried reject). Fail-open = none+hedged → re-confirm.
+    logger.info("card_resolution_judge_entered", judge_id="answer_verb", live=-1)
+    res = await resolve_answer_verb(message, ref.get("text") or "")
 
     # Consent scope (review HIGH-1): "both"/"all"/bare answers act on the choices the QUESTION
     # NAMED — never the whole thread. The widened conversation universe exists ONLY so an
@@ -1609,14 +1639,13 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
 
     # CH-9 backstop — an offer MORE RECENT than the question owns a bare affirmative (R3
     # suppresses new offers while a question is open; this guards any residue).
-    if ref["offer_pending"] and judged.intent == "approve":
+    if ref["offer_pending"] and res.verb in ("approve", "none"):
         from app.agent.approval_essentials import card_names_any_essential
         if not any(card_names_any_essential(message, c.tool_name, c.tool_args or {}) for c in live):
             logger.info("question_offer_precedence")
             return {"card_handled": False}
 
-    decision = resolve_answer(message, live, judged.intent, ref["intent"],
-                              hedged=bool(getattr(judged, "hedged", False)))
+    decision = resolve_answer(message, live, res.verb, ref["intent"], hedged=res.hedged)
     if decision.action == "confirm" and decision.reason == "no_match":
         # CH-4 reach — the answer named a kind/name absent from the question's set: try the
         # WIDENED universe (every approval linkage in the conversation). Only an explicit
@@ -1630,8 +1659,7 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
         ordered = [i for i in ids if not (i in seen or seen.add(i))]
         widened = await _fetch_queued_cards(ordered)
         if len(widened) > len(live):
-            wide = resolve_answer(message, widened, judged.intent, ref["intent"],
-                                  hedged=bool(getattr(judged, "hedged", False)))
+            wide = resolve_answer(message, widened, res.verb, ref["intent"], hedged=res.hedged)
             if wide.action == "dispatch" and wide.reason == "narrowed_singleton":
                 decision, live = wide, widened
                 logger.info("question_reach_beyond_set", target=wide.selection[0])
@@ -1675,7 +1703,7 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
             named = "; ".join(describe_card(by_id[i]) for i in decision.selection if i in by_id)
             reply = f"Which one should I change, {h} — {named}?"
             q = _question_message(reply, "edit", list(decision.selection),
-                                  change=judged.change or ref.get("change") or "")
+                                  change=res.change or ref.get("change") or "")
             return {"messages": [*stamp_msgs, q], "final_response": reply, "card_handled": True}
         row = await _load_approval_by_id(decision.selection[0])
         if row is None:
@@ -1685,10 +1713,16 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
         from app.agent.runner import _PresentedJudgment
         re_judged = _PresentedJudgment(approval_id=decision.selection[0], row=row,
                                        intent="edit",
-                                       change=judged.change or ref.get("change") or "")
+                                       change=res.change or ref.get("change") or "")
         edit_out = await _card_edit_redraft(re_judged, message, resolved_via)
         edit_out["messages"] = [*stamp_msgs, *(edit_out.get("messages") or [])]
         return edit_out
+
+    gate = _dispatch_consent_gate(message, [by_id[i] for i in decision.selection if i in by_id],
+                                  res.hedged, decision.verb, h)
+    if gate is not None:
+        gate["messages"] = [*stamp_msgs, *gate["messages"]]
+        return gate
 
     results = []
     for aid in decision.selection:
@@ -1801,7 +1835,8 @@ async def card_resolution_node(state: AgentState) -> dict:
                 return {"card_context": _card_context_line(judged.row) if judged.row else "",
                         "card_handled": False}   # the agent answers the OFFER; card untouched
         return await _resolve_conversation_target(
-            intent, message, resolved_via, h, live, anchored=ref["solicited"])
+            intent, message, resolved_via, h, live, anchored=ref["solicited"],
+            hedged=bool(getattr(judged, "hedged", False)))
 
     if intent == "skip":
         reply = f"Skipped, {h}."

@@ -358,3 +358,42 @@ def test_kind_qualified_all_over_homogeneous_set_dispatches():
                        [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")],
                        answer_verb="approve", carried_intent="approve")
     assert d.action == "dispatch" and len(d.selection) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 H2 root — a name/address selector matching ZERO candidates is        #
+# no_match (confirm/widen), never the lone-singleton fall-through               #
+# --------------------------------------------------------------------------- #
+def test_h2_unmatched_address_selector_is_no_match_not_singleton():
+    d = resolve_answer("approve the one to bob@x.com", [_email(to="chintu@gmail.com")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.reason == "no_match", f"lone-singleton leak: {d}"
+
+
+def test_h2_unmatched_quoted_selector_is_no_match():
+    d = resolve_answer("send the 'Quarterly Roadmap' one", [_email(subject="Lunch Invitation")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.reason == "no_match", f"lone-singleton leak: {d}"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 — "none" (committed assent/selection, card-agnostic judge) uses the  #
+# carried intent; the non-committal boundary lives on the HEDGED axis           #
+# --------------------------------------------------------------------------- #
+def test_none_unhedged_singleton_dispatches_carried_verb():
+    """Bare committed 'yes' to a reject question: verb=none, hedged=False → the carried
+    reject dispatches (the reviewer's inversion red-bar at resolver level)."""
+    d = resolve_answer("yes", [_email()], answer_verb="none", carried_intent="reject")
+    assert d.action == "dispatch" and d.verb == "reject" and d.selection == ("email",)
+
+
+def test_none_hedged_reconfirms():
+    d = resolve_answer("hmm, maybe", [_email()], answer_verb="none", carried_intent="approve",
+                       hedged=True)
+    assert d.action == "confirm" and d.selection == ()
+
+
+def test_unclear_still_noncommittal_for_the_direct_vocabulary():
+    """The old direct-judge vocabulary keeps its F4 meaning: unclear + no selector → re-ask."""
+    d = resolve_answer("ok", [_email()], answer_verb="unclear", carried_intent="approve")
+    assert d.action == "confirm" and d.reason == "noncommittal"

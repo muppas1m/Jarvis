@@ -128,7 +128,7 @@ async def test_i2_i_mean_both_consumes_and_dispatches_both(monkeypatch):
                      {"event_id": "e", "title": "Lunch with friends", "start_iso": "2026-07-19T17:00:00-04:00"})
     r2 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "unclear")                             # selection-only answer
+    _verb(monkeypatch, "none")                                 # selection-only answer: no verb
     q = AIMessage(content="There are 2 of those pending, Sir — which one did you mean?",
                   id="q-i2b",   # the graph's add_messages assigns ids; the R1 stamp keys on it
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
@@ -154,7 +154,8 @@ async def test_i3_unanchored_confirm_is_a_question_and_approved_consumes(monkeyp
     thread = f"web:{_MARK}-i3"
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "approve")
+    _judge(monkeypatch, "approve")                             # turn 1 (direct path)
+    _verb(monkeypatch, "approve")                              # turn 2 ("approved" = explicit verb)
     try:
         # turn 1: bare "Send it" on an UNSOLICITED mint → the confirm must be a tagged question
         out1 = await nodes.card_resolution_node(
@@ -203,7 +204,7 @@ async def test_ch9_offer_after_question_owns_bare_yes(monkeypatch):
     thread = f"web:{_MARK}-ch9"
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "approve")
+    _verb(monkeypatch, "none")                                 # bare assent → no verb of its own
     q = AIMessage(content="Just to confirm, Sir — approve the email?",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1], "kind": ""}})
@@ -245,7 +246,7 @@ async def test_ch6_mixed_batch_reply_names_per_target_results(monkeypatch):
     thread = f"web:{_MARK}-ch6"
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
-    _judge(monkeypatch, "unclear")
+    _verb(monkeypatch, "none")
 
     async def fake(approval_id, action, resolved_via, decision=None, *, ground_thread=True):
         if str(approval_id) == r2:                             # r2 was resolved on Telegram
@@ -276,7 +277,7 @@ async def test_hedged_selection_reconfirms_at_the_node(monkeypatch):
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "unclear", hedged=True)
+    _verb(monkeypatch, "none", hedged=True)
     q = AIMessage(content="Which one?",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1, r2], "kind": ""}})
@@ -330,7 +331,7 @@ async def test_both_never_dispatches_cards_the_question_did_not_name(monkeypatch
     r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
     r3 = await _seed(thread, "email_send", {"to": "joe@x.com", "subject": "Old Plan", "body": "z"})  # older, unnamed
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "unclear")
+    _verb(monkeypatch, "none")
     q = AIMessage(content="Which one did you mean — or both?", id="q-scope",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1, r2], "kind": ""}})
@@ -354,7 +355,7 @@ async def test_committed_yes_to_single_candidate_question_dispatches_despite_oth
     r_other = await _seed(thread, "calendar_update",
                           {"event_id": "e", "title": "Standup", "start_iso": "2026-07-20T13:00:00-04:00"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "approve")
+    _verb(monkeypatch, "none")                                 # bare assent → carried approve governs
     q = AIMessage(content="Just to confirm, Sir — approve the email to chintu?", id="q-anchor",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1], "kind": ""}})
@@ -377,7 +378,7 @@ async def test_kind_selection_still_reaches_beyond_the_questions_set(monkeypatch
     r_cal = await _seed(thread, "calendar_update",
                         {"event_id": "e", "title": "Standup", "start_iso": "2026-07-20T13:00:00-04:00"})
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "unclear")
+    _verb(monkeypatch, "none")
     q = AIMessage(content="Just to confirm — approve the email?", id="q-reach",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1], "kind": ""}})
@@ -397,7 +398,7 @@ async def test_multi_reject_reply_says_discarded_not_failed(monkeypatch):
     thread = f"web:{_MARK}-rej"
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
     r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
-    _judge(monkeypatch, "reject")
+    _verb(monkeypatch, "reject")
 
     async def fake(approval_id, action, resolved_via, decision=None, *, ground_thread=True):
         # a REAL reject outcome: status=rejected, success=False (nothing sends on a discard)
@@ -428,7 +429,7 @@ async def test_answer_to_fully_resolved_question_gets_honest_ack(monkeypatch):
     r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"},
                      status="approved")                          # resolved on another channel
     rec = _spy_dispatch(monkeypatch)
-    _judge(monkeypatch, "approve")
+    _verb(monkeypatch, "none")
     q = AIMessage(content="Just to confirm — approve the email?", id="q-gone",
                   additional_kwargs={"jarvis": {"type": "question", "state": "open",
                                                 "intent": "approve", "candidate_ids": [r1], "kind": ""}})
@@ -447,3 +448,90 @@ def test_question_message_carries_change():
     m = nodes._question_message("Which one should I change?", "edit", ["a", "b"],
                                 change="make it shorter")
     assert m.additional_kwargs["jarvis"]["change"] == "make it shorter"
+
+
+# --------------------------------------------------------------------------- #
+# Step-2.1 — the ONE consent gate on BOTH dispatch paths                        #
+# --------------------------------------------------------------------------- #
+def _verb(monkeypatch, verb, hedged=False, change=""):
+    """Pin the card-agnostic answer-verb judge (the consume path's verb source)."""
+    from types import SimpleNamespace as NS
+
+    async def fake(user_message, question, recent_context=""):
+        return NS(verb=verb, hedged=hedged, change=change)
+    import app.agent.decision_resolver as dr
+    monkeypatch.setattr(dr, "resolve_answer_verb", fake)
+
+
+@pytest.mark.asyncio
+async def test_h1_hedged_direct_send_reconfirms(monkeypatch):
+    """'send it, maybe after lunch' on a SOLICITED card: judge says approve+hedged → the
+    DIRECT path must re-confirm, never dispatch (the gate lives on both surfaces)."""
+    thread = f"web:{_MARK}-h1"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge(monkeypatch, "approve", hedged=True)
+    try:
+        out = await nodes.card_resolution_node(
+            _state("send it, maybe after lunch", [_linked([r1], solicited=True)], thread))
+        assert rec["calls"] == [], f"a hedged send dispatched: {rec['calls']}"
+        assert _question_msgs(out), "the hedged re-confirm must be an open question"
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_h2_wrong_card_name_on_consume_never_lone_singleton(monkeypatch):
+    """'approve the one to bob@x.com' answering a question whose only live card is to chintu:
+    a name matching ZERO candidates must re-confirm — never the lone-singleton dispatch."""
+    thread = f"web:{_MARK}-h2"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _verb(monkeypatch, "approve")
+    q = AIMessage(content="Just to confirm — approve the email to chintu?", id="q-h2",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [r1], "kind": ""}})
+    try:
+        out = await nodes.card_resolution_node(
+            _state("approve the one to bob@x.com", [_linked([r1], solicited=False), q], thread))
+        assert rec["calls"] == [], f"wrong-card name dispatched: {rec['calls']}"
+        assert out.get("card_handled") is True                  # re-confirm, not a silent agent turn
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_reject_inversion_dead_bare_yes_to_reject_question_rejects(monkeypatch):
+    """(1)'s node-level seal: 'yes' consenting to a REJECT question → verb none → the CARRIED
+    reject dispatches. It must never send."""
+    thread = f"web:{_MARK}-inv"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _verb(monkeypatch, "none")                                 # card-agnostic: bare assent = none
+    q = AIMessage(content="Just to confirm, Sir — discard the email to chintu?", id="q-inv",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "reject", "candidate_ids": [r1], "kind": ""}})
+    try:
+        await nodes.card_resolution_node(_state("yes", [_linked([r1], solicited=False), q], thread))
+        assert rec["calls"] == [(r1, "reject")], f"the carried reject did not govern: {rec['calls']}"
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_hedged_consume_dispatch_blocked_by_the_gate(monkeypatch):
+    """Belt at the gate: even if a hedged answer reached the dispatch branch, the ONE gate
+    re-confirms ('do them all later' → hedged → zero resolve_and_dispatch)."""
+    thread = f"web:{_MARK}-hgate"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
+    rec = _spy_dispatch(monkeypatch)
+    _verb(monkeypatch, "none", hedged=True)
+    q = AIMessage(content="Which one — or both?", id="q-hgate",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [r1, r2], "kind": ""}})
+    try:
+        await nodes.card_resolution_node(_state("do them all later", [_linked([r1, r2]), q], thread))
+        assert rec["calls"] == []
+    finally:
+        await _cleanup(thread)

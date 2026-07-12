@@ -54,6 +54,11 @@ _ALL_SELECTOR = re.compile(
 _KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
 _KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
 _CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
+# Step-2.1 H2 — name-selector PRESENCE detection (an address / quoted string in the answer is a
+# name-selection attempt even when it matches no candidate → no_match/confirm, never the bare
+# fall-through). Local copies keep this module a pure leaf.
+_EMAIL_ADDR = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.IGNORECASE)
+_QUOTED = re.compile(r"'([^']{2,80})'|\"([^\"]{2,80})\"")
 
 
 @dataclass(frozen=True)
@@ -97,7 +102,11 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
         if kind_hit or name_hit:
             matched.append(c.approval_id)
 
-    if want_cal or want_email or matched:
+    # H2 root: an address/quoted-string selector that matched NOTHING is still a selection
+    # ATTEMPT — it must land in filter (→ no_match → confirm/widen), never fall through to the
+    # bare branch where a lone live candidate would dispatch (the wrong-card send).
+    has_name_selector = bool(_EMAIL_ADDR.search(msg) or _QUOTED.search(msg))
+    if want_cal or want_email or matched or has_name_selector:
         return "filter", matched
     return "none", []
 
@@ -173,12 +182,13 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
         return ConsumeDecision("confirm", verb, (), tuple(ids), "no_match")
 
     # sel_kind == "none": a bare answer, no selector. F4 — a dispatch here must be EARNED by the
-    # answer itself: only a committed verb from the judge counts. A non-committal answer ("hmm
-    # maybe", "up to you", a bare "ok" — judged `unclear`) commits to nothing, and the carried
-    # intent can NEVER manufacture a dispatch from it (the selector-only fallback applies only when
-    # the answer expressed an actual selection — the all/filter branches above). Any carried verb,
-    # approve OR reject: "hmm maybe" manufactures no send and no discard — same bar every flow.
-    if answer_verb not in _VERBS:
+    # answer itself. Two vocabularies feed this (step-2.1): the card-agnostic answer judge returns
+    # "none" for COMMITTED assent/selection ("yes" consenting to the ask) — its non-committal
+    # boundary lives on the HEDGED axis (fillers come back hedged=True and the hedge gate above
+    # already re-confirmed). The direct judge's "unclear" (and anything else non-verb) stays
+    # non-committal here: the carried intent can never manufacture a dispatch from it — any
+    # carried verb, approve OR reject ("hmm maybe" manufactures no send and no discard).
+    if answer_verb not in _VERBS and answer_verb != "none":
         return ConsumeDecision("confirm", carried_intent, (), tuple(ids), "noncommittal")
     if len(candidates) == 1:
         return ConsumeDecision("dispatch", verb, (ids[0],), (), "singleton")
