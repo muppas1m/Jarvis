@@ -44,6 +44,21 @@ def _present(prose_norm: str, value: str) -> bool:
     return bool(v) and re.search(rf"(?<![a-z0-9]){re.escape(v)}(?![a-z0-9])", prose_norm) is not None
 
 
+# F5.2 — ≤4-char dictionary/function-word local-parts that must NOT count as naming a recipient
+# via the local-part shortcut: "yes I *will*" word-matched will@company.com and fabricated a
+# selection/naming the master never made. The full-address match below is untouched — it is
+# always sufficient evidence. Curated, not exhaustive: common auxiliaries/function words + the
+# name-homograph class the red-team surfaced (will/may/mark/bill). Extend on evidence.
+_LOCAL_PART_STOPWORDS = frozenset({
+    "will", "may", "can", "mark", "bill", "the", "and", "for", "not", "all", "one", "two",
+    "yes", "are", "was", "has", "had", "let", "get", "got", "see", "say", "now", "then",
+    "them", "they", "you", "your", "our", "out", "off", "who", "what", "when", "how", "why",
+    "that", "this", "with", "from", "just", "must", "sent", "send", "also", "some", "any",
+    "more", "most", "very", "much", "many", "such", "same", "well", "back", "even", "here",
+    "okay", "sure", "fine", "good", "done", "soon",
+})
+
+
 def _named_recipient(prose_norm: str, value: str) -> bool:
     addr = parseaddr(value or "")[1].strip().lower() or _norm(value)
     if not addr:
@@ -51,6 +66,8 @@ def _named_recipient(prose_norm: str, value: str) -> bool:
     if addr in prose_norm:                     # full addresses are unambiguous as substrings
         return True
     local = addr.split("@")[0]
+    if len(local) <= 4 and local in _LOCAL_PART_STOPWORDS:
+        return False                           # F5.2 — a common word is not evidence of naming
     return len(local) >= 3 and _present(prose_norm, local)  # "bob" names bob@x.com; 2-char too weak
 
 

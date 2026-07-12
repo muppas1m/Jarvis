@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (117 modules)
+## `app/` — the system (118 modules)
 
 ```
 app/
@@ -24,6 +24,7 @@ app/
 │   │   ├── readiness_tool.py — Readiness intelligence (Phase 4.3) — "am I all set for [period]?"
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
+│   ├── answer_consumption.py — B1.0 F3 — the pure answer-consumption resolver (the seam-first core).
 │   ├── approval_dispatch.py — Generic execute-on-approve dispatcher (Phase 3 — Step 1).
 │   ├── approval_drain.py — Deploy-time drain of pre-cutover paused-at-interrupt() checkpoints (Phase 3).
 │   ├── approval_essentials.py — Approval-message essentials (A2 s1b — the Essentials-registry standard).
