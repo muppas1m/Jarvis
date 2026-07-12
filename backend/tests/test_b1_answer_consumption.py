@@ -309,3 +309,52 @@ def test_f52_floor_consequence_stopword_local_floors():
     assert not card_essentials_named("I've drafted the Q3 email to Will.", "email_send", args)
     # the full address still names it — the floor stands down on unambiguous evidence
     assert card_essentials_named("I've drafted the Q3 email to will@company.com.", "email_send", args)
+
+
+# --------------------------------------------------------------------------- #
+# Step 2 — the hedged axis (master's #4 call): a hedged answer NEVER dispatches #
+# --------------------------------------------------------------------------- #
+def test_hedged_selection_reconfirms_never_dispatches():
+    """'maybe do them all later' (judge: hedged selection) → re-confirm, never dispatch-all."""
+    d = resolve_answer("maybe do them all later", [_cal(), _email()],
+                       answer_verb="unclear", carried_intent="approve", hedged=True)
+    assert d.action == "confirm" and d.selection == () and d.reason == "hedged"
+
+
+def test_hedged_verb_reconfirms_too():
+    """'maybe send it' (judge: approve but hedged) on one card → re-confirm, never send."""
+    d = resolve_answer("maybe send it", [_email()],
+                       answer_verb="approve", carried_intent="approve", hedged=True)
+    assert d.action == "confirm" and d.selection == ()
+
+
+def test_unhedged_default_keeps_the_golden_path():
+    d = resolve_answer("both", [_cal(), _email()], answer_verb="unclear", carried_intent="approve")
+    assert d.action == "dispatch"          # the default (hedged=False) changes nothing
+
+
+# --------------------------------------------------------------------------- #
+# Step 2 — the INTERIM mixed-kind-all guard (B1.1 addendum): a kind-qualified   #
+# "all" over a set containing OTHER kinds re-confirms until B1.1 can scope it   #
+# --------------------------------------------------------------------------- #
+def test_kind_qualified_all_over_mixed_set_reconfirms():
+    """'approve both emails' over [e1,e2,cal] → confirm (never dispatches the calendar card)."""
+    d = resolve_answer("approve both emails, send them",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="Budget"), _cal()],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm", f"scope-exceeding all dispatched: {d}"
+    assert d.selection == () and d.reason == "mixed_kind_all"
+
+
+def test_bare_both_on_mixed_set_still_dispatches_all():
+    """The I2 golden: bare 'I mean both' (no kind qualifier) keeps the frozen dispatch-all."""
+    d = resolve_answer("I mean both", [_cal(), _email()], answer_verb="unclear", carried_intent="approve")
+    assert d.action == "dispatch" and len(d.selection) == 2
+
+
+def test_kind_qualified_all_over_homogeneous_set_dispatches():
+    """'both emails' when EVERY candidate is an email → the kind adds nothing → dispatch-all."""
+    d = resolve_answer("send both emails",
+                       [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "dispatch" and len(d.selection) == 2

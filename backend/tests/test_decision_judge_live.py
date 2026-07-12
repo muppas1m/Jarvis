@@ -152,3 +152,44 @@ async def test_headsup_leave_rejects(msg):
 async def test_headsup_question_does_not_draft(msg):
     res = await resolve_decision("draft_email_reply", _HEADSUP_ARGS, _HEADSUP_DESC, msg, _HEADSUP_CTX)
     assert res.intent != "approve", f"{msg!r} → approve (a question must NOT auto-draft)"
+
+
+# --------------------------------------------------------------------------- #
+# B1.0 step 2 — the judge contract for the question-consume path (live)         #
+# --------------------------------------------------------------------------- #
+_WHICH_CTX = (
+    "User: go ahead\n"
+    "Assistant: There are 2 of those pending, Sir — an update to the event 'Lunch with friends'; "
+    "an email to chintu@gmail.com about 'Lunch Invitation'. Which one did you mean?"
+)
+
+
+@pytest.mark.parametrize("msg", ["both", "all of them", "the calendar one", "the one to chintu"])
+async def test_selection_only_answer_is_unclear_never_unrelated(msg):
+    """Half (a): a selection-only answer to 'which one?' engages the question but commands no
+    verb → unclear (the consume layer applies the carried intent). unrelated would make the
+    resolver ABANDON — the F3 dependency."""
+    res = await resolve_decision("email_send",
+                                 {"to": "chintu@gmail.com", "subject": "Lunch Invitation"},
+                                 None, msg, _WHICH_CTX)
+    assert res.intent != "unrelated", f"{msg!r} judged unrelated: {res}"
+    assert res.intent in ("unclear", "approve"), f"{msg!r}: {res}"   # never a reject/edit guess
+
+
+@pytest.mark.parametrize("msg", ["maybe do them all later", "perhaps both, at some point",
+                                 "I guess we could send both later"])
+async def test_hedged_selection_is_flagged_hedged(msg):
+    """Half (b): a hedged selection carries hedged=True → the resolver re-confirms, never
+    dispatches (the master's #4 design call)."""
+    res = await resolve_decision("email_send",
+                                 {"to": "chintu@gmail.com", "subject": "Lunch Invitation"},
+                                 None, msg, _WHICH_CTX)
+    assert res.hedged is True, f"{msg!r} not flagged hedged: {res}"
+
+
+@pytest.mark.parametrize("msg", ["both", "yes, go ahead", "reject both"])
+async def test_committed_answers_are_not_hedged(msg):
+    res = await resolve_decision("email_send",
+                                 {"to": "chintu@gmail.com", "subject": "Lunch Invitation"},
+                                 None, msg, _WHICH_CTX)
+    assert res.hedged is False, f"{msg!r} wrongly hedged: {res}"

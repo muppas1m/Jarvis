@@ -66,7 +66,7 @@ async def test_card_context_line_reaches_the_judge(monkeypatch):
 
     async def _fake_resolve(tool_name, tool_args, description, message, context):
         captured["context"] = context
-        return SimpleNamespace(intent="unclear", change="")
+        return SimpleNamespace(intent="unclear", change="", hedged=False)
 
     monkeypatch.setattr(runner, "_load_approval_by_id", AsyncMock(return_value=row))
     monkeypatch.setattr(runner, "resolve_decision", _fake_resolve)

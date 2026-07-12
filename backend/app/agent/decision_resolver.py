@@ -50,6 +50,12 @@ _VALID_INTENTS = ("approve", "reject", "edit", "skip", "show_others", "unclear",
 class DecisionResolution:
     intent: Intent
     change: str = ""  # the requested edit, verbatim-ish, when intent == "edit"
+    # B1.0 step 2 — the committed-vs-hedged axis (master's design call): True when the reply
+    # DEFERS or hedges ("maybe", "maybe later", "perhaps", "I guess we could") even if it names a
+    # selection or sounds affirmative. A hedged answer makes the consume path RE-CONFIRM, never
+    # dispatch. Defaults False (a missing field never blocks a committed confirmation; the
+    # unclear-intent bar remains the primary non-consent guard).
+    hedged: bool = False
 
 
 _RESOLVER_PROMPT = """You are mediating a PENDING ACTION the assistant proposed and is waiting for the master to confirm BEFORE it runs. Using the recent conversation for context, classify the master's reply toward THIS action.
@@ -71,7 +77,7 @@ Choose exactly ONE intent:
 - "edit": the master wants THIS action CHANGED before it proceeds — e.g. "make it shorter", "use her name Priya", "change the recipient to X", "add that we'll be late", "more formal". Put the requested change in "change".
 - "skip": the master wants to DEFER this specific pending action for now and move on, WITHOUT cancelling it — e.g. "skip", "skip this", "next", "not now", "later", "come back to this". (Different from reject — skip leaves it pending; reject abandons it.)
 - "show_others": the master wants to know what OTHER pending approvals are waiting — e.g. "what else is pending?", "show me the other pending emails", "anything else waiting for me?". About the approval QUEUE specifically — NOT a general "show me my emails / calendar" request.
-- "unclear": the reply engages THIS action but is NOT a committed confirmation → re-ask. This is a PRINCIPLE, not a list: a BARE CASUAL TOKEN or low-commitment reaction that merely sounds affirmative does NOT commit to acting — "ok", "okay", "k", "yeah", "yup", "yep", "sure", "cool", "great", "perfect", "nice", "mm", "alright", "fine", "fine by me", "why not", AND any similar casual one-word-ish reaction you weren't shown here. Also a PASSIVE / DEFLECTING reply that hands the decision back to you — "I guess so", "whatever you think", "up to you", "if you think so" — or a vague topic echo that names the subject but commands nothing ("right, the Q3 numbers", "the Priya one"). A casual token only approves when BUILT INTO a clear command ("ok, send it", "yeah do it"). When a reply could go either way, RE-ASK — never guess "approve".
+- "unclear": the reply engages THIS action but is NOT a committed confirmation → re-ask. SELECTION-ONLY replies land HERE: when the assistant just asked WHICH of several pending actions the master means, a reply that only SELECTS — "both", "all of them", "the calendar one", "the one to Timmy" — is "unclear": it identifies, it does not consent. NEVER "unrelated" for such a reply, and NEVER "approve" (identification is not consent, even with a leading "yes"/"right" — "yes, that's the budget one" is "unclear"). This is a PRINCIPLE, not a list: a BARE CASUAL TOKEN or low-commitment reaction that merely sounds affirmative does NOT commit to acting — "ok", "okay", "k", "yeah", "yup", "yep", "sure", "cool", "great", "perfect", "nice", "mm", "alright", "fine", "fine by me", "why not", AND any similar casual one-word-ish reaction you weren't shown here. Also a PASSIVE / DEFLECTING reply that hands the decision back to you — "I guess so", "whatever you think", "up to you", "if you think so" — or a vague topic echo that names the subject but commands nothing ("right, the Q3 numbers", "the Priya one"). A casual token only approves when BUILT INTO a clear command ("ok, send it", "yeah do it"). When a reply could go either way, RE-ASK — never guess "approve".
 - "unrelated": the reply is about something ELSE entirely — a new question or topic not about this pending action (e.g. "what's on my calendar?", "show me my unread emails", "what's the weather?"). (The caller will ANSWER it and remind the master the action is still pending.)
 
 CRITICAL — the ONE test before you choose "approve": is the reply an UNAMBIGUOUS, COMMITTED confirmation or command to do THIS action — or just a casual reaction that happens to sound affirmative? If it is a casual reaction, RE-ASK ("unclear"); do NOT approve. A bare "ok" / "okay" / "k" / "yeah" / "yup" / "sure" / "cool" / "fine" / "alright" / "why not" / "fine by me" must NEVER fire an action on its own — on ANY flow. This is intentionally STRICT and IDENTICAL for a send and a delete (a casual token re-asks an email send too — only a real "yes"/"go ahead"/"that works"/"do it" approves it). These also never approve:
@@ -79,8 +85,10 @@ CRITICAL — the ONE test before you choose "approve": is the reply an UNAMBIGUO
 - A PASSIVE / DEFLECTING reply — "I guess so", "whatever you think", "up to you", "if you think so". Handing the decision back to YOU is not a yes.
 When in ANY doubt, "unclear" — the safe landing is always re-ask.
 
+ALSO judge one independent axis — "hedged": is the reply COMMITTED or does it HEDGE/DEFER? "hedged" is true when the reply defers or hedges — "maybe", "maybe later", "perhaps", "I guess we could", "possibly", "at some point", conditional/future framing — EVEN IF it names a selection or sounds affirmative ("maybe do them all later" → hedged true). A committed reply ("both", "yes", "go ahead", "reject it") → hedged false. This axis is independent of intent.
+
 Respond with JSON only:
-{{"intent": "approve|reject|edit|skip|show_others|unclear|unrelated", "change": "<the requested change, or empty unless intent is edit>"}}"""
+{{"intent": "approve|reject|edit|skip|show_others|unclear|unrelated", "change": "<the requested change, or empty unless intent is edit>", "hedged": true|false}}"""
 
 
 def _details(tool_args: dict, description: str | None) -> str:
@@ -127,8 +135,9 @@ async def resolve_decision(
         # An "edit" with no concrete change isn't actionable → ambiguous about the card.
         if intent == "edit" and not change:
             intent = "unclear"
-        logger.info("decision_resolved", intent=intent, has_change=bool(change))
-        return DecisionResolution(intent=intent, change=change)
+        hedged = bool(data.get("hedged", False))
+        logger.info("decision_resolved", intent=intent, has_change=bool(change), hedged=hedged)
+        return DecisionResolution(intent=intent, change=change, hedged=hedged)
     except Exception as exc:  # noqa: BLE001 — never auto-approve on a resolver failure
         logger.warning("decision_resolver_failed", error=f"{type(exc).__name__}: {exc}")
         return DecisionResolution(intent="unrelated")

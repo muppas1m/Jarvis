@@ -102,7 +102,7 @@ async def test_approve_goes_through_claim(monkeypatch):
     assert rec["call"] == ("uuid-1", "approve", "web", {"approved": True})  # the LIVE target, claimed
     assert rec["ground_thread"] is False  # no double-write: the node owns the thread reply
     assert out["card_handled"] is True
-    assert out["card_outcome"]["decision_status"] == "approved"
+    assert out["card_outcomes"][0]["decision_status"] == "approved"
     assert "Sent to p@x.com" in out["final_response"]
     # the reply is also written to messages → it persists in the checkpoint (kills D2)
     assert out["messages"] and out["messages"][0].content == out["final_response"]
@@ -116,7 +116,7 @@ async def test_approve_lost_claim_no_double_dispatch(monkeypatch):
     out = await nodes.card_resolution_node(_state())
     assert out["card_handled"] is True
     # a lost claim emits NO flip event (stale), and never re-dispatches
-    assert out["card_outcome"]["decision_status"] == "stale"
+    assert out["card_outcomes"][0]["decision_status"] == "stale"
     assert "already taken care of" in out["final_response"]
 
 
@@ -128,7 +128,7 @@ async def test_reject(monkeypatch):
         kind="email", status="rejected", thread_id="email:gmail:msg-1"))
     out = await nodes.card_resolution_node(_state(user_message="no, cancel it"))
     assert rec["call"][1] == "reject" and rec["call"][3] == {"approved": False}
-    assert out["card_outcome"]["decision_status"] == "rejected"
+    assert out["card_outcomes"][0]["decision_status"] == "rejected"
     assert out["card_handled"] is True
 
 
@@ -147,7 +147,7 @@ async def test_skip_nav(monkeypatch):
     _patch_judge(monkeypatch, _judgment("skip"))
     out = await nodes.card_resolution_node(_state(user_message="not now"))
     assert out["card_handled"] is True
-    assert out["card_outcome"]["nav"] == "skip"
+    assert out["card_outcomes"][0]["nav"] == "skip"
 
 
 # --- stale / gone card → brief ack -------------------------------------------
@@ -159,7 +159,7 @@ async def test_stale_card_acks(monkeypatch):
     _patch_targets(monkeypatch, [])            # the linked card is already resolved
     out = await nodes.card_resolution_node(_state())
     assert out["card_handled"] is True
-    assert out["card_outcome"]["decision_status"] == "stale"
+    assert out["card_outcomes"][0]["decision_status"] == "stale"
     assert "already taken care of" in out["final_response"]
 
 
@@ -183,8 +183,8 @@ async def test_edit_redraft(monkeypatch):
 
     out = await nodes.card_resolution_node(_state(user_message="make it shorter"))
     assert out["card_handled"] is True
-    assert out["card_outcome"]["decision_status"] == "discarded"
-    assert out["card_outcome"]["new_card"]["approval_id"] == "uuid-2"
+    assert out["card_outcomes"][0]["decision_status"] == "discarded"
+    assert out["card_outcomes"][0]["new_card"]["approval_id"] == "uuid-2"
     assert "revised" in out["final_response"].lower()
 
 
@@ -228,13 +228,13 @@ def test_route_after_card():
 
 
 def test_card_outcome_events():
-    assert runner._card_outcome_events("t", {}) == []
-    ap = runner._card_outcome_events("t", {"approval_id": "a", "decision_status": "approved"})
+    assert runner._card_outcome_events("t", []) == []
+    ap = runner._card_outcome_events("t", [{"approval_id": "a", "decision_status": "approved"}])
     assert ap[0]["type"] == "decision_resolved" and ap[0]["content"]["status"] == "approved"
-    sk = runner._card_outcome_events("t", {"approval_id": "a", "nav": "skip"})
+    sk = runner._card_outcome_events("t", [{"approval_id": "a", "nav": "skip"}])
     assert sk[0]["type"] == "presented_nav"
     ed = runner._card_outcome_events(
-        "t", {"approval_id": "a", "decision_status": "discarded", "new_card": {"x": 1}})
+        "t", [{"approval_id": "a", "decision_status": "discarded", "new_card": {"x": 1}}])
     assert [e["type"] for e in ed] == ["decision_resolved", "approval_required"]
     # a stale (lost-claim) outcome emits NO flip event
-    assert runner._card_outcome_events("t", {"approval_id": "a", "decision_status": "stale"}) == []
+    assert runner._card_outcome_events("t", [{"approval_id": "a", "decision_status": "stale"}]) == []

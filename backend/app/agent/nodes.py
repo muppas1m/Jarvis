@@ -1301,7 +1301,7 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
     if await resolve_approval(aid, "discard", resolved_via) is None:
         reply = f"That one's already taken care of, {h}."
         return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_outcome": {"approval_id": aid, "decision_status": "stale", "thread_id": tid},
+                "card_outcomes": [{"approval_id": aid, "decision_status": "stale", "thread_id": tid}],
                 "card_handled": True}
 
     payload = judged.row.payload or {}
@@ -1319,13 +1319,15 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
         reply = f"I couldn't revise that one, {h} — ask me again and I'll redo it."
         # The old card is already discarded → emit the flip so the UI greys it; no new card.
         return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_outcome": {"approval_id": aid, "decision_status": "discarded", "thread_id": tid},
+                "card_outcomes": [{"approval_id": aid, "decision_status": "discarded", "thread_id": tid}],
                 "card_handled": True}
 
     reply = f"I've revised that reply, {h} — the new draft is queued for your approval."
-    return {"messages": [AIMessage(content=reply)], "final_response": reply,
-            "card_outcome": {"approval_id": aid, "decision_status": "discarded",
-                             "thread_id": tid, "new_card": card},
+    new_id = str((card or {}).get("approval_id") or "")
+    q = _question_message(reply, "approve", [new_id]) if new_id else AIMessage(content=reply)
+    return {"messages": [q], "final_response": reply,
+            "card_outcomes": [{"approval_id": aid, "decision_status": "discarded",
+                               "thread_id": tid, "new_card": card}],
             "card_handled": True}
 
 
@@ -1394,6 +1396,16 @@ def _conversation_referent(messages: list) -> dict | None:
         if mtype == "briefing":
             offer_seen = True
             continue
+        if mtype == "question":
+            # B1.0 R1 — only an OPEN question anchors; a spent one (consumed/abandoned — the
+            # in-place state stamp) is SKIPPED and the walk continues to the live approval
+            # linkage (the CH-1 fix: a spent question can never re-anchor or strand cards).
+            if meta.get("state") != "open":
+                continue
+            return {"type": "question", "ids": [str(i) for i in meta.get("candidate_ids") or []],
+                    "intent": meta.get("intent") or "approve", "solicited": True,
+                    "offer_pending": offer_seen, "question_id": getattr(m, "id", None),
+                    "change": meta.get("change") or ""}
         if mtype == "approval" and meta.get("approval_ids"):
             return {"type": "approval", "ids": [str(i) for i in meta["approval_ids"]],
                     "solicited": bool(meta.get("solicited")), "offer_pending": offer_seen}
@@ -1438,6 +1450,65 @@ def _clean_resolution_reply(outcome: Any, intent: str, target: Any, h: str) -> s
     return f"Done — {clean}, {h}." if clean else f"Done, {h}."
 
 
+def _question_message(text: str, intent: str, candidate_ids: list, kind: str = "",
+                      change: str = "") -> AIMessage:
+    """B1.0 D-B1-1 — a first-class jarvis QUESTION: Jarvis's own ask, visible to BOTH layers.
+    The follow-up answer resolves the question that asked it (never a re-derived loop).
+    `change` rides on an EDIT-narrowing question so a selector-only answer ("the Timmy one")
+    still applies the ORIGINAL requested change, not the selector text."""
+    return AIMessage(content=text, additional_kwargs={"jarvis": {
+        "type": "question", "state": "open", "intent": intent,
+        "candidate_ids": [str(i) for i in candidate_ids], "kind": kind, "change": change}})
+
+
+def _stamp_question(state: dict, question_id, new_state: str) -> AIMessage | None:
+    """R1 — the in-place lifecycle stamp: the SAME message id with jarvis.state flipped; the
+    add_messages reducer replaces by id, so the keep-guard keeps the state with the message."""
+    for m in state.get("messages") or []:
+        if getattr(m, "id", None) == question_id and question_id is not None:
+            meta = dict(((getattr(m, "additional_kwargs", None) or {}).get("jarvis")) or {})
+            meta["state"] = new_state
+            return AIMessage(content=m.content, id=m.id,
+                             additional_kwargs={**(m.additional_kwargs or {}), "jarvis": meta})
+    return None
+
+
+def _has_open_question(messages: list) -> bool:
+    for m in messages or []:
+        meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+        if meta.get("type") == "question" and meta.get("state") == "open":
+            return True
+    return False
+
+
+def _multi_resolution_reply(results: list, verb: str, h: str) -> str:
+    """CH-6 — per-target honesty: every card's OWN outcome is named; a mixed batch never
+    collapses into one success line (no hallucinated actions)."""
+    from app.approvals_service import describe_card
+
+    if len(results) == 1:
+        card, oc = results[0]
+        if oc.status == "not_claimed":
+            return f"That one's already taken care of, {h}."
+        return _clean_resolution_reply(oc, verb, card, h)
+    parts = []
+    for card, oc in results:
+        subj = describe_card(card)
+        if oc.status == "not_claimed":
+            parts.append(f"{subj} was already handled")
+        elif verb == "reject":
+            # a CLAIMED reject IS the discard (rejects carry success=False by design — nothing
+            # sends on a discard); it must never read as a failure.
+            parts.append(f"discarded {subj}")
+        elif oc.uncertain:
+            parts.append(f"{subj} — I couldn't confirm it went through")
+        elif not oc.success:
+            parts.append(f"{subj} failed")
+        else:
+            parts.append(f"{subj} — done")
+    return f"Here's how that went, {h}: " + "; ".join(parts) + "."
+
+
 async def _resolve_conversation_target(intent: str, message: str, resolved_via: str,
                                         h: str, live: list, anchored: bool) -> dict:
     """A2 s2 — resolve consent against the CONVERSATION's target (the F1-linked live cards of
@@ -1454,18 +1525,20 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
     if len(live) > 1:
         choices = "; ".join(describe_card(c) for c in live[:5])
         reply = (f"There are {len(live)} of those pending, {h} — {choices}. "
-                 f"Which one did you mean?")
+                 f"Which one did you mean — or both?")
         logger.info("card_resolution_refused", intent=intent, live=len(live), reason="multiple")
-        return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_handled": True}
+        # B1.0 — the refuse IS a first-class question: the answer ("both" / "the calendar one")
+        # resolves THIS ask, with the original intent carried (reject stays reject).
+        return {"messages": [_question_message(reply, intent, [c.approval_id for c in live])],
+                "final_response": reply, "card_handled": True}
 
     target = live[0]
     if _confirm_worthy_mismatch(message, target):
         reply = (f"Just to be sure, {h} — the pending one here is {describe_card(target)}. "
                  f"Did you mean that one?")
         logger.info("card_resolution_confirm", intent=intent, reason="naming_backstop")
-        return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_handled": True}
+        return {"messages": [_question_message(reply, intent, [target.approval_id])],
+                "final_response": reply, "card_handled": True}
 
     from app.agent.approval_essentials import card_essentials_named
     bare = not card_essentials_named(message, target.tool_name, target.tool_args or {})
@@ -1473,8 +1546,10 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
         reply = (f"Just to confirm, {h} — approve {describe_card(target)}? "
                  f"Say the word and I'll send it on its way.")
         logger.info("card_resolution_confirm", intent=intent, reason="unanchored_bare_affirmative")
-        return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_handled": True}
+        # B1.0 — the confirm IS the anchor: the next committed "yes" consumes THIS question
+        # (the I3/I5 infinite-confirm class is structurally dead).
+        return {"messages": [_question_message(reply, "approve", [target.approval_id])],
+                "final_response": reply, "card_handled": True}
 
     outcome = await resolve_and_dispatch(
         target.approval_id, intent, resolved_via,
@@ -1483,19 +1558,157 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
     if outcome.status == "not_claimed":
         reply = f"That one's already taken care of, {h}."
         return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_outcome": {"approval_id": target.approval_id, "decision_status": "stale",
-                                 "thread_id": target.thread_id},
+                "card_outcomes": [{"approval_id": target.approval_id, "decision_status": "stale",
+                                   "thread_id": target.thread_id}],
                 "card_handled": True}
     reply = _clean_resolution_reply(outcome, intent, target, h)
     logger.info("card_resolution_resolved", intent=intent, approval_id=target.approval_id,
                 via=resolved_via)
     return {"messages": [AIMessage(content=reply)], "final_response": reply,
-            "card_outcome": {"approval_id": target.approval_id,
-                             "decision_status": "approved" if intent == "approve" else "rejected",
-                             "thread_id": target.thread_id},
+            "card_outcomes": [{"approval_id": target.approval_id,
+                               "decision_status": "approved" if intent == "approve" else "rejected",
+                               "thread_id": target.thread_id}],
             "card_handled": True}
 
 
+
+
+async def _consume_question_answer(state: AgentState, ref: dict, message: str,
+                                   resolved_via: str, h: str) -> dict:
+    """B1.0 — consume the answer to an OPEN question through the pure resolver.
+
+    VERB comes from the judge's classification of the answer (overriding the carried intent —
+    CH-2); SELECTION resolves against the LIVE candidates re-sourced from the conversation NOW
+    (the question's candidates ∪ every approval linkage in state — CH-4, step-2 scope; B1.1
+    widens selection semantics). The decision executes here: multi-target dispatch through the
+    atomic claim (per-card at-most-once), a narrowed re-confirm minting a NEW open question, or
+    an abandon that releases the turn to the agent. The spent question is stamped in place (R1)."""
+    from app.agent.answer_consumption import resolve_answer
+    from app.agent.approval_dispatch import resolve_and_dispatch
+    from app.agent.runner import _judge_presented, _load_approval_by_id
+
+    if not ref["ids"]:
+        return {}  # CH-8 keeps 0-candidate floors untagged; a degenerate tag → agent turn
+
+    recent: list[str] = []
+    for m in (state.get("messages") or [])[-6:]:
+        if isinstance(m, HumanMessage) and isinstance(m.content, str):
+            recent.append(f"User: {m.content}")
+        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+            recent.append(f"Assistant: {m.content}")
+    logger.info("card_resolution_judge_entered", judge_id=ref["ids"][0], live=-1)
+    judged = await _judge_presented(ref["ids"][0], message, "\n".join(recent),
+                                    require_pending=False)
+    if judged is None:
+        return {}
+
+    # Consent scope (review HIGH-1): "both"/"all"/bare answers act on the choices the QUESTION
+    # NAMED — never the whole thread. The widened conversation universe exists ONLY so an
+    # explicit kind/name selection can reach beyond the question's set (CH-4).
+    live = await _fetch_queued_cards(list(ref["ids"]))
+
+    # CH-9 backstop — an offer MORE RECENT than the question owns a bare affirmative (R3
+    # suppresses new offers while a question is open; this guards any residue).
+    if ref["offer_pending"] and judged.intent == "approve":
+        from app.agent.approval_essentials import card_names_any_essential
+        if not any(card_names_any_essential(message, c.tool_name, c.tool_args or {}) for c in live):
+            logger.info("question_offer_precedence")
+            return {"card_handled": False}
+
+    decision = resolve_answer(message, live, judged.intent, ref["intent"],
+                              hedged=bool(getattr(judged, "hedged", False)))
+    if decision.action == "confirm" and decision.reason == "no_match":
+        # CH-4 reach — the answer named a kind/name absent from the question's set: try the
+        # WIDENED universe (every approval linkage in the conversation). Only an explicit
+        # narrowed SINGLETON may come back from it — "both"/"all" never widen (HIGH-1).
+        ids = list(ref["ids"])
+        for m in state.get("messages") or []:
+            meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+            if meta.get("type") == "approval":
+                ids.extend(str(i) for i in meta.get("approval_ids") or [])
+        seen: set = set()
+        ordered = [i for i in ids if not (i in seen or seen.add(i))]
+        widened = await _fetch_queued_cards(ordered)
+        if len(widened) > len(live):
+            wide = resolve_answer(message, widened, judged.intent, ref["intent"],
+                                  hedged=bool(getattr(judged, "hedged", False)))
+            if wide.action == "dispatch" and wide.reason == "narrowed_singleton":
+                decision, live = wide, widened
+                logger.info("question_reach_beyond_set", target=wide.selection[0])
+    logger.info("question_consumed", action=decision.action, verb=decision.verb,
+                n=len(decision.selection), reason=decision.reason)
+    stamp = _stamp_question(state, ref.get("question_id"),
+                            "abandoned" if decision.action == "abandon" else "consumed")
+    stamp_msgs = [stamp] if stamp else []
+
+    if decision.action == "abandon":
+        if decision.reason == "no_live_candidates":
+            # Honesty parity (review LOW-5): a committed answer whose card(s) were resolved
+            # out-of-band gets the same honest ack the approval-referent path gives.
+            ack = f"That one's already taken care of, {h}."
+            return {"messages": [*stamp_msgs, AIMessage(content=ack)], "final_response": ack,
+                    "card_handled": True}
+        return {"messages": stamp_msgs, "card_handled": False} if stamp_msgs else {"card_handled": False}
+
+    by_id = {c.approval_id: c for c in live}
+    from app.approvals_service import describe_card
+    if decision.action == "confirm":
+        chosen = [by_id[i] for i in decision.choices if i in by_id] or live
+        if decision.reason == "noncommittal" and len(chosen) == 1:
+            reply = (f"No rush, {h} — {describe_card(chosen[0])} stays queued. "
+                     f"A clear word either way and I'll act on it.")
+        else:
+            named = "; ".join(describe_card(c) for c in chosen[:5])
+            reply = f"To be precise, {h} — {named}. Which should I act on, or both?"
+        q = _question_message(reply, decision.verb or ref["intent"],
+                              [c.approval_id for c in chosen])
+        return {"messages": [*stamp_msgs, q], "final_response": reply, "card_handled": True}
+
+    # dispatch
+    if decision.verb == "skip":
+        reply = f"Skipped, {h}."
+        outs = [{"approval_id": i, "nav": "skip"} for i in decision.selection]
+        return {"messages": [*stamp_msgs, AIMessage(content=reply)], "final_response": reply,
+                "card_outcomes": outs, "card_handled": True}
+    if decision.verb == "edit":
+        if len(decision.selection) != 1:
+            named = "; ".join(describe_card(by_id[i]) for i in decision.selection if i in by_id)
+            reply = f"Which one should I change, {h} — {named}?"
+            q = _question_message(reply, "edit", list(decision.selection),
+                                  change=judged.change or ref.get("change") or "")
+            return {"messages": [*stamp_msgs, q], "final_response": reply, "card_handled": True}
+        row = await _load_approval_by_id(decision.selection[0])
+        if row is None:
+            ack = f"That one's already taken care of, {h}."
+            return {"messages": [*stamp_msgs, AIMessage(content=ack)], "final_response": ack,
+                    "card_handled": True}
+        from app.agent.runner import _PresentedJudgment
+        re_judged = _PresentedJudgment(approval_id=decision.selection[0], row=row,
+                                       intent="edit",
+                                       change=judged.change or ref.get("change") or "")
+        edit_out = await _card_edit_redraft(re_judged, message, resolved_via)
+        edit_out["messages"] = [*stamp_msgs, *(edit_out.get("messages") or [])]
+        return edit_out
+
+    results = []
+    for aid in decision.selection:
+        outcome = await resolve_and_dispatch(
+            aid, decision.verb, resolved_via,
+            {"approved": decision.verb == "approve"}, ground_thread=False)
+        results.append((by_id[aid], outcome))
+    reply = _multi_resolution_reply(results, decision.verb, h)
+    outs = []
+    for card, oc in results:
+        if oc.status == "not_claimed":
+            outs.append({"approval_id": card.approval_id, "decision_status": "stale",
+                         "thread_id": card.thread_id})
+        else:
+            outs.append({"approval_id": card.approval_id,
+                         "decision_status": "approved" if decision.verb == "approve" else "rejected",
+                         "thread_id": card.thread_id})
+    logger.info("question_dispatch_resolved", verb=decision.verb, n=len(results))
+    return {"messages": [*stamp_msgs, AIMessage(content=reply)], "final_response": reply,
+            "card_outcomes": outs, "card_handled": True}
 
 
 async def card_resolution_node(state: AgentState) -> dict:
@@ -1532,6 +1745,11 @@ async def card_resolution_node(state: AgentState) -> dict:
     if ref is None or (ref["type"] == "briefing" and not ref["ids"]):
         logger.info("card_resolution_judge_skipped", reason="no_referent")
         return {}  # nothing jarvis-tagged (or a pure offer) → the agent owns the turn
+
+    if ref["type"] == "question":
+        # B1.0 — the master is ANSWERING Jarvis's own open question (confirm/disambiguation).
+        # The answer resolves the question that asked it (D-B1-1/2/3).
+        return await _consume_question_answer(state, ref, message, resolved_via, h)
 
     live = await _live_linked_targets(ref["ids"])
 
@@ -1573,7 +1791,7 @@ async def card_resolution_node(state: AgentState) -> dict:
                 return {"card_handled": False}
             ack = f"That one's already taken care of, {h}."
             return {"messages": [AIMessage(content=ack)], "final_response": ack,
-                    "card_outcome": {"approval_id": ref["ids"][0], "decision_status": "stale"},
+                    "card_outcomes": [{"approval_id": ref["ids"][0], "decision_status": "stale"}],
                     "card_handled": True}
         # The yes-collision: an OFFER outranks the card for anything that doesn't NAME it.
         if ref["offer_pending"] and intent == "approve":
@@ -1588,8 +1806,8 @@ async def card_resolution_node(state: AgentState) -> dict:
     if intent == "skip":
         reply = f"Skipped, {h}."
         return {"messages": [AIMessage(content=reply)], "final_response": reply,
-                "card_outcome": {"approval_id": (live[0].approval_id if live else ref["ids"][0]),
-                                 "nav": "skip"},
+                "card_outcomes": [{"approval_id": (live[0].approval_id if live else ref["ids"][0]),
+                                   "nav": "skip"}],
                 "card_handled": True}
 
     if intent == "edit":
@@ -1647,6 +1865,13 @@ async def persist_node(state: AgentState) -> dict:
                 state.get("briefing_offer") or "",
                 state.get("messages") or [],
             )
+            if text and not delivered and _has_open_question(state.get("messages") or []):
+                # R3 — no offer is minted while an outstanding question awaits its answer (the
+                # primary fix for the confirm-stolen-by-offer mis-route; the walk's question/
+                # offer precedence stays as the backstop). No cooldown stamp either — the offer
+                # never surfaced.
+                logger.info("offer_suppressed_open_question")
+                text = ""
             if text:
                 if not delivered:
                     # An OFFER is a throttled proactive surface — stamp the cooldown here (a
@@ -1767,7 +1992,12 @@ async def _drop_pending_linked(messages: list) -> list:
 
     linked: dict[int, list] = {}
     for i, m in enumerate(messages):
-        ids = ((getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}).get("approval_ids")
+        meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+        ids = meta.get("approval_ids")
+        # B1.0 R1/CH-7 (candidate_ids half, pulled forward): an OPEN question is pending-linkage
+        # too — compacting it away would lose the carried intent + break the stamp invariant.
+        if not ids and meta.get("type") == "question" and meta.get("state") == "open":
+            ids = meta.get("candidate_ids")
         if ids:
             linked[i] = ids
     if not linked:

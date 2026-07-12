@@ -75,7 +75,7 @@ async def _drive_edit_turn(thread, target_id, tool, reemit_msg, user="change it"
             "user_message": user, "tool_calls_this_turn": 0,
             "queued_signatures": [], "queued_this_turn": [], "final_response": "",
             "terminal_delta": "", "briefing_attached": True,   # briefing quiet for the test
-            "card_context": "", "card_handled": False, "card_outcome": {},
+            "card_context": "", "card_handled": False, "card_outcomes": [],
             "edit_expected": True, "edit_target_id": target_id, "edit_tool_name": tool,
         }, config=cfg)
 

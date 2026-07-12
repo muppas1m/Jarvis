@@ -75,7 +75,9 @@ class AgentState(TypedDict, total=False):
     # read by the runner post-graph to reconstruct the frontend events (decision_resolved /
     # approval_required for an edit re-queue / presented_nav for skip). {} when the message
     # was a question routed to the agent instead.
-    card_outcome: dict
+    # B1.0 CH-5 — a LIST: a multi-target consume resolves N cards and EVERY one must flip on
+    # the dashboard (one decision_resolved per entry). Single resolutions are one-element lists.
+    card_outcomes: list
     # `card_handled` True → the node fully resolved the card → route to persist (end the
     # turn with the node's outcome reply). False/absent → route to the agent (a question
     # about the card, or no card) with `card_context` injected so the agent answers about

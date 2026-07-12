@@ -102,7 +102,8 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
     return "none", []
 
 
-def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried_intent: str) -> ConsumeDecision:
+def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried_intent: str,
+                   *, hedged: bool = False) -> ConsumeDecision:
     """Resolve the master's ANSWER to an open question.
 
     answer         — the master's reply text (for SELECTION parsing).
@@ -112,6 +113,10 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
                      unrelated|show_others). A verb OVERRIDES the carried intent (CH-2); a non-verb
                      means selector-only → the carried intent governs. F3 never parses verbs itself.
     carried_intent — the open question's original intent (approve|reject) — the selector-only fallback.
+    hedged         — the judge's committed-vs-hedged axis on the answer (step-2 contract, master's #4
+                     call): a hedged answer ("maybe do them all later", "maybe send it") RE-CONFIRMS,
+                     never dispatches — regardless of verb or selection. The pure resolver cannot see
+                     the hedge; it is judged, not parsed.
     """
     ids = [c.approval_id for c in candidates]
     if not candidates:
@@ -137,8 +142,26 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
     if verb not in _VERBS:
         return ConsumeDecision("confirm", "", (), tuple(ids), "no_committed_verb")
 
+    # The hedged axis (#4): a hedged answer never dispatches — any would-be dispatch re-confirms
+    # naming the candidates. Structural: the gate is on the ACTION, the language layer stays free.
+    if hedged:
+        return ConsumeDecision("confirm", verb, (), tuple(ids), "hedged")
+
     # --- the dispatch gate ---
     if sel_kind == "all":
+        # INTERIM until B1.1 (kind-scoped selection): a KIND-QUALIFIED all ("both emails") over a
+        # set containing OTHER kinds must re-confirm — dispatching would exceed the master's
+        # expressed selection (the red-team's scope-exceeding-all). A bare "both"/"all of them"
+        # (no kind word) keeps the frozen dispatch-all (the I2 "I mean both" acceptance); a
+        # homogeneous set matching the named kind dispatches (the qualifier adds nothing).
+        if _KIND_CALENDAR.search(answer) or _KIND_EMAIL.search(answer):
+            want_cal = bool(_KIND_CALENDAR.search(answer))
+            want_email = bool(_KIND_EMAIL.search(answer))
+            for c in candidates:
+                is_cal = getattr(c, "tool_name", "") in _CALENDAR_TOOLS
+                is_email = getattr(c, "kind", "") == "email"
+                if not ((want_cal and is_cal) or (want_email and is_email)):
+                    return ConsumeDecision("confirm", verb, (), tuple(ids), "mixed_kind_all")
         return ConsumeDecision("dispatch", verb, tuple(ids), (), "explicit_all")
 
     if sel_kind == "filter":
