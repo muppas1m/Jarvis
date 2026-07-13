@@ -141,9 +141,17 @@ def _mock(monkeypatch, *, sw=None, total=0, days=None, earlier=0, tz=("UTC", Fal
 
 
 async def test_latest_advances_hwm(monkeypatch):
+    """B1-brief migration (declared): 'latest' no longer advances ON RETURN — it FLAGS the
+    pending advance (the hwm-pending var); compact_node commits it strictly post-persist."""
     adv = _mock(monkeypatch, sw=ScopeWindow("latest", NOW, NOW, advances=True))
-    out = await BT.briefing("latest")
-    assert "now" in adv and "caught up" in out.lower()
+    tok = BT._hwm_pending.set(None)
+    try:
+        out = await BT.briefing("latest")
+        assert "now" not in adv                       # never advance-on-return (crash window)
+        assert BT._hwm_pending.get() is not None      # the post-persist advance is flagged
+        assert "caught up" in out.lower()
+    finally:
+        BT._hwm_pending.reset(tok)
 
 
 async def test_today_does_not_advance_and_offers_when_earlier_exists(monkeypatch):
@@ -175,9 +183,15 @@ async def test_off_enum_scope_returns_menu(monkeypatch):
 
 
 async def test_catch_up_alias_maps_to_latest_and_advances(monkeypatch):
+    """B1-brief migration (declared): the alias flags the pending advance like 'latest'."""
     adv = _mock(monkeypatch, sw=ScopeWindow("latest", NOW, NOW, advances=True))
-    await BT.briefing("catch_up")
-    assert "now" in adv
+    tok = BT._hwm_pending.set(None)
+    try:
+        await BT.briefing("catch_up")
+        assert "now" not in adv
+        assert BT._hwm_pending.get() is not None
+    finally:
+        BT._hwm_pending.reset(tok)
 
 
 async def test_tz_fallback_surfaced(monkeypatch):

@@ -91,6 +91,9 @@ class AgentState(TypedDict, total=False):
     # key-matching, which a key-field edit defeats) and pins the re-emit SAME-TOOL. Reset ×3.
     edit_target_id: str
     edit_tool_name: str
+    # B1-brief-2 #3 — a delivered brief's pending HWM advance (ISO). Rides STATE because a
+    # ContextVar dies at the node boundary; compact (post-persist) commits it. Reset ×3.
+    hwm_pending_advance: str
 
     # --- final assistant text (set when agent emits a non-tool message) -----
     final_response: str

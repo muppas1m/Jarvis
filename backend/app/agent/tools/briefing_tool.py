@@ -33,7 +33,15 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
-from app.agent.briefing_state import mark_briefed
+from contextvars import ContextVar
+
+from app.agent.briefing_state import mark_briefed  # noqa: F401 — re-exported for the compact seam
+
+# B1-brief (D-B1-7) — set at FETCH time by fetch_latest_brief/briefing("latest"); consumed by
+# compact_node (the first node AFTER persist, i.e. after the brief message is durably
+# checkpointed) which then runs mark_briefed. A turn that dies before persist takes the var
+# with it → items stay UN-seen, still deliverable next turn (never mark-seen-before-delivered).
+_hwm_pending: ContextVar = ContextVar("briefing_hwm_pending", default=None)
 from app.agent.tools.calendar_tool import _resolve_timezone
 from app.agent.tools.registry import tool_registry
 from app.briefing import DigestWindow, digest_window, read_hwm
@@ -164,11 +172,26 @@ async def briefing(scope: str = "latest") -> str:
     )
     text = format_digest(sw, win, fallback=fallback, earlier_count=earlier)
     if sw.advances:
-        # The single 'brief was delivered' seam — advance the HWM AND stamp last_briefed_at
-        # together (briefing_state.mark_briefed). Advance-on-return (see module docstring for
-        # the residual); the cooldown reads the stamp set here.
-        await mark_briefed(now)
+        # B1-brief — NON-advancing fetch: the HWM moves only AFTER the brief persists.
+        # Flag the pending advance; compact_node (post-persist) runs mark_briefed.
+        _hwm_pending.set(now)
     return text
+
+
+def take_hwm_pending() -> str:
+    """Consume the fetch-time pending flag (same-node context only — a ContextVar dies at the
+    LangGraph node boundary, so callers surface this to STATE for compact to commit)."""
+    val = _hwm_pending.get()
+    if val is None:
+        return ""
+    _hwm_pending.set(None)
+    return val.isoformat()
+
+
+async def fetch_latest_brief() -> str:
+    """B1-brief — the code-owned delivery fetch (offer-acceptance + render_attach): the
+    'latest' brief text, NON-advancing (the hwm-pending var flags the post-persist advance)."""
+    return await briefing("latest")
 
 
 class _BriefingArgs(BaseModel):

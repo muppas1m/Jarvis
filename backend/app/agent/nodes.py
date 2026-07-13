@@ -975,7 +975,15 @@ async def tool_executor_node(state: AgentState) -> dict:
     exec_result = await execute_tool_guarded(
         thread_id, tool_name, tool_args, level=level, tool_call_id=tool_call_id
     )
-    return {"messages": [ToolMessage(content=exec_result.content, tool_call_id=tool_call_id)]}
+    update: dict = {"messages": [ToolMessage(content=exec_result.content, tool_call_id=tool_call_id)]}
+    # B1-brief-2 #3 — the explicit-ask path ("brief me" → the agent calls briefing('latest')):
+    # the fetch flags its pending HWM advance on a contextvar valid only INSIDE this node;
+    # surface it to STATE here so compact (post-persist) can commit it.
+    from app.agent.tools.briefing_tool import take_hwm_pending
+    pending = take_hwm_pending()
+    if pending:
+        update["hwm_pending_advance"] = pending
+    return update
 
 
 def should_continue_tools(state: AgentState) -> str:
@@ -1408,7 +1416,11 @@ def _conversation_referent(messages: list) -> dict | None:
         meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
         mtype = meta.get("type")
         if mtype == "briefing":
-            offer_seen = True
+            # B1-brief (NEW-1): only an OUTSTANDING offer owns a bare affirmative. A missing
+            # state (legacy tag) reads as "offered" — the consent-safe direction (the yes goes
+            # to the offer/agent, never a card); delivered/accepted/declined are inert.
+            if meta.get("state", "offered") == "offered":
+                offer_seen = True
             continue
         if mtype == "question":
             # B1.0 R1 — only an OPEN question anchors; a spent one (consumed/abandoned — the
@@ -1704,6 +1716,57 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
 
 
 
+def _stamp_offers(state: AgentState, new_state: str) -> list:
+    """R1 same-id stamps for EVERY outstanding offer (#2: a second un-stamped offer would let
+    the next bare "yes" re-deliver)."""
+    out = []
+    for m in state.get("messages") or []:
+        meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+        if meta.get("type") == "briefing" and meta.get("state", "offered") == "offered" \
+                and getattr(m, "id", None) is not None:
+            out.append(AIMessage(content=m.content, id=m.id,
+                                 additional_kwargs={**(m.additional_kwargs or {}),
+                                                    "jarvis": {**meta, "state": new_state}}))
+    return out
+
+
+async def _resolve_offer_answer(state: AgentState, message: str, h: str) -> dict:
+    """B1-brief — consume the master's answer to an outstanding briefing OFFER. The verb judge
+    classifies (the model decides accept/decline); the code renders: acceptance fetches the
+    real brief (non-advancing — compact advances the HWM post-persist) and attaches it as a
+    state:"delivered" message; a decline stamps the offer and lets the agent phrase the ack;
+    anything else leaves the offer outstanding and the agent owns the turn."""
+    from app.agent.decision_resolver import resolve_answer_verb
+
+    res = await resolve_answer_verb(message, "")
+    committed = bool(getattr(res, "committed", False))
+    if (res.verb == "approve" or (res.verb == "none" and committed)) and not res.hedged:
+        from app.agent.tools.briefing_tool import fetch_latest_brief
+        try:
+            text = await fetch_latest_brief()
+        except Exception as exc:  # noqa: BLE001 — a failed fetch is said plainly, never faked
+            logger.warning("offer_delivery_fetch_failed", error=str(exc))
+            reply = f"I couldn't pull the briefing together just now, {h} — it stays queued."
+            return {"messages": [AIMessage(content=reply)], "final_response": reply,
+                    "card_handled": True}
+        stamps = _stamp_offers(state, "accepted")
+        brief_msg = AIMessage(content=text, additional_kwargs={
+            "jarvis": {"type": "briefing", "state": "delivered"}})
+        logger.info("offer_accepted_code_delivery")
+        from app.agent.tools.briefing_tool import take_hwm_pending
+        pending = take_hwm_pending()
+        return {"messages": [*stamps, brief_msg],
+                "final_response": text, "card_handled": True, "briefing_attached": True,
+                # B1-brief-2 #3 — the advance rides STATE (a ContextVar dies at the node
+                # boundary — runtime-proven); compact (post-persist) consumes it.
+                "hwm_pending_advance": pending or datetime.now(UTC).isoformat()}
+    if res.verb == "reject":
+        stamps = _stamp_offers(state, "declined")
+        logger.info("offer_declined")
+        return {"messages": stamps, "card_handled": False} if stamps else {"card_handled": False}
+    return {"card_handled": False}   # info/unrelated/uncommitted → agent; the offer stays open
+
+
 async def _consume_question_answer(state: AgentState, ref: dict, message: str,
                                    resolved_via: str, h: str) -> dict:
     """B1.0 — consume the answer to an OPEN question through the pure resolver.
@@ -1881,9 +1944,14 @@ async def card_resolution_node(state: AgentState) -> dict:
                 referent=(ref["type"] if ref else "none"),
                 ids=len(ref["ids"]) if ref else 0,
                 offer_pending=bool(ref and ref.get("offer_pending")))
-    if ref is None or (ref["type"] == "briefing" and not ref["ids"]):
+    if ref is None:
         logger.info("card_resolution_judge_skipped", reason="no_referent")
-        return {}  # nothing jarvis-tagged (or a pure offer) → the agent owns the turn
+        return {}  # nothing jarvis-tagged → the agent owns the turn
+    if ref["type"] == "briefing" and not ref["ids"]:
+        # B1-brief (CH-10) — the PURE-OFFER turn: the judge decides accept/decline; the CODE
+        # delivers. Mode/cooldown-independent (this branch never consults briefing_directive)
+        # and never dependent on a model deliver_briefing() signal.
+        return await _resolve_offer_answer(state, message, h)
 
     if ref["type"] == "question":
         # B1.0 — the master is ANSWERING Jarvis's own open question (confirm/disambiguation).
@@ -2029,11 +2097,16 @@ async def persist_node(state: AgentState) -> dict:
                     await mark_offered(datetime.now(UTC))
                 briefing_msg = AIMessage(
                     content=text,
-                    additional_kwargs={"jarvis": {"type": "briefing"}},
+                    additional_kwargs={"jarvis": {"type": "briefing",
+                                                  # B1-brief (NEW-1): the mint says which it is
+                                                  "state": "delivered" if delivered else "offered"}},
                 )
                 update = {
                     "messages": [briefing_msg],
                     "briefing_attached": True,
+                    # B1-brief-2 #3 — a DELIVERED attach flags the post-persist HWM advance on
+                    # STATE (compact consumes it; also stamps the cooldown via mark_briefed).
+                    **({"hwm_pending_advance": datetime.now(UTC).isoformat()} if delivered else {}),
                     "final_response": f"{final}\n\n{text}".strip() if final else text,
                     "terminal_delta": (
                         f"{state.get('terminal_delta') or ''}\n\n{text}".strip()
@@ -2156,7 +2229,10 @@ async def _drop_pending_linked(messages: list) -> list:
         # card (a consent regression). It has no PendingApproval row, so it needs its own keep
         # rule. Older briefing messages are inert for the walk and compact normally. (When
         # B1-brief adds state offered|delivered, this refines to state=="offered".)
-        if meta.get("type") == "briefing":
+        if meta.get("type") == "briefing" and meta.get("state", "offered") == "offered":
+            # B1-brief-2 #1 — STATE-gated, mirroring the walk: keep the OUTSTANDING offer
+            # (an inert delivered/accepted brief may compact; keeping IT while dropping the
+            # offer flipped offer_pending and let a bare "yes" dispatch the card).
             last_offer_idx = i
     if not linked and last_offer_idx < 0:
         return messages
@@ -2189,6 +2265,23 @@ async def _drop_pending_linked(messages: list) -> list:
 
 
 async def compact_node(state: AgentState) -> dict:
+    # B1-brief-2 #3 — the HWM seam reads STATE (the reducer-persisted cross-node channel; a
+    # ContextVar dies at the LangGraph node boundary — runtime-proven, graph-level-tested).
+    # The brief message was checkpointed when persist completed; consume the flag NOW.
+    pending = state.get("hwm_pending_advance") or ""
+    if pending:
+        try:
+            from datetime import datetime as _dt
+
+            from app.agent.briefing_state import mark_briefed
+            await mark_briefed(_dt.fromisoformat(pending))
+            logger.info("briefing_hwm_advanced_post_persist")
+        except Exception as exc:  # noqa: BLE001 — a missed advance re-offers; never breaks the turn
+            logger.warning("briefing_hwm_advance_failed", error=str(exc))
+    return await _compact_inner(state)
+
+
+async def _compact_inner(state: AgentState) -> dict:
     """Turn-boundary compaction. Runs AFTER persist (the turn's response is sent
     and memories are written). If the verbatim history exceeds the threshold,
     summarize the OLDEST messages into running_summary and drop them via

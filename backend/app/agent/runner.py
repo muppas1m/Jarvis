@@ -293,6 +293,7 @@ async def run_turn(
         "edit_expected": False,   # s4 — edit-directive honesty floor; turn-reset
         "edit_target_id": "",     # D29 — the edit's exact supersede target; turn-reset
         "edit_tool_name": "",     # D29 — the same-tool pin; turn-reset
+        "hwm_pending_advance": "",  # B1-brief — the post-persist HWM flag; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         # Card-resolution fields reset per turn (replace reducer persists them in the
@@ -411,6 +412,7 @@ async def stream_turn(
         "edit_expected": False,   # s4 — edit-directive honesty floor; turn-reset
         "edit_target_id": "",     # D29 — the edit's exact supersede target; turn-reset
         "edit_tool_name": "",     # D29 — the same-tool pin; turn-reset
+        "hwm_pending_advance": "",  # B1-brief — the post-persist HWM flag; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
@@ -1011,6 +1013,7 @@ async def voice_turn(
         "edit_expected": False,   # s4 — edit-directive honesty floor; turn-reset
         "edit_target_id": "",     # D29 — the edit's exact supersede target; turn-reset
         "edit_tool_name": "",     # D29 — the same-tool pin; turn-reset
+        "hwm_pending_advance": "",  # B1-brief — the post-persist HWM flag; turn-reset
         "final_response": "",     # A1 Fix 1 — turn-reset so a re-emit-spin read-back can't prepend a
         #                           PRIOR turn's answer (final_response is a replace-reducer field too)
         # reset per turn (replace reducer) so a prior turn's card state can't leak.
