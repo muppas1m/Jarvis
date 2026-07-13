@@ -634,3 +634,36 @@ async def test_b11_named_kind_matching_two_cards_asks_which(monkeypatch):
         assert qs and set(qs[0].additional_kwargs["jarvis"]["candidate_ids"]) == {c1, c2}
     finally:
         await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# B1.1-C2 FIX C — the DIRECT path: an OOV-named message on a solicited single    #
+# card confirms, never dispatches ("approve the invites" leaked live)            #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_fixc_oov_named_message_on_solicited_card_confirms(monkeypatch):
+    thread = f"web:{_MARK}-fixc"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge(monkeypatch, "approve")
+    try:
+        out = await nodes.card_resolution_node(
+            _state("approve the invites", [_linked([r1], solicited=True)], thread))
+        assert rec["calls"] == [], f"OOV-named message dispatched on the direct path: {rec['calls']}"
+        assert out.get("card_handled") is True                 # confirm question, not the agent
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_fixc_bare_yes_on_solicited_card_still_dispatches(monkeypatch):
+    """The golden pin next to FIX C: bare committed consent on the direct path is untouched."""
+    thread = f"web:{_MARK}-fixcg"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge(monkeypatch, "approve")
+    try:
+        await nodes.card_resolution_node(_state("yes, go ahead", [_linked([r1], solicited=True)], thread))
+        assert rec["calls"] == [(r1, "approve")]
+    finally:
+        await _cleanup(thread)

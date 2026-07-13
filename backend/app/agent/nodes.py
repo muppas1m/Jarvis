@@ -1340,6 +1340,8 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
 from app.agent.answer_consumption import _CALENDAR_TOOLS  # noqa: E402
 from app.agent.answer_consumption import _KIND_CALENDAR as _CARD_KIND_CALENDAR  # noqa: E402
 from app.agent.answer_consumption import _KIND_EMAIL as _CARD_KIND_EMAIL  # noqa: E402
+from app.agent.answer_consumption import _is_bare  # noqa: E402  (FIX C — one bare-test, one source)
+from app.agent.approval_essentials import card_names_any_essential  # noqa: E402
 # (The A2-s2 rewrite retired the seal's token matcher — _GENERIC_TOKENS /
 # _KIND_INDICATOR_WORDS / _card_distinguishing_text / _names_mismatched_target. Its D25 class
 # (punctuation-glued tokens → fabricated named_mismatch) is structurally impossible now: the
@@ -1378,6 +1380,14 @@ def _confirm_worthy_mismatch(message: str, card: Any) -> bool:
         quoted = q1 or q2
         if quoted and not _present(essentials_text, quoted):
             return True
+    # FIX C (B1.1-C2) — essentials-aware narrow-failure on the DIRECT path: a message that
+    # names NONE of this card's essentials AND is not bare carries a scoping word we couldn't
+    # resolve ("approve the invites") → confirm, never dispatch. Bare committed consent
+    # ("yes, go ahead") and essential-naming messages pass through untouched.
+    # (any-essential per the STATED semantics "names NONE of this card's essentials" — the
+    # all-fields gate would re-confirm a message that names the recipient but not the subject.)
+    if not card_names_any_essential(msg, card.tool_name, card.tool_args or {}) and not _is_bare(msg):
+        return True
     return False
 
 

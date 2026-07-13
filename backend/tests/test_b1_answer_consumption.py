@@ -527,10 +527,9 @@ def test_ga_both_over_three_homogeneous_confirms():
     assert d.action == "confirm" and d.selection == (), f"{d}"
 
 
-@pytest.mark.xfail(reason="Part 3 (none-branch residual gate) DROPPED by order 2026-07-13 — "
-                          "this Group-A case reopens: none→singleton→dispatch. Awaiting ruling.",
-                   strict=True)
 def test_ga_approve_the_invites_on_a_lone_email_never_sends():
+    """FIX B (the ruling arrived): the none-branch singleton gate — a non-bare message over a
+    lone candidate confirms, never the singleton dispatch."""
     d = resolve_answer("approve the invites", [_email("e1")], answer_verb="approve", carried_intent="approve")
     assert d.action == "confirm" and d.selection == (), f"{d}"
 
@@ -557,3 +556,28 @@ def test_gb_bare_both_over_mixed_pair_dispatches():
 def test_gb_all_of_them_over_mixed_pair_dispatches():
     d = resolve_answer("all of them", [_email("e1"), _cal("c1")], answer_verb="none", carried_intent="approve")
     assert d.action == "dispatch" and len(d.selection) == 2
+
+
+# --------------------------------------------------------------------------- #
+# B1.1-C2 — FIX A: digits are scoping content, never erased into bareness       #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["approve both 1:1s", "send both 5pm's", "both 1:1s"])
+def test_fixa_digit_tokens_are_never_bare(msg):
+    """'both 1:1s' read bare (digits erased) → Part 4 bypassed → over-send. A digit token is
+    a scoping claim we can't verify → non-bare → confirm."""
+    d = resolve_answer(msg, [_email("e1"), _cal("c1")], answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{msg!r} → {d}"
+
+
+def test_fixb_committed_floor_forms_still_dispatch_on_singleton():
+    """'that works' (committed floor, whole-message) must NOT be blocked by the FIX-B gate —
+    a committed-floor match is bare by definition."""
+    d = resolve_answer("that works", [_email("e1")], answer_verb="none", carried_intent="approve",
+                       committed=True)
+    assert d.action == "dispatch" and d.selection == ("e1",)
+
+
+def test_fixb_edit_singleton_with_change_content_still_dispatches():
+    """Edit is exempt from the none-branch gate — its residual IS the change text."""
+    d = resolve_answer("change the time to 10am", [_cal("c1")], answer_verb="edit", carried_intent="approve")
+    assert d.action == "dispatch" and d.verb == "edit"

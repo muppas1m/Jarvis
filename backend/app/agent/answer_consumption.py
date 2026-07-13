@@ -88,16 +88,24 @@ _FUNCTION_TOKENS = frozenset({
     "sir", "please", "and", "to", "for", "on", "in", "a", "an", "that", "this", "do", "go",
     "ahead", "now", "just", "actually", "then", "so", "too", "also", "well", "right",
     "alright", "sure", "fine", "lets", "let", "us", "with", "no", "not", "dont", "them",
+    # consent-DOMAIN words — they scope to the approval domain itself, never to content
+    # ("approve that pending calendar approval" must stay bare; "the drafts" must not):
+    "pending", "approval", "approvals", "card", "cards", "queued", "queue",
 })
 
 
 def _is_bare(answer: str) -> bool:
     """True when nothing but selector/kind/verb/function words remain — the ONLY state in
     which a bulk selector may act on a multi-kind pool (Part 4's bare-test, fail-safe)."""
-    text = re.sub(r"[^a-z ]", " ", (answer or "").lower())
+    # FIX A — digits are SCOPING CONTENT ("both 1:1s", "5pm's"): erasing them read such
+    # messages as bare and bypassed the Part-4 guard. Digits survive normalization and any
+    # digit-bearing token is immediately non-bare.
+    text = re.sub(r"[^a-z0-9 ]", " ", (answer or "").lower())
     text = _KIND_CALENDAR.sub(" ", text)
     text = _KIND_EMAIL.sub(" ", text)
     for tok in text.split():
+        if any(ch.isdigit() for ch in tok):
+            return False
         if len(tok) < 3:
             continue
         if tok in _SELECTOR_TOKENS or tok in _ACTION_VERB_TOKENS or tok in _FUNCTION_TOKENS:
@@ -270,6 +278,12 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
     if answer_verb == "none" and not committed:
         return ConsumeDecision("confirm", carried_intent, (), tuple(ids), "noncommittal")
     if len(candidates) == 1:
+        # FIX B (the none-branch singleton gate, the Part-3 ruling arrived): a NON-bare message
+        # over a lone candidate names a scope we couldn't resolve ("approve the invites") →
+        # confirm, never the singleton dispatch. Committed-floor matches are bare by definition
+        # (whole-message closed set); edit is exempt (its residual IS the change text).
+        if verb != "edit" and not committed and not _is_bare(answer):
+            return ConsumeDecision("confirm", verb, (), tuple(ids), "unnarrowed_singleton")
         return ConsumeDecision("dispatch", verb, (ids[0],), (), "singleton")
     # A bare affirmative to a >1 set → RE-CONFIRM naming the choices — never dispatch-all, never loop.
     return ConsumeDecision("confirm", verb, (), tuple(ids), "bare_ambiguous")
