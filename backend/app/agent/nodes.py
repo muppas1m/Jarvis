@@ -1400,7 +1400,9 @@ def _conversation_referent(messages: list) -> dict | None:
     the offer, never the card). Never reads the row store — pure message-walking; liveness is
     checked by the caller (dispatch plumbing, like the claim)."""
     offer_seen = False
-    for m in reversed(list(messages or [])):
+    msgs = list(messages or [])
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
         if not isinstance(m, AIMessage):
             continue
         meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
@@ -1414,14 +1416,15 @@ def _conversation_referent(messages: list) -> dict | None:
             # linkage (the CH-1 fix: a spent question can never re-anchor or strand cards).
             if meta.get("state") != "open":
                 continue
-            return {"type": "question", "ids": [str(i) for i in meta.get("candidate_ids") or []],
+            return {"type": "question", "ids": [str(x) for x in meta.get("candidate_ids") or []],
                     "intent": meta.get("intent") or "approve", "solicited": True,
                     "offer_pending": offer_seen, "question_id": getattr(m, "id", None),
-                    "change": meta.get("change") or "",
+                    "change": meta.get("change") or "", "index": i,
                     "text": m.content if isinstance(m.content, str) else ""}
         if mtype == "approval" and meta.get("approval_ids"):
-            return {"type": "approval", "ids": [str(i) for i in meta["approval_ids"]],
-                    "solicited": bool(meta.get("solicited")), "offer_pending": offer_seen}
+            return {"type": "approval", "ids": [str(x) for x in meta["approval_ids"]],
+                    "solicited": bool(meta.get("solicited")), "offer_pending": offer_seen,
+                    "index": i}
     return {"type": "briefing", "ids": [], "solicited": False, "offer_pending": True} if offer_seen else None
 
 
@@ -1494,6 +1497,31 @@ def _has_open_question(messages: list) -> bool:
     return False
 
 
+_EPOCH_MAX_LINES = 24        # defensive cap for a pathologically long epoch
+_EPOCH_MAX_CHARS = 6000
+
+
+def _epoch_context(messages: list, start_idx: int) -> str:
+    """B1.2 — the judge's context, sized from the EPOCH: every rendered turn from the anchoring
+    message (INCLUSIVE — the presentation must be in the window) to now. No pre-epoch noise,
+    never truncated on a long exchange. If a pathological epoch exceeds the cap, keep the
+    ANCHOR + the most recent lines with an explicit omission marker — never a middle slice.
+    This is context-SIZING only: the judge's intelligence still does the understanding."""
+    lines: list[str] = []
+    for m in (messages or [])[max(start_idx, 0):]:
+        if isinstance(m, HumanMessage) and isinstance(m.content, str):
+            lines.append(f"User: {m.content}")
+        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+            lines.append(f"Assistant: {m.content}")
+    out = "\n".join(lines)
+    if len(lines) > _EPOCH_MAX_LINES or len(out) > _EPOCH_MAX_CHARS:
+        keep_tail = _EPOCH_MAX_LINES - 2
+        capped = [lines[0], "[… earlier turns of this exchange omitted …]"] + lines[-keep_tail:]
+        logger.info("epoch_context_capped", total=len(lines), kept=len(capped))
+        out = "\n".join(capped)
+    return out
+
+
 def _multi_resolution_reply(results: list, verb: str, h: str) -> str:
     """CH-6 — per-target honesty: every card's OWN outcome is named; a mixed batch never
     collapses into one success line (no hallucinated actions)."""
@@ -1554,7 +1582,8 @@ def _dispatch_consent_gate(message: str, targets: list, hedged: bool, intent: st
 async def _resolve_conversation_target(intent: str, message: str, resolved_via: str,
                                         h: str, live: list, anchored: bool,
                                         hedged: bool = False,
-                                        universe: list | None = None) -> dict:
+                                        universe: list | None = None,
+                                        presented_order: tuple = ()) -> dict:
     """A2 s2 — resolve consent against the CONVERSATION's target (the F1-linked live cards of
     the most recent approval message). The seal's invariants, re-keyed:
       - >1 live linked target → refuse HONESTLY naming the choices (B1 owns disambiguation);
@@ -1566,6 +1595,31 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
     from app.agent.approval_dispatch import resolve_and_dispatch
     from app.approvals_service import describe_card
 
+    if len(live) > 1 or len(presented_order) > 1:
+        # B1.2 (declared scope extension) — try code-owned SELECTION before refusing: an
+        # ordinal/kind/name that resolves to exactly ONE card retargets it and walks the
+        # unchanged single-target chain (gate included). B1.2-b: runs whenever the PRESENTED
+        # set was >1 (drift can shrink live to 1) and honors exactly three outcomes —
+        # narrowed_singleton (retarget), ordinal_stale (the honest ack, never a re-index),
+        # cardinality_mismatch (confirm — a count/position claim never decays into a bare
+        # dispatch). Anything else falls through the existing chain.
+        from app.agent.answer_consumption import resolve_answer
+        sel = resolve_answer(message, live, intent, intent, presented_order=presented_order)
+        if sel.action == "dispatch" and sel.reason == "narrowed_singleton":
+            by = {c.approval_id: c for c in live}
+            live = [by[sel.selection[0]]]
+            logger.info("presented_selection_narrowed", target=sel.selection[0])
+        elif sel.action == "abandon" and sel.reason == "ordinal_stale":
+            ack = f"That one's already taken care of, {h}."
+            logger.info("presented_ordinal_stale", pick=(sel.choices or ("?",))[0])
+            return {"messages": [AIMessage(content=ack)], "final_response": ack,
+                    "card_handled": True}
+        elif sel.action == "confirm" and sel.reason == "cardinality_mismatch":
+            from app.approvals_service import describe_card as _dc
+            named = "; ".join(_dc(c) for c in live[:5])
+            reply = f"To be precise, {h} — pending here: {named}. Which one did you mean?"
+            return {"messages": [_question_message(reply, intent, [c.approval_id for c in live])],
+                    "final_response": reply, "card_handled": True}
     if len(live) > 1:
         choices = "; ".join(describe_card(c) for c in live[:5])
         alt = "or both" if len(live) == 2 else "or all of them"
@@ -1693,7 +1747,8 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
             return {"card_handled": False}
 
     decision = resolve_answer(message, live, res.verb, ref["intent"], hedged=res.hedged,
-                              committed=bool(getattr(res, "committed", False)))
+                              committed=bool(getattr(res, "committed", False)),
+                              presented_order=tuple(ref["ids"]))
     if decision.action == "confirm" and decision.reason == "no_match":
         # CH-4 reach — the answer named a kind/name absent from the question's set: try the
         # WIDENED universe (every approval linkage in the conversation). Only an explicit
@@ -1719,7 +1774,7 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
     stamp_msgs = [stamp] if stamp else []
 
     if decision.action == "abandon":
-        if decision.reason == "no_live_candidates":
+        if decision.reason in ("no_live_candidates", "ordinal_stale"):
             # Honesty parity (review LOW-5): a committed answer whose card(s) were resolved
             # out-of-band gets the same honest ack the approval-referent path gives.
             ack = f"That one's already taken care of, {h}."
@@ -1839,15 +1894,12 @@ async def card_resolution_node(state: AgentState) -> dict:
 
     # Judge INTENT on the strong model — context from in-state history (no coupling: the row
     # is loaded ONLY to give the judge its card facts; any-status, liveness gates dispatch).
-    recent: list[str] = []
-    for m in (state.get("messages") or [])[-6:]:
-        if isinstance(m, HumanMessage) and isinstance(m.content, str):
-            recent.append(f"User: {m.content}")
-        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-            recent.append(f"Assistant: {m.content}")
+    # B1.2 — the judge sees the EPOCH (from the presentation forward), never a floating
+    # [-6:] slice that scrolls past the card or drags in pre-epoch noise.
+    epoch_ctx = _epoch_context(state.get("messages") or [], ref.get("index", 0))
     judge_id = live[0].approval_id if live else ref["ids"][0]
     logger.info("card_resolution_judge_entered", judge_id=judge_id, live=len(live))
-    judged = await _judge_presented(judge_id, message, "\n".join(recent), require_pending=False)
+    judged = await _judge_presented(judge_id, message, epoch_ctx, require_pending=False)
     if judged is None:
         return {}  # row vanished entirely → a normal agent turn
     intent = judged.intent
@@ -1898,7 +1950,8 @@ async def card_resolution_node(state: AgentState) -> dict:
         universe = await _fetch_queued_cards(uni_ids) if len(uni_ids) > len(ref["ids"]) else live
         return await _resolve_conversation_target(
             intent, message, resolved_via, h, live, anchored=ref["solicited"],
-            hedged=bool(getattr(judged, "hedged", False)), universe=universe)
+            hedged=bool(getattr(judged, "hedged", False)), universe=universe,
+            presented_order=tuple(ref["ids"]))
 
     if intent == "skip":
         reply = f"Skipped, {h}."

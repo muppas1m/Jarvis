@@ -55,6 +55,18 @@ _ALL_SELECTOR = re.compile(
 # re-confirms — a count that doesn't match is never a dispatch.
 _CARDINAL_SELECTOR = re.compile(r"\b(?:the|all)\s+(?P<num>two|three|four|five)\b", re.IGNORECASE)
 _CARDINALS = {"two": 2, "three": 3, "four": 4, "five": 5}
+# B1.2 — ordinal selection is CODE-owned (E-axis ideal §6.2: "ordinal → position in the set"):
+# position over the (kind-narrowed) candidate order, which IS the presented order (queue order =
+# candidate_ids order = the order describe_card names them). Out-of-range → confirm, never guess.
+# B1.2-b — a POSITIONAL-SELECTOR PHRASE only ("the <ord>" | "<ord> one(s)"): homograph fillers
+# ("one second", "at last", "second that", "first of all") no longer read as selections. The
+# branch is additionally gated on _is_bare — a content compound ("the first-quarter report")
+# fires the phrase but its residual kills the positional read, letting NAME-matching win.
+_ORDINAL_SELECTOR = re.compile(
+    r"\b(?:the\s+(?P<ord1>first|second|third|fourth|fifth|last)\b"
+    r"|(?P<ord2>first|second|third|fourth|fifth|last)\s+ones?\b)",
+    re.IGNORECASE)
+_ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
 # Plural-aware (the live CRITICAL: "both calendars" didn't match → the pool never narrowed →
 # a bulk dispatch over the whole mixed set). PRECISION only — the Part-4 guarantee below holds
 # even when these match nothing. ONE copy: nodes.py imports these (the gate can't drift again).
@@ -77,6 +89,7 @@ _QUOTED = re.compile(r"'([^']{2,80})'|\"([^\"]{2,80})\"")
 _SELECTOR_TOKENS = frozenset({
     "both", "all", "of", "them", "these", "those", "the", "each", "every",
     "two", "three", "four", "five", "one", "ones",
+    "first", "second", "third", "fourth", "fifth", "last",   # B1.2 ordinals
 })
 _ACTION_VERB_TOKENS = frozenset({
     "approve", "approved", "reject", "rejected", "send", "sent", "discard", "discarded",
@@ -144,7 +157,8 @@ class ConsumeDecision:
     #                                      no_live_candidates
 
 
-def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
+def _selection(answer: str, candidates: list[Any],
+               presented_order: tuple = ()) -> tuple[str, list[str]]:
     """Classify the SELECTION dimension purely. Returns (kind, matched_ids):
       ("all", all ids)      — an explicit all/both selector;
       ("filter", matched)   — a kind and/or name selector fired (matched MAY be empty → the named
@@ -173,6 +187,28 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
             return "mismatch", [c.approval_id for c in pool]
         return "all", [c.approval_id for c in pool]
 
+    # B1.2-b — the ordinal branch: positional phrase + BARE message only (the over-fire fix).
+    m_ord = _ORDINAL_SELECTOR.search(msg)
+    if m_ord and _is_bare(msg):
+        word = (m_ord.group("ord1") or m_ord.group("ord2")).lower()
+        if want_cal or want_email:
+            # kind+ordinal: position over the LIVE kind pool — the DECLARED BOUNDED RESIDUAL
+            # under drift (the pending-only fetch cannot kind already-resolved cards).
+            idx = len(pool) - 1 if word == "last" else _ORDINALS[word]
+            if 0 <= idx < len(pool):
+                return "filter", [pool[idx].approval_id]
+            return "mismatch", [c.approval_id for c in pool]
+        # Bare ordinal (drift Option A): the FROZEN presented order picks the POSITION;
+        # liveness decides the ACTION. Never re-index onto the shrunken live list.
+        order = [str(x) for x in presented_order] or [c.approval_id for c in pool]
+        idx = len(order) - 1 if word == "last" else _ORDINALS[word]
+        if not (0 <= idx < len(order)):
+            return "mismatch", [c.approval_id for c in pool]   # beyond the frozen list → confirm
+        pick = order[idx]
+        if pick in {c.approval_id for c in candidates}:
+            return "filter", [pick]                             # frozen pick still live → act
+        return "stale", [pick]                                  # frozen pick resolved → ack
+
     matched: list[str] = []
     for c in candidates:
         kind_hit = _kind_ok(c)
@@ -190,7 +226,8 @@ def _selection(answer: str, candidates: list[Any]) -> tuple[str, list[str]]:
 
 
 def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried_intent: str,
-                   *, hedged: bool = False, committed: bool = False) -> ConsumeDecision:
+                   *, hedged: bool = False, committed: bool = False,
+                   presented_order: tuple = ()) -> ConsumeDecision:
     """Resolve the master's ANSWER to an open question.
 
     answer         — the master's reply text (for SELECTION parsing).
@@ -209,7 +246,7 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
     if not candidates:
         return ConsumeDecision("abandon", reason="no_live_candidates")
 
-    sel_kind, matched = _selection(answer, candidates)
+    sel_kind, matched = _selection(answer, candidates, presented_order)
 
     # VERB — the answer's judged verb overrides the carried intent; carried is the selector-only fallback.
     verb = answer_verb if answer_verb in _VERBS else carried_intent
@@ -235,6 +272,10 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
         return ConsumeDecision("confirm", verb, (), tuple(ids), "hedged")
 
     # --- the dispatch gate ---
+    if sel_kind == "stale":
+        # B1.2-b drift — the frozen-order pick was resolved out-of-band: an honest ack, never a
+        # re-indexed dispatch onto a different card.
+        return ConsumeDecision("abandon", verb, (), tuple(matched), "ordinal_stale")
     if sel_kind == "mismatch":
         # B1.1 #3 — the stated count ≠ the (narrowed) universe: confirm naming the pool.
         return ConsumeDecision("confirm", verb, (), tuple(matched), "cardinality_mismatch")

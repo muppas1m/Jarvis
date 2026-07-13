@@ -667,3 +667,161 @@ async def test_fixc_bare_yes_on_solicited_card_still_dispatches(monkeypatch):
         assert rec["calls"] == [(r1, "approve")]
     finally:
         await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# B1.2 — the judge window is sized from the EPOCH (the anchoring message),      #
+# never a floating [-6:] slice                                                  #
+# --------------------------------------------------------------------------- #
+def _judge_spy(monkeypatch, intent="approve"):
+    """Pin the judge AND capture the context it was shown."""
+    cap = {}
+
+    async def fake(aid, message, recent_context="", require_pending=True):
+        cap["context"] = recent_context
+        row = SimpleNamespace(payload={"tool_name": "email_send",
+                                       "tool_args": {"to": "chintu@gmail.com", "subject": "Lunch Invitation"}},
+                              action_type="email_send", thread_id="web:x", status="pending",
+                              description="d")
+        return runner._PresentedJudgment(approval_id=aid, row=row, intent=intent, change="")
+    monkeypatch.setattr(runner, "_judge_presented", fake)
+    return cap
+
+
+@pytest.mark.asyncio
+async def test_b12_long_exchange_keeps_the_presentation_in_the_judges_sight(monkeypatch):
+    """THE failing scenario: card presented → >6 messages of discussion → 'ok, send that email'.
+    The [-6:] slice scrolled past the presentation; the epoch window must contain it — and
+    exclude everything from BEFORE the card."""
+    thread = f"web:{_MARK}-b12a"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    rec = _spy_dispatch(monkeypatch)
+    cap = _judge_spy(monkeypatch, "approve")
+    presentation = _linked([r1], solicited=True)
+    history = [HumanMessage(content="what was that restaurant called again?"),   # PRE-epoch noise
+               AIMessage(content="Le Bernardin, Sir."),
+               presentation]
+    for i in range(4):                                          # 8 messages AFTER the card
+        history += [HumanMessage(content=f"question {i} about the plan"),
+                    AIMessage(content=f"answer {i} about the plan")]
+    try:
+        await nodes.card_resolution_node(_state("ok, send that email", history, thread))
+        ctx = cap.get("context", "")
+        assert "queued those for your approval" in ctx, "the PRESENTATION scrolled out of the window"
+        assert "question 3 about the plan" in ctx             # the recent arc is there
+        assert "Le Bernardin" not in ctx                       # pre-epoch noise EXCLUDED
+        assert rec["calls"] == [(r1, "approve")]               # and consent still lands
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b12_pathological_epoch_keeps_anchor_plus_most_recent(monkeypatch):
+    thread = f"web:{_MARK}-b12b"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    _spy_dispatch(monkeypatch)
+    cap = _judge_spy(monkeypatch, "approve")
+    history = [_linked([r1], solicited=True)]
+    for i in range(30):                                         # 60 messages of epoch
+        history += [HumanMessage(content=f"aside {i}"), AIMessage(content=f"reply {i}")]
+    try:
+        await nodes.card_resolution_node(_state("yes", history, thread))
+        ctx = cap.get("context", "")
+        assert "queued those for your approval" in ctx          # the ANCHOR survives the cap
+        assert "reply 29" in ctx                                # the most recent survives
+        assert "omitted" in ctx                                 # the middle is marked, not silent
+        assert "aside 2 " not in ctx or "aside 25" in ctx       # a middle chunk is gone
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b12_ordinal_resolves_by_presented_order_direct_path(monkeypatch):
+    """'just approve the first one' at a 2-card presentation → the FIRST presented card,
+    through the unchanged gate chain — never a refuse-loop, never the second card."""
+    thread = f"web:{_MARK}-b12c"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge_spy(monkeypatch, "approve")
+    try:
+        await nodes.card_resolution_node(
+            _state("just approve the first one", [_linked([r1, r2], solicited=True)], thread))
+        assert rec["calls"] == [(r1, "approve")], f"ordinal missed the presented order: {rec['calls']}"
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b12_ordinal_second_resolves_the_second(monkeypatch):
+    thread = f"web:{_MARK}-b12d"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"})
+    rec = _spy_dispatch(monkeypatch)
+    _judge_spy(monkeypatch, "approve")
+    q = AIMessage(content="There are 2 pending — the Lunch email; the Budget email. Which one?",
+                  id="q-b12", additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                            "intent": "approve", "candidate_ids": [r1, r2], "kind": ""}})
+    _verb2(monkeypatch, "none")
+    try:
+        await nodes.card_resolution_node(_state("the second one", [_linked([r1, r2]), q], thread))
+        assert rec["calls"] == [(r2, "approve")], f"{rec['calls']}"
+    finally:
+        await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# B1.2-b drift — both paths: never re-index onto a different card               #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_b12b_direct_drift_second_one_acks_never_reindexes(monkeypatch):
+    thread = f"web:{_MARK}-drift1"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"},
+                     status="approved")                        # resolved out-of-band
+    rec = _spy_dispatch(monkeypatch)
+    _judge_spy(monkeypatch, "approve")
+    try:
+        out = await nodes.card_resolution_node(
+            _state("the second one", [_linked([r1, r2], solicited=True)], thread))
+        assert rec["calls"] == [], f"re-indexed onto a different card: {rec['calls']}"
+        assert "already taken care of" in (out.get("final_response") or "")
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b12b_consume_drift_second_one_acks(monkeypatch):
+    thread = f"web:{_MARK}-drift2"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"},
+                     status="approved")
+    rec = _spy_dispatch(monkeypatch)
+    _verb2(monkeypatch, "none")
+    q = AIMessage(content="Which one — 1) Lunch 2) Budget?", id="q-drift",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [r1, r2], "kind": ""}})
+    try:
+        out = await nodes.card_resolution_node(_state("the second one", [_linked([r1, r2]), q], thread))
+        assert rec["calls"] == []
+        assert "already taken care of" in (out.get("final_response") or "")
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_b12b_direct_drift_out_of_range_confirms_never_lone_dispatch(monkeypatch):
+    """live==1 after drift + 'the third one' (out of the frozen 2) → confirm, never the
+    solicited singleton dispatch."""
+    thread = f"web:{_MARK}-drift3"
+    r1 = await _seed(thread, "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Budget", "body": "y"},
+                     status="approved")
+    rec = _spy_dispatch(monkeypatch)
+    _judge_spy(monkeypatch, "approve")
+    try:
+        await nodes.card_resolution_node(
+            _state("the third one", [_linked([r1, r2], solicited=True)], thread))
+        assert rec["calls"] == [], f"out-of-range decayed into a dispatch: {rec['calls']}"
+    finally:
+        await _cleanup(thread)

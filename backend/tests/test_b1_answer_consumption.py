@@ -581,3 +581,99 @@ def test_fixb_edit_singleton_with_change_content_still_dispatches():
     """Edit is exempt from the none-branch gate — its residual IS the change text."""
     d = resolve_answer("change the time to 10am", [_cal("c1")], answer_verb="edit", carried_intent="approve")
     assert d.action == "dispatch" and d.verb == "edit"
+
+
+# --------------------------------------------------------------------------- #
+# B1.2 — ordinal selection: position over the (kind-narrowed) presented order   #
+# --------------------------------------------------------------------------- #
+def test_b12_ordinal_first_and_second():
+    pool = [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")]
+    assert resolve_answer("the first one", pool, "none", "approve").selection == ("e1",)
+    assert resolve_answer("the second one", pool, "none", "approve").selection == ("e2",)
+    assert resolve_answer("the last one", pool, "none", "approve").selection == ("e2",)
+
+
+def test_b12_ordinal_with_kind_narrows_first():
+    pool = [_cal("c1"), _email("e1"), _email("e2", to="amy@x.com", subject="Budget")]
+    d = resolve_answer("the first email", pool, "none", "approve")
+    assert d.action == "dispatch" and d.selection == ("e1",)    # first OF THE EMAILS
+
+
+def test_b12_ordinal_out_of_range_confirms():
+    d = resolve_answer("the third one", [_email("e1"), _email("e2", to="amy@x.com", subject="B")],
+                       answer_verb="none", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == ()
+
+
+# --------------------------------------------------------------------------- #
+# B1.2-b — ordinal over-fire: KEEP the positional phrases, KILL the homographs   #
+# and content compounds                                                          #
+# --------------------------------------------------------------------------- #
+def test_b12b_keep_matrix_positional_phrases_dispatch():
+    pool = [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")]
+    for msg, want in [("the first one", "e1"), ("the second one", "e2"), ("the last one", "e2"),
+                      ("just approve the first one", "e1")]:
+        d = resolve_answer(msg, pool, "none" if "approve" not in msg else "approve", "approve")
+        assert d.action == "dispatch" and d.selection == (want,), f"{msg!r} → {d}"
+
+
+@pytest.mark.parametrize("msg", ["one second", "at last", "second that", "first of all"])
+def test_b12b_kill_matrix_homograph_fillers_never_position_dispatch(msg):
+    """'one second' is a stall, not a selection — a positional dispatch here is a wrong send."""
+    pool = [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")]
+    d = resolve_answer(msg, pool, "none", "approve")
+    assert d.action != "dispatch", f"{msg!r} position-dispatched: {d}"
+
+
+def test_b12b_kill_content_compound_name_match_wins():
+    """'the first-quarter report' names a CARD (by subject), it does not select position 0 —
+    name-matching must find e2, never pool[0]."""
+    pool = [_email("e1", subject="Lunch Invitation"),
+            _email("e2", to="amy@x.com", subject="First-Quarter Report")]
+    d = resolve_answer("approve the first-quarter report", pool, "approve", "approve")
+    assert d.selection == ("e2",), f"position pre-empted the name: {d}"
+
+
+@pytest.mark.parametrize("msg", ["reject the second opinion email", "send the fifth amendment doc"])
+def test_b12b_kill_content_compounds_never_position_dispatch(msg):
+    pool = [_email("e1"), _email("e2", to="amy@x.com", subject="Budget")]
+    d = resolve_answer(msg, pool, "reject" if "reject" in msg else "approve", "approve")
+    assert not (d.action == "dispatch" and d.reason == "narrowed_singleton"
+                and d.selection in (("e1",), ("e2",)) and "opinion" in msg), f"{msg!r} → {d}"
+    # structurally: neither dispatches by POSITION
+    assert d.action != "dispatch" or d.selection == (), f"{msg!r} position-dispatched: {d}"
+
+
+# --------------------------------------------------------------------------- #
+# B1.2-b — drift (Option A): frozen order picks the POSITION, liveness the ACTION#
+# --------------------------------------------------------------------------- #
+def test_b12b_drift_ordinal_maps_to_frozen_order():
+    """Presented [e1, e2, c1]; e2 resolved out-of-band → live [e1, c1]. 'the second one' must
+    resolve to E2's slot (→ stale-ack), NEVER re-index onto the calendar."""
+    live = [_email("e1"), _cal("c1")]
+    d = resolve_answer("the second one", live, "none", "approve",
+                       presented_order=("e1", "e2", "c1"))
+    assert d.action == "abandon" and d.reason == "ordinal_stale", f"re-indexed: {d}"
+
+
+def test_b12b_drift_live_pick_still_dispatches():
+    live = [_email("e1"), _cal("c1")]
+    d = resolve_answer("the third one", live, "none", "approve",
+                       presented_order=("e1", "e2", "c1"))
+    assert d.action == "dispatch" and d.selection == ("c1",)    # frozen #3 = c1, still live
+
+
+def test_b12b_drift_out_of_frozen_range_confirms():
+    live = [_email("e1")]
+    d = resolve_answer("the fourth one", live, "none", "approve",
+                       presented_order=("e1", "e2"))
+    assert d.action == "confirm", f"{d}"
+
+
+def test_b12b_residual_kind_ordinal_uses_live_pool_pinned():
+    """DECLARED BOUNDED RESIDUAL: kind+ordinal under drift stays on the LIVE kind pool (the
+    pending-only fetch can't kind resolved cards). Pinned so the residual is visible."""
+    live = [_email("e1"), _email("e3", to="joe@x.com", subject="Plan")]
+    d = resolve_answer("the second email", live, "none", "approve",
+                       presented_order=("e1", "e2", "e3"))
+    assert d.action == "dispatch" and d.selection == ("e3",)    # live-pool #2 (residual behavior)
