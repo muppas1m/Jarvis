@@ -369,3 +369,47 @@ async def test_golden_send_it_still_overrides():
     from app.agent.decision_resolver import resolve_answer_verb
     res = await resolve_answer_verb("actually approve it", "")
     assert res.verb == "approve"           # CH-2 override survives the inversion
+
+
+# --------------------------------------------------------------------------- #
+# B1.1-C — Group A/B judged LIVE end-to-end (real verb judge → the resolver)    #
+# --------------------------------------------------------------------------- #
+class _LC:
+    def __init__(self, aid, tool, args, kind):
+        self.approval_id = aid; self.tool_name = tool; self.tool_args = args; self.kind = kind
+
+
+def _live_pool22():
+    return [_LC("e1", "email_send", {"to": "chintu@gmail.com", "subject": "Lunch Invitation"}, "email"),
+            _LC("e2", "email_send", {"to": "amy@x.com", "subject": "Budget"}, "email"),
+            _LC("c1", "calendar_update", {"event_id": "x", "title": "Lunch with friends",
+                                          "start_iso": "2026-07-19T17:00:00-04:00"}, "tool"),
+            _LC("c2", "calendar_create", {"title": "Standup",
+                                          "start_iso": "2026-07-21T13:00:00-04:00"}, "tool")]
+
+
+@pytest.mark.parametrize("msg,want_action,want_sel", [
+    ("approve both calendars", "dispatch", {"c1", "c2"}),      # THE live CRITICAL
+    ("the drafts, all of them", "confirm", set()),
+    ("both bookings", "confirm", set()),
+    ("I mean both", "confirm", set()),                          # over 4: both=2 ≠ 4 → confirm
+])
+async def test_b11c_group_a_live_end_to_end(msg, want_action, want_sel):
+    from app.agent.answer_consumption import resolve_answer
+    from app.agent.decision_resolver import resolve_answer_verb
+    res = await resolve_answer_verb(msg, "")
+    d = resolve_answer(msg, _live_pool22(), res.verb, "approve",
+                       hedged=res.hedged, committed=res.committed)
+    assert d.action == want_action, f"{msg!r} → {d} (verb={res.verb})"
+    if want_sel:
+        assert set(d.selection) == want_sel, f"{msg!r} → {d}"
+
+
+async def test_b11c_group_b_live_bare_both_over_pair():
+    from app.agent.answer_consumption import resolve_answer
+    from app.agent.decision_resolver import resolve_answer_verb
+    pool = _live_pool22()[:1] + _live_pool22()[2:3]            # [1 email + 1 calendar]
+    res = await resolve_answer_verb("I mean both", "")
+    d = resolve_answer("I mean both", pool, res.verb, "approve",
+                       hedged=res.hedged, committed=res.committed)
+    assert d.action == "dispatch" and len(d.selection) == 2, f"{d} (verb={res.verb})"

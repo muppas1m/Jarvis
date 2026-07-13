@@ -1335,9 +1335,11 @@ async def _card_edit_redraft(judged: Any, message: str, resolved_via: str = "web
 # Wrong-card-resolution SEAL (D15/D16) — resolve the AUTHORITATIVE live target,  #
 # keyed on the conversation's jarvis linkage (the old client pointer is gone).   #
 # --------------------------------------------------------------------------- #
-_CARD_KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
-_CARD_KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
-_CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
+# B1.1-C Part 1 — ONE kind vocabulary: imported from the resolver (the gate had a byte-identical
+# second copy that silently drifted plural-blind with it; deleting the copy makes drift impossible).
+from app.agent.answer_consumption import _CALENDAR_TOOLS  # noqa: E402
+from app.agent.answer_consumption import _KIND_CALENDAR as _CARD_KIND_CALENDAR  # noqa: E402
+from app.agent.answer_consumption import _KIND_EMAIL as _CARD_KIND_EMAIL  # noqa: E402
 # (The A2-s2 rewrite retired the seal's token matcher — _GENERIC_TOKENS /
 # _KIND_INDICATOR_WORDS / _card_distinguishing_text / _names_mismatched_target. Its D25 class
 # (punctuation-glued tokens → fabricated named_mismatch) is structurally impossible now: the
@@ -1556,8 +1558,9 @@ async def _resolve_conversation_target(intent: str, message: str, resolved_via: 
 
     if len(live) > 1:
         choices = "; ".join(describe_card(c) for c in live[:5])
+        alt = "or both" if len(live) == 2 else "or all of them"
         reply = (f"There are {len(live)} of those pending, {h} — {choices}. "
-                 f"Which one did you mean — or both?")
+                 f"Which one did you mean — {alt}?")
         logger.info("card_resolution_refused", intent=intent, live=len(live), reason="multiple")
         # B1.0 — the refuse IS a first-class question: the answer ("both" / "the calendar one")
         # resolves THIS ask, with the original intent carried (reject stays reject).
@@ -1723,7 +1726,8 @@ async def _consume_question_answer(state: AgentState, ref: dict, message: str,
                      f"A clear word either way and I'll act on it.")
         else:
             named = "; ".join(describe_card(c) for c in chosen[:5])
-            reply = f"To be precise, {h} — {named}. Which should I act on, or both?"
+            alt = "or both" if len(chosen) == 2 else "or all of them"
+            reply = f"To be precise, {h} — {named}. Which should I act on, {alt}?"
         q = _question_message(reply, decision.verb or ref["intent"],
                               [c.approval_id for c in chosen])
         return {"messages": [*stamp_msgs, q], "final_response": reply, "card_handled": True}

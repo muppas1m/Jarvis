@@ -479,3 +479,81 @@ def test_b11_all_three_of_three_dispatches():
                         _email("e3", to="joe@x.com", subject="P")],
                        answer_verb="approve", carried_intent="approve")
     assert d.action == "dispatch" and len(d.selection) == 3
+
+
+# --------------------------------------------------------------------------- #
+# B1.1-C (reviewer CRITICAL): the over-dispatch CLASS — a bulk selector over an  #
+# un-narrowed mixed pool. Group A leaked live; Group B must stay green.          #
+# --------------------------------------------------------------------------- #
+def _mixed22():
+    return [_email("e1"), _email("e2", to="amy@x.com", subject="Budget"),
+            _cal("c1"), _cal("c2", title="Standup", start="2026-07-21T13:00:00-04:00")]
+
+
+def test_ga_both_calendars_dispatches_exactly_the_calendars():
+    """THE live CRITICAL: 'approve both calendars' over [2e+2c] sent all 4."""
+    d = resolve_answer("approve both calendars", _mixed22(), answer_verb="approve", carried_intent="approve")
+    assert d.action == "dispatch" and set(d.selection) == {"c1", "c2"}, f"{d}"
+
+
+def test_ga_all_of_these_meetings_dispatches_exactly_the_calendars():
+    d = resolve_answer("all of these meetings", _mixed22(), answer_verb="none", carried_intent="approve")
+    assert d.action == "dispatch" and set(d.selection) == {"c1", "c2"}, f"{d}"
+
+
+@pytest.mark.parametrize("msg", ["the drafts, all of them", "all of those invites"])
+def test_ga_out_of_vocab_kind_with_all_confirms(msg):
+    d = resolve_answer(msg, _mixed22(), answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{msg!r} → {d}"
+
+
+@pytest.mark.parametrize("msg", ["both bookings", "the two bookings"])
+def test_ga_unknown_kind_over_mixed_pair_confirms(msg):
+    d = resolve_answer(msg, [_email("e1"), _cal("c1")], answer_verb="none", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{msg!r} → {d}"
+
+
+def test_ga_the_two_meetings_over_one_calendar_confirms():
+    d = resolve_answer("approve the two meetings", [_email("e1"), _cal("c1")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{d}"
+
+
+def test_ga_both_over_three_homogeneous_confirms():
+    """Part 2: 'both' carries implicit count 2 — over 3 it confirms, never sends 3."""
+    d = resolve_answer("approve both", [_email("e1"), _email("e2", to="amy@x.com", subject="B"),
+                                        _email("e3", to="joe@x.com", subject="P")],
+                       answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{d}"
+
+
+@pytest.mark.xfail(reason="Part 3 (none-branch residual gate) DROPPED by order 2026-07-13 — "
+                          "this Group-A case reopens: none→singleton→dispatch. Awaiting ruling.",
+                   strict=True)
+def test_ga_approve_the_invites_on_a_lone_email_never_sends():
+    d = resolve_answer("approve the invites", [_email("e1")], answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"{d}"
+
+
+def test_ga_guarantee_holds_with_the_kind_regex_deliberately_broken(monkeypatch):
+    """ROOT-INDEPENDENCE PIN: with the calendar regex lobotomized, 'both calendars' over
+    [2e+2c] STILL confirms — the guarantee fires on the STRUCTURE of the result (a bulk
+    selector + a multi-kind pool + a non-bare message), never on vocabulary coverage."""
+    import re as _re
+    import app.agent.answer_consumption as ac
+    monkeypatch.setattr(ac, "_KIND_CALENDAR", _re.compile(r"(?!x)x"))   # never matches
+    d = resolve_answer("approve both calendars", _mixed22(), answer_verb="approve", carried_intent="approve")
+    assert d.action == "confirm" and d.selection == (), f"the guarantee needs the regex: {d}"
+
+
+# ------------------------- Group B — must stay green ------------------------ #
+def test_gb_bare_both_over_mixed_pair_dispatches():
+    for msg, verb in [("I mean both", "none"), ("both", "none"), ("reject both", "reject")]:
+        d = resolve_answer(msg, [_email("e1"), _cal("c1")],
+                           answer_verb=verb, carried_intent="approve" if verb != "reject" else "reject")
+        assert d.action == "dispatch" and len(d.selection) == 2, f"{msg!r} → {d}"
+
+
+def test_gb_all_of_them_over_mixed_pair_dispatches():
+    d = resolve_answer("all of them", [_email("e1"), _cal("c1")], answer_verb="none", carried_intent="approve")
+    assert d.action == "dispatch" and len(d.selection) == 2

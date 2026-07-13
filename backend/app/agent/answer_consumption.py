@@ -55,7 +55,10 @@ _ALL_SELECTOR = re.compile(
 # re-confirms — a count that doesn't match is never a dispatch.
 _CARDINAL_SELECTOR = re.compile(r"\b(?:the|all)\s+(?P<num>two|three|four|five)\b", re.IGNORECASE)
 _CARDINALS = {"two": 2, "three": 3, "four": 4, "five": 5}
-_KIND_CALENDAR = re.compile(r"\b(calendar|event|meeting|appointment|schedule)\b", re.IGNORECASE)
+# Plural-aware (the live CRITICAL: "both calendars" didn't match → the pool never narrowed →
+# a bulk dispatch over the whole mixed set). PRECISION only — the Part-4 guarantee below holds
+# even when these match nothing. ONE copy: nodes.py imports these (the gate can't drift again).
+_KIND_CALENDAR = re.compile(r"\b(calendars?|events?|meetings?|appointments?|schedules?)\b", re.IGNORECASE)
 _KIND_EMAIL = re.compile(r"\b(e-?mails?|reply|replies)\b", re.IGNORECASE)
 _CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
 # Step-2.1 H2 — name-selector PRESENCE detection (an address / quoted string in the answer is a
@@ -63,6 +66,54 @@ _CALENDAR_TOOLS = ("calendar_create", "calendar_update", "calendar_delete")
 # fall-through). Local copies keep this module a pure leaf.
 _EMAIL_ADDR = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.IGNORECASE)
 _QUOTED = re.compile(r"'([^']{2,80})'|\"([^\"]{2,80})\"")
+
+
+# Fork B (reviewer-preferred) — "bare" via RESIDUAL EMPTINESS, fail-safe: strip the selector
+# span, the matched kind tokens, a closed action-verb list, and a small CLOSED function-word
+# set; ANY remaining alphabetic token ≥3 chars means the master scoped the request with a word
+# we may not understand → NON-bare → confirm. An unknown token ("bookings") is non-bare BY
+# CONSTRUCTION, so the Part-4 guarantee holds with every kind regex wrong. "mean" is in the
+# closed set (the I2 acceptance phrase "I mean both" must stay bare).
+_SELECTOR_TOKENS = frozenset({
+    "both", "all", "of", "them", "these", "those", "the", "each", "every",
+    "two", "three", "four", "five", "one", "ones",
+})
+_ACTION_VERB_TOKENS = frozenset({
+    "approve", "approved", "reject", "rejected", "send", "sent", "discard", "discarded",
+    "cancel", "cancelled", "canceled", "delete", "deleted", "accept", "accepted", "confirm",
+    "confirmed", "skip", "skipped", "proceed", "dispatch", "fire", "book", "scrap",
+})
+_FUNCTION_TOKENS = frozenset({
+    "i", "we", "you", "it", "me", "my", "mean", "meant", "yes", "yeah", "yep", "ok", "okay",
+    "sir", "please", "and", "to", "for", "on", "in", "a", "an", "that", "this", "do", "go",
+    "ahead", "now", "just", "actually", "then", "so", "too", "also", "well", "right",
+    "alright", "sure", "fine", "lets", "let", "us", "with", "no", "not", "dont", "them",
+})
+
+
+def _is_bare(answer: str) -> bool:
+    """True when nothing but selector/kind/verb/function words remain — the ONLY state in
+    which a bulk selector may act on a multi-kind pool (Part 4's bare-test, fail-safe)."""
+    text = re.sub(r"[^a-z ]", " ", (answer or "").lower())
+    text = _KIND_CALENDAR.sub(" ", text)
+    text = _KIND_EMAIL.sub(" ", text)
+    for tok in text.split():
+        if len(tok) < 3:
+            continue
+        if tok in _SELECTOR_TOKENS or tok in _ACTION_VERB_TOKENS or tok in _FUNCTION_TOKENS:
+            continue
+        return False
+    return True
+
+
+def _kind_sig(c: Any) -> str:
+    """The vocab-free kind signature (from STATE, never prose): calendar tools → "cal"; email
+    cards → "email"; anything else → its own tool_name (a future tool is its own kind)."""
+    if getattr(c, "tool_name", "") in _CALENDAR_TOOLS:
+        return "cal"
+    if getattr(c, "kind", "") == "email":
+        return "email"
+    return getattr(c, "tool_name", "") or "unknown"
 
 
 @dataclass(frozen=True)
@@ -180,8 +231,19 @@ def resolve_answer(answer: str, candidates: list[Any], answer_verb: str, carried
         # B1.1 #3 — the stated count ≠ the (narrowed) universe: confirm naming the pool.
         return ConsumeDecision("confirm", verb, (), tuple(matched), "cardinality_mismatch")
     if sel_kind == "all":
-        # B1.1 #1 — `matched` IS the kind-narrowed pool ("both emails" = exactly the emails;
-        # bare "both" = every candidate). The interim mixed_kind_all guard retired with this.
+        pool_cards = [c for c in candidates if c.approval_id in set(matched)]
+        # Part 4 (THE GUARANTEE — vocab-free homogeneity / narrow-failure): a bulk selector may
+        # dispatch a pool spanning >1 card-kind ONLY when the message is BARE. Any extra
+        # scoping token — a plural we missed, "bookings", a future tool's noun — is a FAILED
+        # narrowing → confirm. Fires on the STRUCTURE of the result (kind signatures from
+        # state), so it holds with every kind regex broken. "I mean both" (bare) dispatches;
+        # "both bookings" confirms.
+        if len({_kind_sig(c) for c in pool_cards}) > 1 and not _is_bare(answer):
+            return ConsumeDecision("confirm", verb, (), tuple(matched), "unnarrowed_bulk")
+        # Part 2 — "both" carries an IMPLICIT count of 2: any other pool size confirms
+        # (count-less "them all"/"all of them" stay unbounded).
+        if re.search(r"\bboth\b", answer or "", re.IGNORECASE) and len(matched) != 2:
+            return ConsumeDecision("confirm", verb, (), tuple(matched), "cardinality_mismatch")
         return ConsumeDecision("dispatch", verb, tuple(matched), (), "explicit_all")
 
     if sel_kind == "filter":
