@@ -413,3 +413,118 @@ async def test_b11c_group_b_live_bare_both_over_pair():
     d = resolve_answer("I mean both", pool, res.verb, "approve",
                        hedged=res.hedged, committed=res.committed)
     assert d.action == "dispatch" and len(d.selection) == 2, f"{d} (verb={res.verb})"
+
+
+# --------------------------------------------------------------------------- #
+# Ledger #1 (B1 sitting 2026-07-15) — edit/reject discrimination locks.         #
+# Behavior classes, not sentences: field-removal → edit never reject;           #
+# destruction verbs are card-aware. (The sitting misreads were intermittent —   #
+# these pin the boundary so drift can't reopen them.)                           #
+# --------------------------------------------------------------------------- #
+_CREATE_ATT_ARGS = {"title": "Lunch with friends", "start_iso": "2026-07-20T13:00:00-04:00",
+                    "attendees": ["priya@x.com", "bob@x.com", "sam@x.com"]}
+_CREATE_ATT_CTX = ("Assistant: I've queued a calendar event 'Lunch with friends' at 1:00 pm with "
+                   "priya@x.com, bob@x.com and sam@x.com for your approval, Sir — shall I go ahead?")
+
+
+@pytest.mark.parametrize("msg", ["remove the attendees", "take priya off the invite",
+                                 "drop the location", "remove bob from the list"])
+async def test_field_removal_is_edit_never_reject(msg):
+    """δ-1's trigger: a removal naming a PART of the action is an EDIT to that part — a reject
+    here seeded the silently-vanished event."""
+    for _ in range(2):
+        res = await resolve_decision("calendar_create", _CREATE_ATT_ARGS, None, msg, _CREATE_ATT_CTX)
+        assert res.intent == "edit", f"{msg!r} → {res.intent} (a removal must edit, never reject)"
+        assert res.change, f"{msg!r} carried no change text"
+
+
+@pytest.mark.parametrize("msg", ["delete it", "trash it", "get rid of it"])
+async def test_destruction_verb_on_a_send_card_rejects(msg):
+    """δ-2: on a NON-delete card a destruction verb targets the PROPOSAL — discard the draft;
+    never approve (nothing sends), never an edit-loop."""
+    for _ in range(2):
+        res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, msg, _PROD_CTX)
+        assert res.intent == "reject", f"{msg!r} on email_send → {res.intent}"
+
+
+@pytest.mark.parametrize("msg", ["delete it", "trash it", "get rid of it"])
+async def test_destruction_verb_on_a_delete_card_approves(msg):
+    """The mirror: when the pending action IS the deletion, the destruction verb commands it."""
+    for _ in range(2):
+        res = await resolve_decision("calendar_delete", _DELETE_ARGS, _DELETE_DESC, msg, _DELETE_CTX)
+        assert res.intent == "approve", f"{msg!r} on calendar_delete → {res.intent}"
+
+
+async def test_bare_remove_it_is_whole_action_reject():
+    """The boundary control: 'remove it' names NO part — that is the whole action → reject."""
+    res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, "remove it", _PROD_CTX)
+    assert res.intent == "reject", f"'remove it' → {res.intent}"
+
+
+# --------------------------------------------------------------------------- #
+# Ledger #1 fix-up (reviewer blocker) — a QUESTION about a part is not an        #
+# instruction: it re-asks, it never edits (the info-boundary), on BOTH kinds.    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["is that the right address?", "did you use her work email?"])
+async def test_question_about_a_part_never_edits_email_card(msg):
+    for _ in range(2):
+        res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, msg, _PROD_CTX)
+        assert res.intent != "edit", f"{msg!r} → edit (a question mutated the card)"
+        assert res.intent == "unclear", f"{msg!r} → {res.intent}"
+
+
+@pytest.mark.parametrize("msg", ["is the time right?", "is that the right event?"])
+async def test_question_about_a_part_never_edits_calendar_card(msg):
+    for _ in range(2):
+        res = await resolve_decision("calendar_create", _CREATE_ATT_ARGS, None, msg, _CREATE_ATT_CTX)
+        assert res.intent != "edit", f"{msg!r} → edit (a question mutated the card)"
+        assert res.intent == "unclear", f"{msg!r} → {res.intent}"
+
+
+async def test_trash_it_on_a_delete_card_approves():
+    """The LOW: the non-literal synonym joins the worked example — never a safe-but-wrong
+    discard of the delete."""
+    for _ in range(2):
+        res = await resolve_decision("calendar_delete", _DELETE_ARGS, _DELETE_DESC, "trash it", _DELETE_CTX)
+        assert res.intent == "approve", f"'trash it' on calendar_delete → {res.intent}"
+
+
+@pytest.mark.parametrize("msg", ["cancel", "forget it", "scrap it"])
+async def test_abandon_words_stay_reject_on_a_delete_card(msg):
+    """The no-over-reach guard: pinning 'trash it' must NOT sweep the abandon words."""
+    res = await resolve_decision("calendar_delete", _DELETE_ARGS, _DELETE_DESC, msg, _DELETE_CTX)
+    assert res.intent == "reject", f"{msg!r} on calendar_delete → {res.intent}"
+
+
+# --------------------------------------------------------------------------- #
+# Ledger #1 closing pass — the FULL question class (membership/content/"did     #
+# you…" — pre-existing misroutes, same class) + polite-instruction pins.        #
+# The qualifier is PRINCIPLE-FIRST: no imperative to change + asks about a      #
+# part → re-ask. The judge's job here is re-ask ONLY (answering is a later      #
+# ledger item).                                                                 #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("msg", ["is Pavan on the invite?", "are the attendees correct?",
+                                 "does this include the location?", "who's on it?"])
+async def test_membership_questions_never_edit_calendar_card(msg):
+    for _ in range(2):
+        res = await resolve_decision("calendar_create", _CREATE_ATT_ARGS, None, msg, _CREATE_ATT_CTX)
+        assert res.intent != "edit", f"{msg!r} → edit (a question mutated the card)"
+        assert res.intent == "unclear", f"{msg!r} → {res.intent}"
+
+
+@pytest.mark.parametrize("msg", ["who's it going to?", "does this include the budget numbers?"])
+async def test_membership_questions_never_edit_email_card(msg):
+    for _ in range(2):
+        res = await resolve_decision("email_send", _SEND_ARGS, _SEND_DESC, msg, _PROD_CTX)
+        assert res.intent != "edit", f"{msg!r} → edit"
+        assert res.intent == "unclear", f"{msg!r} → {res.intent}"
+
+
+@pytest.mark.parametrize("msg", ["can you remove Pavan?", "can you remove the attendees?",
+                                 "could you drop the location?"])
+async def test_polite_instructions_still_edit(msg):
+    """The counter-boundary (reviewer-measured green — pinned): a polite IMPERATIVE is an
+    instruction, not a question about a value."""
+    for _ in range(2):
+        res = await resolve_decision("calendar_create", _CREATE_ATT_ARGS, None, msg, _CREATE_ATT_CTX)
+        assert res.intent == "edit", f"{msg!r} → {res.intent} (a polite instruction must edit)"
