@@ -163,6 +163,7 @@ erDiagram
     user_profiles {
         UUID id PK
         String name
+        String timezone
         JSONB always_on
         JSONB on_demand
         DateTime briefing_hwm

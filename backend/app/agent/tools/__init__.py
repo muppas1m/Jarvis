@@ -49,6 +49,9 @@ def register_all_tools() -> None:
     from app.agent.tools.readiness_tool import register as register_readiness
     register_readiness()
 
+    from app.agent.tools.profile_tool import register as register_profile
+    register_profile()
+
     from app.agent.tools.briefing_tool import register as register_briefing
     register_briefing()
 

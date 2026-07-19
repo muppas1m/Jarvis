@@ -261,7 +261,10 @@ def build_system_prompt(
     else:
         memories_section = "(no relevant memories found for this query)"
 
-    timezone = always_on.get("timezone", "UTC")
+    # B1-TZ — the turn-bound resolution (column → legacy always_on → flagged default);
+    # falls back to the legacy read only if the var is somehow unbound.
+    from app.agent.master_tz import current_tz
+    timezone = current_tz()[0] or always_on.get("timezone", "UTC")
 
     # Per-turn check-in directive (5.4) — volatile (changes every turn), so it lives in the
     # VOLATILE suffix, never the cached stable prefix. Empty → no block at all.

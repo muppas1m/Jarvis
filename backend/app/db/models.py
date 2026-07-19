@@ -56,6 +56,11 @@ class UserProfile(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
 
+    # B1-TZ (R2) — timezone as a FIRST-CLASS field. Nullable: unset is meaningful (the
+    # fail-visible render marker + the ask-once capture); the legacy always_on["timezone"]
+    # stays a read fallback.
+    timezone = Column(String(64), nullable=True)
+
     # ALWAYS-ON: small dict, joined into every system prompt.
     # Example: {"timezone": "America/New_York", "language": "English",
     #           "communication_style": "Direct, brief, bullet points"}

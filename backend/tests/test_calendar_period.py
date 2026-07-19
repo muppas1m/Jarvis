@@ -110,7 +110,9 @@ async def test_profile_tz_used_when_arg_empty(monkeypatch):
 
     class _Mem:
         async def get_always_on(self):
-            return {"timezone": "America/New_York"}
+            # the REAL outer-dict shape (the old flat fake is how the dead bridge shipped
+            # green — bridge fix, master ruling 2026-07-19)
+            return {"name": "Master", "always_on": {"timezone": "America/New_York"}}
 
     monkeypatch.setattr("app.memory.manager.get_memory", lambda: _Mem())
     res = await cal.calendar_period("2026-06-25", "2026-06-25", tz="")

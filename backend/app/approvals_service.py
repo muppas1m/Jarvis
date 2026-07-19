@@ -180,15 +180,31 @@ def describe_card(card: UnifiedApprovalCard) -> str:
 
 
 def _human_time(iso_value: str) -> str:
-    """A recognizable human form of an ISO instant ("5:00 pm on Friday, July 4") — empty on an
-    unparseable value (the caller just omits the time)."""
+    """A recognizable human form of an ISO instant ("1:00 pm on Sunday, July 5") in the
+    MASTER's timezone (B1-TZ: the turn-bound TZ via master_tz.current_tz — the issue-2
+    "5:00 pm for a 1 PM request" class). Fail-VISIBLE: while the profile TZ is unset the time
+    carries the zone label ("5:00 pm UTC …") — never silently wrong. Naive datetimes render
+    as-is (already wall-clock). Empty on an unparseable value."""
     try:
         dt = datetime.fromisoformat((iso_value or "").strip().replace("Z", "+00:00"))
     except ValueError:
         return ""
+    marker = ""
+    if dt.tzinfo is not None:
+        from zoneinfo import ZoneInfo
+
+        from app.agent.master_tz import current_tz
+        tz_name, fallback = current_tz()
+        try:
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        except Exception:  # noqa: BLE001 — a bad zone renders the instant unconverted, flagged
+            fallback = True
+        if fallback:
+            marker = f" {tz_name}"
     h12 = dt.hour % 12 or 12
     ampm = "am" if dt.hour < 12 else "pm"
-    return f"{h12}:{dt.minute:02d} {ampm} on {dt.strftime('%A')}, {dt.strftime('%B')} {dt.day}"
+    return (f"{h12}:{dt.minute:02d} {ampm}{marker} on "
+            f"{dt.strftime('%A')}, {dt.strftime('%B')} {dt.day}")
 
 
 def summarize_others(cards: list[UnifiedApprovalCard], exclude_approval_id: str, honorific: str) -> str:

@@ -320,15 +320,35 @@ class CalendarPeriodResult:
     error: str = ""
 
 
+async def _profile_timezone_column() -> str:
+    """The first-class user_profiles.timezone column (B1-TZ) — empty when unset/unreadable."""
+    try:
+        from sqlalchemy import select
+
+        from app.db.engine import async_session
+        from app.db.models import UserProfile
+        async with async_session() as session:
+            val = (await session.execute(select(UserProfile.timezone).limit(1))).scalar()
+        return val or ""
+    except Exception as exc:  # noqa: BLE001 — TZ resolution must never raise
+        logger.warning("calendar_tz_column_read_failed", error=str(exc))
+        return ""
+
+
 async def _resolve_timezone(tz: str) -> tuple[str, bool]:
     """Resolve the master's TZ — explicit arg → profile always_on['timezone'] →
     configured default (FLAGGED). Never silently UTC. Returns (tz_name, fallback)."""
     candidate = (tz or "").strip()
     if not candidate:
+        # B1-TZ (R2): the FIRST-CLASS profile column is the primary source.
+        candidate = (await _profile_timezone_column() or "").strip()
+    if not candidate:
         try:
             from app.memory.manager import get_memory
             always_on = await get_memory().get_always_on()
-            candidate = (always_on.get("timezone") or "").strip()
+            # the legacy read is NESTED: get_always_on() returns the OUTER profile dict
+            # {'name':…, 'always_on': {'timezone':…}} (bridge fix, master ruling 2026-07-19)
+            candidate = ((always_on.get("always_on") or {}).get("timezone") or "").strip()
         except Exception as exc:  # noqa: BLE001 — TZ resolution must never raise
             logger.warning("calendar_tz_profile_read_failed", error=str(exc))
             candidate = ""

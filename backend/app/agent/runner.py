@@ -255,6 +255,10 @@ async def run_turn(
 ) -> dict[str, Any]:
     """Execute one user turn through the agent graph."""
     runtime_stats.record_turn()
+    # B1-TZ — bind the master's timezone ONCE for this turn (pre-graph, so every node's
+    # copied context can read it sync at render time).
+    from app.agent.master_tz import resolve_and_bind
+    await resolve_and_bind()
     config, handler = _config_with_handler(thread_id)
 
     # Legacy paused-at-interrupt checkpoint (pre-Phase-3). APPROVE-tier tools no
@@ -377,6 +381,10 @@ async def stream_turn(
     runtime_stats.record_turn()
     yield {"type": "thread_id", "content": thread_id}
 
+    # B1-TZ — bind the master's timezone ONCE for this turn (pre-graph, so every node's
+    # copied context can read it sync at render time).
+    from app.agent.master_tz import resolve_and_bind
+    await resolve_and_bind()
     config, handler = _config_with_handler(thread_id)
 
     # Legacy paused-at-interrupt checkpoint backstop (see run_turn) — nudge to the
@@ -973,6 +981,10 @@ async def voice_turn(
     runtime_stats.record_turn()
     yield {"type": "thread_id", "content": thread_id}
 
+    # B1-TZ — bind the master's timezone ONCE for this turn (pre-graph, so every node's
+    # copied context can read it sync at render time).
+    from app.agent.master_tz import resolve_and_bind
+    await resolve_and_bind()
     config, handler = _config_with_handler(thread_id)
 
     if await _is_awaiting_approval(thread_id):

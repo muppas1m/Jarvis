@@ -190,8 +190,13 @@ async def test_delete_enricher_snapshots_title_and_time():
         def events(self):
             return _Events()
 
-    with patch.object(calendar_tool, "_service", return_value=_Svc()):
+    async def _utc(_tz):
+        return "UTC", True   # pin the TZ so this test stays about SNAPSHOT mechanics
+    with patch.object(calendar_tool, "_service", return_value=_Svc()), \
+         patch.object(calendar_tool, "_resolve_timezone", new=_utc):
         out = await calendar_tool.enrich_delete_args({"event_id": "ev1"})
+    # (bridge-fix migration 2026-07-19: the old assertion relied on the DEAD legacy read never
+    # finding the seeded profile TZ; TZ normalization has its own D32 test.)
     assert out["title"] == "Dentist" and out["start_iso"].startswith("2026-07-08T16")
 
 

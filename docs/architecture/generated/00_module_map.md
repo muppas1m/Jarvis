@@ -6,7 +6,7 @@
 
 The running system (`app/`) plus operational entry points (`scripts/`). One-line role from each module's docstring. (`tests/` and `alembic/` are excluded as support tooling.)
 
-## `app/` — the system (118 modules)
+## `app/` — the system (120 modules)
 
 ```
 app/
@@ -21,6 +21,7 @@ app/
 │   │   ├── document_search.py — document_search — agent-facing RAG tool over ingested documents.
 │   │   ├── email_history.py — Email history search — query email_logs + pending_approvals for recall.
 │   │   ├── email_send.py — Email send tool — provider-agnostic outbound email for the agent.
+│   │   ├── profile_tool.py — B1-TZ (R2) — the ask-once-then-persist timezone capture.
 │   │   ├── readiness_tool.py — Readiness intelligence (Phase 4.3) — "am I all set for [period]?"
 │   │   └── registry.py — Tool registry with dynamic embedding-based selection.
 │   ├── __init__.py — —
@@ -32,6 +33,7 @@ app/
 │   ├── context.py — Per-turn context builder — thin facade over MemoryManager.
 │   ├── decision_resolver.py — Natural-language resolution of a pending decision (A2 Piece 2).
 │   ├── graph.py — StateGraph wiring + AsyncPostgresSaver checkpointer.
+│   ├── master_tz.py — B1-TZ (D-B1-9) — ONE resolved timezone per turn, threaded into every sync render.
 │   ├── message_repair.py — Message-history repair — wire-shape normalization for tool calls (D22/D23 class).
 │   ├── nodes.py — Graph nodes — the four steps of an agent turn.
 │   ├── prompts.py — System-prompt construction.
