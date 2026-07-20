@@ -143,6 +143,16 @@ async def memory_load_node(state: AgentState) -> dict:
             message_ids=[m.id for m in healed],
         )
         update["messages"] = healed
+
+    # Item #8 second half (γ-3) — the truth stamp at THE turn-entry point: a persisted
+    # approval message whose linked rows have ALL resolved (any path — conversation, buttons,
+    # out-of-band, expiry) stops asserting "awaiting" BEFORE the model reads this turn.
+    try:
+        restamped = await _restamp_resolved_approvals(state.get("messages") or [])
+        if restamped:
+            update["messages"] = [*update.get("messages", []), *restamped]
+    except Exception as exc:  # noqa: BLE001 — a truth stamp never breaks a turn
+        logger.warning("approval_restamp_failed", error=str(exc))
     return update
 
 
@@ -1499,6 +1509,86 @@ def _stamp_question(state: dict, question_id, new_state: str) -> AIMessage | Non
             return AIMessage(content=m.content, id=m.id,
                              additional_kwargs={**(m.additional_kwargs or {}), "jarvis": meta})
     return None
+
+
+_TERMINAL_ROW_STATUSES = {"approved", "rejected", "discarded", "executed", "failed",
+                          "expired", "unconfirmed"}
+
+
+async def _restamp_resolved_approvals(messages: list) -> list:
+    """Item #8 second half (γ-3, the checkpoint re-parrot) — extend the certified same-id
+    stamp pattern (_stamp_question/_stamp_offers) to type=="approval": once EVERY linked row
+    is terminal, the persisted mint message stops asserting "awaiting" — content is
+    solicitation-stripped + a terse truth line, jarvis gains state:"resolved" + the statuses.
+    `type` and `approval_ids` stay untouched, so _conversation_referent anchoring is unchanged
+    (liveness always governed dispatch anyway). A MISSING row counts as resolved — the row
+    store's word beats a dangling assert. Runs at TURN ENTRY so the truth lands before the
+    model reads; one batched status query, only when un-restamped tags exist. Fail-safe: any
+    error restamps nothing."""
+    import uuid as _uuid
+
+    candidates: dict[int, list] = {}
+    for i, m in enumerate(messages or []):
+        if not isinstance(m, AIMessage) or getattr(m, "id", None) is None:
+            continue
+        meta = (getattr(m, "additional_kwargs", None) or {}).get("jarvis") or {}
+        if meta.get("type") == "approval" and meta.get("approval_ids") \
+                and meta.get("state") != "resolved":
+            candidates[i] = [str(x) for x in meta["approval_ids"]]
+    if not candidates:
+        return []
+    all_ids = []
+    for ids in candidates.values():
+        for rid in ids:
+            try:
+                all_ids.append(_uuid.UUID(rid))
+            except (ValueError, AttributeError, TypeError):
+                continue
+    try:
+        async with async_session() as session:
+            rows = (await session.execute(
+                select(PendingApproval.id, PendingApproval.status).where(
+                    PendingApproval.id.in_(all_ids)))).all()
+    except Exception as exc:  # noqa: BLE001 — never break a turn over a truth stamp
+        logger.warning("approval_restamp_read_failed", error=str(exc))
+        return []
+    status_by_id = {str(r[0]): (r[1] or "") for r in rows}
+    out = []
+    for i, ids in candidates.items():
+        statuses = [status_by_id.get(rid, "resolved") for rid in ids]   # missing → resolved
+        if not all(st in _TERMINAL_ROW_STATUSES or st == "resolved" for st in statuses):
+            continue                                       # anything still pending → untouched
+        m = messages[i]
+        label = " / ".join(dict.fromkeys(statuses))
+        # Keep the RECORD (what was queued, to whom) — strip only the soliciting QUESTION
+        # ("shall I go ahead?"); the declarative mint line stays, historically truthful under
+        # the truth line beneath it.
+        if isinstance(m.content, str):
+            # split on sentence boundaries AND em-dash clauses (the mint fuses the invite
+            # with "— shall I go ahead?"), drop only soliciting ?-clauses, keep the record.
+            kept = [seg.strip() for seg in re.split(r"(?<=[.?!])\s+|\s+[—–]\s+", m.content)
+                    if seg.strip()
+                    and not (seg.rstrip().endswith("?") and _SOLICIT_SENTENCE.search(seg))]
+            content = " ".join(kept).strip()
+            if content and content[-1] not in ".?!":
+                content += "."
+        else:
+            content = m.content
+        truth = f"[Since {label} — no longer awaiting approval.]"
+        # TRUTH-FIRST + the record QUOTED AS HISTORY: the message asserts nothing current
+        # (kills the re-parrot) while every fact of what was queued survives on the record.
+        if isinstance(content, str) and content:
+            new_content = f"{truth}\n(Original request: \"{content}\")"
+        else:
+            new_content = truth
+        meta = dict((m.additional_kwargs or {}).get("jarvis") or {})
+        meta["state"] = "resolved"
+        meta["resolved_statuses"] = statuses
+        out.append(AIMessage(content=new_content, id=m.id,
+                             additional_kwargs={**(m.additional_kwargs or {}), "jarvis": meta}))
+    if out:
+        logger.info("approval_messages_restamped", n=len(out))
+    return out
 
 
 def _has_open_question(messages: list) -> bool:

@@ -20,6 +20,7 @@ import type {
   StreamItem,
   UploadItem,
 } from "./types";
+import { annotateResolvedMints, reconcileFinal, upsertAssistant } from "./streamRender";
 
 // In-chat document upload (A3) — mirror the backend's allow-list + 25 MB cap so
 // an unsupported / oversized file fails INSTANTLY client-side, before a doomed
@@ -44,6 +45,7 @@ interface BackendItem {
   role?: "user" | "assistant";
   content?: string;
   approval_id?: string;
+  approval_ids?: string[];
   tool_name?: string;
   tool_args?: Record<string, unknown>;
   description?: string;
@@ -79,6 +81,8 @@ function itemsFromHistory(raw: BackendItem[]): StreamItem[] {
           id: crypto.randomUUID(),
           role: it.role === "user" ? ("user" as const) : ("assistant" as const),
           content: it.content ?? "",
+          // γ-3 — the persisted mint linkage (exposed by /history) for status reconcile
+          approval_ids: it.approval_ids,
         },
   );
 }
@@ -315,10 +319,10 @@ export function useJarvis() {
       ]);
       setAgentState("thinking");
 
+      // Item #8 (γ-1): append-if-missing lives in the SHARED helper — the token,
+      // done, AND error paths all inherit the append path.
       const patch = (content: string) =>
-        setItems((m) =>
-          m.map((x) => (x.type === "message" && x.id === aiId ? { ...x, content } : x)),
-        );
+        setItems((m) => upsertAssistant(m, aiId, content));
 
       const ac = new AbortController();
       abortRef.current = ac;
@@ -412,7 +416,9 @@ export function useJarvis() {
                 break;
               }
               case "done":
-                patch(ev.content.response || acc);
+                // Item #8 (γ-2): reconcile the terminal payload with the streamed
+                // body — a divergent read-back appends as a delta, never clobbers.
+                patch(reconcileFinal(acc, ev.content.response || ""));
                 if (ev.content.context) {
                   setContext(ev.content.context);
                   // Compaction just fired this turn → drop a subtle live divider.
@@ -604,7 +610,8 @@ export function useJarvis() {
         if (cancelled) return;
         if (data.thread_id) threadRef.current = data.thread_id;
         if (data.context) setContext(data.context);
-        const hydrated = itemsFromHistory(data.items ?? []);
+        // Item #8 (γ-3): mint-time approval lines reconcile to the live row status.
+        const hydrated = annotateResolvedMints(itemsFromHistory(data.items ?? []));
         if (hydrated.length) setItems((prev) => (prev.length ? prev : hydrated));
       } catch {
         /* unreachable backend → start fresh */

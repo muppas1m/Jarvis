@@ -825,3 +825,66 @@ async def test_b12b_direct_drift_out_of_range_confirms_never_lone_dispatch(monke
         assert rec["calls"] == [], f"out-of-range decayed into a dispatch: {rec['calls']}"
     finally:
         await _cleanup(thread)
+
+
+# --------------------------------------------------------------------------- #
+# Item #8 second half — the approval-message truth stamp (γ-3 checkpoint parrot)#
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_restamp_resolved_approval_strips_awaiting_and_stamps():
+    thread = f"web:{_MARK}-rs1"
+    rid = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "Plans", "body": "x"},
+                      status="rejected")
+    mint = AIMessage(content="I've queued an email to amy@x.com for your approval, Sir — shall I go ahead?",
+                     id="mint-1",
+                     additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [rid],
+                                                   "mint_class": "fresh", "solicited": True}})
+    try:
+        out = await nodes._restamp_resolved_approvals([mint])
+        assert len(out) == 1 and out[0].id == "mint-1"          # same-id (R1 pattern)
+        meta = out[0].additional_kwargs["jarvis"]
+        assert meta["state"] == "resolved" and meta["approval_ids"] == [rid]   # anchor intact
+        low = out[0].content.lower()
+        assert "shall i go ahead" not in low                    # the invite QUESTION stripped
+        assert "amy@x.com" in low                               # the RECORD is preserved
+        assert "no longer awaiting" in low and "rejected" in low  # the truth line
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_restamp_leaves_pending_and_mixed_untouched():
+    thread = f"web:{_MARK}-rs2"
+    r1 = await _seed(thread, "email_send", {"to": "a@x.com", "subject": "S", "body": "x"})  # pending
+    r2 = await _seed(thread, "email_send", {"to": "b@x.com", "subject": "T", "body": "y"},
+                     status="approved")
+    pending_mint = AIMessage(content="queued — shall I go ahead?", id="m-p",
+                             additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [r1],
+                                                           "mint_class": "fresh", "solicited": True}})
+    mixed_mint = AIMessage(content="two queued — shall I go ahead?", id="m-x",
+                           additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [r1, r2],
+                                                         "mint_class": "fresh", "solicited": True}})
+    try:
+        out = await nodes._restamp_resolved_approvals([pending_mint, mixed_mint])
+        assert out == []                                        # anything pending → untouched
+    finally:
+        await _cleanup(thread)
+
+
+@pytest.mark.asyncio
+async def test_restamp_is_idempotent_and_walk_anchor_survives():
+    thread = f"web:{_MARK}-rs3"
+    rid = await _seed(thread, "email_send", {"to": "amy@x.com", "subject": "P", "body": "x"},
+                      status="executed")
+    mint = AIMessage(content="queued — shall I go ahead?", id="m-i",
+                     additional_kwargs={"jarvis": {"type": "approval", "approval_ids": [rid],
+                                                   "mint_class": "fresh", "solicited": True}})
+    try:
+        first = await nodes._restamp_resolved_approvals([mint])
+        assert len(first) == 1
+        again = await nodes._restamp_resolved_approvals(first)   # already state=resolved
+        assert again == []                                       # idempotent
+        ref = nodes._conversation_referent(first + [HumanMessage(content="yes")])
+        assert ref is not None and ref["type"] == "approval" and ref["ids"] == [rid]
+    finally:
+        await _cleanup(thread)

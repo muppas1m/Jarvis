@@ -1472,6 +1472,12 @@ def _serialize_message(m: BaseMessage) -> dict[str, Any]:
             "role": "ai",
             "content": strip_function_leak(m.content) if isinstance(m.content, str) else str(m.content),
         }
+        # Item #8 (γ-3, DECLARED field) — expose the persisted jarvis approval linkage so the
+        # dashboard can reconcile a mint-time approval line to the LIVE row status at render.
+        # Read-only exposure of what the checkpoint already carries; no payload reshaping.
+        _jarvis = (m.additional_kwargs or {}).get("jarvis") or {}
+        if _jarvis.get("type") == "approval" and _jarvis.get("approval_ids"):
+            out["approval_ids"] = [str(i) for i in _jarvis["approval_ids"]]
         if m.tool_calls:
             out["tool_calls"] = [
                 {"name": tc["name"], "args": tc.get("args") or {}, "id": tc["id"]}

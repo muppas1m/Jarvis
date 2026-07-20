@@ -133,6 +133,11 @@ export function ChatPanel({
                     : "border border-white/5 bg-black/30 text-ink"
                 }`}
               >
+                {it.type === "message" && it.note ? (
+                  <div className="mb-1 text-[11px] uppercase tracking-wider text-ink/40">
+                    {it.note}
+                  </div>
+                ) : null}
                 {it.content ? (
                   // User text is shown verbatim (they didn't write markdown);
                   // assistant markdown renders as HUD-themed formatting.

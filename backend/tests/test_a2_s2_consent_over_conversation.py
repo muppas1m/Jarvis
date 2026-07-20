@@ -28,6 +28,17 @@ from app.db.models import PendingApproval
 _MARK = f"test-s2-{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture(autouse=True)
+def _registry():
+    # FIX C reads the DECLARED essentials — an unregistered registry silently returns
+    # False and flips dispatch→confirm (order-dependent flake; same guard as the b1 files).
+    from app.agent.tools import calendar_tool, email_send
+    from app.agent.tools.registry import tool_registry
+    if tool_registry.approval_essentials("email_send") is None:
+        email_send.register()
+        calendar_tool.register()
+
+
 async def _seed_card(thread, tool_name="email_send",
                      tool_args=None, status="pending"):
     tool_args = tool_args or {"to": "fernandes@yahoo.me", "subject": "Delivery Pickup", "body": "hi"}

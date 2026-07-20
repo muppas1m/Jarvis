@@ -71,7 +71,16 @@ export interface ContextMeter {
  *  resolved/discarded cards) is an ordered StreamItem[] so a reload re-renders
  *  everything in conversation position. The divider is live-only (not persisted). */
 export type StreamItem =
-  | { type: "message"; id: string; role: "user" | "assistant"; content: string }
+  | {
+      type: "message";
+      id: string;
+      role: "user" | "assistant";
+      content: string;
+      /** γ-3 — the persisted jarvis linkage (mint-time approval line), from /history. */
+      approval_ids?: string[];
+      /** γ-3 — a muted live-status annotation ("since rejected"); words never rewritten. */
+      note?: string;
+    }
   | { type: "decision"; id: string; approval: ApprovalRequest }
   | { type: "upload"; id: string; upload: UploadItem }
   | { type: "divider"; id: string; label: string };

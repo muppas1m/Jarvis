@@ -72,7 +72,10 @@ def _conversation_items(
                 items.append({"type": "message", "role": "user", "content": m["content"]})
         elif role == "ai":
             if content:
-                items.append({"type": "message", "role": "assistant", "content": m["content"]})
+                item = {"type": "message", "role": "assistant", "content": m["content"]}
+                if m.get("approval_ids"):
+                    item["approval_ids"] = m["approval_ids"]   # γ-3: the mint linkage
+                items.append(item)
             for tc in m.get("tool_calls") or []:
                 decision = by_interrupt.get(tc.get("id"))
                 if decision:
