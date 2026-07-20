@@ -47,3 +47,13 @@ architecture:
 	rm -rf docs/architecture/generated && mkdir -p docs/architecture/generated
 	docker cp jarvis-backend:/tmp/arch/. docs/architecture/generated/
 	@echo "✓ Regenerated docs/architecture/generated/ — review + 'git add docs/architecture/generated'."
+
+harness:  ## the two-tier harness at default N
+	docker compose exec -T backend python -m pytest tests/regression tests/live_behavior -q
+
+harness-sweep:  ## elevated-N sweep + the full live judge boundary (pre-cert gate)
+	docker compose exec -T -e HARNESS_N=6 backend python -m pytest tests/regression tests/live_behavior -q
+	docker compose exec -T backend python -m pytest tests/test_decision_judge_live.py -q
+
+harness-report:  ## coverage vs manual_verification_plan.md
+	docker compose exec -T backend python -m tests.harness.ledger_map

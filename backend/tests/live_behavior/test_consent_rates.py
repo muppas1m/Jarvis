@@ -7,6 +7,7 @@ import pytest
 
 from tests.harness import (HARNESS_N, cleanup_thread, ensure_graph, inject_history,
                            mint_message, scratch_thread, seed_card, spy_dispatch)
+from tests.harness.capture import record
 
 _NONCOMMITTAL = ["hmm, maybe", "up to you", "ok", "yeah maybe later"]
 _COMMITTED = ["yes", "go ahead", "send it"]
@@ -25,8 +26,11 @@ async def test_b1_2_noncommittal_zero_sends_live(monkeypatch):
             await inject_history(thread, [mint_message([rid], solicited=True)])
             rec = spy_dispatch(monkeypatch)
             try:
-                await runner.run_turn(phrase, thread, "web", "harness")
-                if rec["calls"]:
+                out = await runner.run_turn(phrase, thread, "web", "harness")
+                leaked = bool(rec["calls"])
+                record("B1-2", phrase, i, "LEAK" if leaked else "reask",
+                       str(out.get("response"))[:200])
+                if leaked:
                     leaks.append((phrase, i, rec["calls"]))
             finally:
                 await cleanup_thread(thread)
@@ -45,8 +49,11 @@ async def test_b1_2_committed_always_resolves_live(monkeypatch):
         await inject_history(thread, [mint_message([rid], solicited=True)])
         rec = spy_dispatch(monkeypatch)
         try:
-            await runner.run_turn(phrase, thread, "web", "harness")
-            if rec["calls"] != [(rid, "approve")]:
+            out = await runner.run_turn(phrase, thread, "web", "harness")
+            ok = rec["calls"] == [(rid, "approve")]
+            record("B1-2", phrase, 0, "resolved" if ok else "MISS",
+                   str(out.get("response"))[:200])
+            if not ok:
                 misses.append((phrase, rec["calls"]))
         finally:
             await cleanup_thread(thread)

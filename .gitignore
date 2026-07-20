@@ -53,3 +53,4 @@ backend/evals/results/*.json
 
 # Local DB backups — real master data, never commit (durable across reboots)
 backend/backups/
+tests/.harness_artifacts/

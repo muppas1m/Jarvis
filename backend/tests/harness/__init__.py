@@ -43,6 +43,12 @@ async def ensure_graph():
     from app.agent.graph import init_checkpointer
     await init_checkpointer()
     runner._graph = None
+    # Mirror production boot: the registry must be populated or name-selection (declared
+    # essentials) silently returns False and journeys pass/fail for the WRONG reasons.
+    from app.agent.tools import register_all_tools
+    from app.agent.tools.registry import tool_registry
+    if tool_registry.approval_essentials("email_send") is None:
+        register_all_tools()
     return runner
 
 
@@ -129,3 +135,42 @@ def pin_decision_judge(monkeypatch, intent: str, hedged: bool = False, change: s
         return runner._PresentedJudgment(approval_id=aid, row=row, intent=intent,
                                          change=change, hedged=hedged)
     monkeypatch.setattr(runner, "_judge_presented", fake)
+
+
+def pin_verb_judge(monkeypatch, verb: str, hedged: bool = False, committed: bool = False,
+                   change: str = ""):
+    """Regression tier: pin judge-2 (the card-agnostic answer-verb judge)."""
+    from types import SimpleNamespace
+
+    async def fake(user_message, question, recent_context=""):
+        return SimpleNamespace(verb=verb, hedged=hedged, change=change, committed=committed)
+    monkeypatch.setattr("app.agent.decision_resolver.resolve_answer_verb", fake)
+
+
+def pin_brief_fetch(monkeypatch, text: str = "• briefing item one\n• briefing item two"):
+    """Regression tier: pin the code-delivery fetch (B1-8)."""
+    async def fake():
+        return text
+    monkeypatch.setattr("app.agent.tools.briefing_tool.fetch_latest_brief", fake)
+
+
+@asynccontextmanager
+async def preserved_briefing_state():
+    """Journeys run REAL turns, which mutate GLOBAL briefing state (briefing_hwm,
+    last_briefed_at, last_seen_at on the profile row) — snapshot + restore so a journey
+    leaves no droppings for the unit suites (order-independence)."""
+    from sqlalchemy import select, update
+
+    from app.db.engine import async_session
+    from app.db.models import UserProfile
+    async with async_session() as s:
+        row = (await s.execute(select(UserProfile.briefing_hwm, UserProfile.last_briefed_at,
+                                      UserProfile.last_seen_at).limit(1))).first()
+    try:
+        yield
+    finally:
+        if row is not None:
+            async with async_session() as s:
+                await s.execute(update(UserProfile).values(
+                    briefing_hwm=row[0], last_briefed_at=row[1], last_seen_at=row[2]))
+                await s.commit()
