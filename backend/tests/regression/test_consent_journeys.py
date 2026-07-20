@@ -184,3 +184,72 @@ async def test_b1_8_offer_yes_delivers_by_code(monkeypatch):
         assert rec["calls"] == []                              # never a card dispatch
     finally:
         await cleanup_thread(thread)
+
+
+@pytest.mark.asyncio
+async def test_b1_9_tz_marker_until_set_then_wall_clock(monkeypatch):
+    """B1-9: TZ unset → the queued-card floor renders the visible 'UTC' marker; column set →
+    a fresh card renders the wall clock, no marker. (The capture tool itself is unit-covered;
+    this is the journey render.)"""
+    from sqlalchemy import select, update
+
+    from app.db.engine import async_session
+    from app.db.models import UserProfile
+    runner = await ensure_graph()
+    async with async_session() as s:                          # snapshot + ensure FULLY unset
+        row = (await s.execute(select(UserProfile.timezone, UserProfile.always_on).limit(1))).first()
+        prev, prev_ao = (row[0], dict(row[1] or {})) if row else (None, {})
+        ao_cleared = {k: v for k, v in prev_ao.items() if k != "timezone"}
+        await s.execute(update(UserProfile).values(timezone=None, always_on=ao_cleared))
+        await s.commit()
+    thread = scratch_thread("reg-b19")
+    try:
+        from app.approvals_service import UnifiedApprovalCard, describe_card
+        from app.agent.master_tz import resolve_and_bind
+        await resolve_and_bind()                              # the turn-entry bind, unset state
+        card = UnifiedApprovalCard(
+            approval_id="x", kind="tool", thread_id=thread, tool_name="calendar_create",
+            tool_args={"title": "Lunch", "start_iso": "2026-07-25T17:00:00Z"},
+            description="d", status="pending", created_at="2026-07-20T00:00:00+00:00")
+        unset_render = describe_card(card)
+        assert "5:00 pm UTC" in unset_render, f"the marker is missing: {unset_render!r}"
+        async with async_session() as s:
+            await s.execute(update(UserProfile).values(timezone="America/New_York"))
+            await s.commit()
+        await resolve_and_bind()                              # the next turn's bind
+        set_render = describe_card(card)
+        assert "1:00 pm" in set_render and "UTC" not in set_render, f"{set_render!r}"
+    finally:
+        async with async_session() as s:
+            await s.execute(update(UserProfile).values(timezone=prev, always_on=prev_ao))
+            await s.commit()
+        await cleanup_thread(thread)
+
+
+@pytest.mark.asyncio
+async def test_b1_10_long_chat_keeps_pending_resolvable(monkeypatch):
+    """B1-10: the history compacts; the pending card's mint + the open question SURVIVE and
+    the card is still resolvable by word."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from tests.harness import pin_verb_judge
+    runner = await ensure_graph()
+    thread = scratch_thread("reg-b110")
+    rid = await seed_card(thread, "email_send",
+                          {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    filler = []
+    for i in range(30):                                       # a long exchange
+        filler += [HumanMessage(content=f"aside {i}: " + ("blah " * 40)),
+                   AIMessage(content=f"reply {i}: " + ("word " * 40))]
+    q = AIMessage(content="Just to confirm, Sir — approve the email to chintu?",
+                  additional_kwargs={"jarvis": {"type": "question", "state": "open",
+                                                "intent": "approve", "candidate_ids": [rid], "kind": ""}})
+    await inject_history(thread, [mint_message([rid], solicited=True), *filler, q])
+    monkeypatch.setattr("app.config.settings.COMPACT_THRESHOLD_TOKENS", 500, raising=False)
+    rec = spy_dispatch(monkeypatch)
+    pin_verb_judge(monkeypatch, "none", committed=True)       # the committed "yes"
+    try:
+        await runner.run_turn("yes", thread, "web", "harness")
+        assert rec["calls"] == [(rid, "approve")], f"pending lost after the long chat: {rec['calls']}"
+    finally:
+        await cleanup_thread(thread)

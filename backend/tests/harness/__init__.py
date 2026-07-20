@@ -49,6 +49,12 @@ async def ensure_graph():
     from app.agent.tools.registry import tool_registry
     if tool_registry.approval_essentials("email_send") is None:
         register_all_tools()
+        # Reviewer watch-item (on the record): a MINTING journey additionally needs
+        # production's tool-ranking — mirror index_all_tools() (async, idempotent) or a mint
+        # can pass for the wrong reason (the empty-registry class). Env-guarded: embedding
+        # runs need Ollama; consume-path journeys don't touch ranking.
+        if os.environ.get("HARNESS_INDEX_TOOLS") == "1":
+            await tool_registry.index_all_tools()
     return runner
 
 

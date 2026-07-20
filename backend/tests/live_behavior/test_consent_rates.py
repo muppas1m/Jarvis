@@ -58,3 +58,49 @@ async def test_b1_2_committed_always_resolves_live(monkeypatch):
         finally:
             await cleanup_thread(thread)
     assert misses == [], f"committed consent failed to resolve: {misses}"
+
+
+@pytest.mark.asyncio
+async def test_b1_3_kind_selection_live(monkeypatch):
+    """B1-3 LIVE: real judges end-to-end — 'send it' asks; 'the calendar one' resolves THAT."""
+    runner = await ensure_graph()
+    thread = scratch_thread("live-b13")
+    r_email = await seed_card(thread, "email_send",
+                              {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r_cal = await seed_card(thread, "calendar_update",
+                            {"event_id": "e1", "title": "Lunch with friends",
+                             "start_iso": "2026-07-25T17:00:00-04:00"})
+    await inject_history(thread, [mint_message([r_email, r_cal], solicited=True)])
+    rec = spy_dispatch(monkeypatch)
+    try:
+        out1 = await runner.run_turn("send it", thread, "web", "harness")
+        record("B1-3", "send it", 0, "asked" if not rec["calls"] else "LEAK",
+               str(out1.get("response"))[:200])
+        assert rec["calls"] == []
+        out2 = await runner.run_turn("the calendar one", thread, "web", "harness")
+        record("B1-3", "the calendar one", 0,
+               "resolved" if rec["calls"] == [(r_cal, "approve")] else "MISS",
+               str(out2.get("response"))[:200])
+        assert rec["calls"] == [(r_cal, "approve")], f"{rec['calls']}"
+    finally:
+        await cleanup_thread(thread)
+
+
+@pytest.mark.asyncio
+async def test_b1_6_hedged_never_dispatches_live(monkeypatch):
+    """B1-6 LIVE (consent zero-class): 'maybe do them all later' on the real judges — zero."""
+    runner = await ensure_graph()
+    thread = scratch_thread("live-b16")
+    r1 = await seed_card(thread, "email_send",
+                         {"to": "chintu@gmail.com", "subject": "Lunch Invitation", "body": "x"})
+    r2 = await seed_card(thread, "calendar_update",
+                         {"event_id": "e1", "title": "Standup", "start_iso": "2026-07-26T13:00:00-04:00"})
+    await inject_history(thread, [mint_message([r1, r2], solicited=True)])
+    rec = spy_dispatch(monkeypatch)
+    try:
+        out = await runner.run_turn("maybe do them all later", thread, "web", "harness")
+        record("B1-6", "maybe do them all later", 0,
+               "held" if not rec["calls"] else "LEAK", str(out.get("response"))[:200])
+        assert rec["calls"] == [], f"a hedge dispatched live: {rec['calls']}"
+    finally:
+        await cleanup_thread(thread)

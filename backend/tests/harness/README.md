@@ -25,3 +25,22 @@ classes assert rates. `HARNESS_N` scales the sample (default 3 so the tier rides
 - `make harness` — both tiers at default N (fast; rides CI/the suite anyway).
 - `make harness-sweep` — both tiers at `HARNESS_N=6` + the full live judge boundary.
 - `make harness-report` — coverage vs the manual plan.
+
+## Enforcement + operations (item #2 completion pass)
+- **`make sweep-check`** FAILS (with the exact command) when any `SWEEP_TRIGGERS` surface
+  changed since the last GREEN sweep — the receipt is written only by a green
+  `make harness-sweep`. Manual discipline is not the mechanism anymore; this is.
+- **Tier split:** the default suite / `make test` runs regression-only (`norecursedirs`
+  excludes `tests/live_behavior`); the live tier runs ONLY via the harness targets
+  (explicit paths bypass the exclusion). `test_decision_judge_live.py` stays in the suite
+  deliberately — it is the certified judge boundary lock, not the sampled tier.
+- **Capture scope (declared):** loss-proof capture covers BOTH tiers — live samples record
+  every run; a `pytest_runtest_makereport` hook records every harness FAILURE (both tiers)
+  to the same artifacts.
+- **Minting journeys (reviewer watch-item, on the record):** before ANY journey that mints
+  through the agent, run with `HARNESS_INDEX_TOOLS=1` so `ensure_graph` mirrors
+  production's `index_all_tools()` tool-ranking — without it a mint journey can pass for
+  the wrong reason (the empty-registry class). Consume-path journeys don't need it.
+- **Absorbed by reference:** the scattered graph-level journeys (step-2 consume, brief HWM,
+  edit fixes) are indexed in `ledger_map.ABSORBED_BY_REFERENCE` where they live — declared,
+  not silently migrated.

@@ -160,6 +160,10 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Item #2 tier split: the LIVE tier (real model calls, sampled) never rides the default
+# suite — real cost + sample noise must not red `make test`. The harness targets pass
+# the directory EXPLICITLY, which bypasses norecursedirs.
+norecursedirs = ["tests/live_behavior"]
 
 # Line-coverage config (Turn 20.5 task y). Config only — NO CI gate yet; the
 # gate lands with the Phase-4 CI pipeline, once a stable baseline exists post

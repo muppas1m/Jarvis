@@ -11,7 +11,7 @@ CLASS_MAP: dict[str, dict] = {
                         "tests/live_behavior/test_consent_rates.py::test_b1_2_committed_always_resolves_live"]},
     "B1-3":  {"name": "multi-card disambiguation",
               "regression": ["tests/regression/test_consent_journeys.py::test_b1_3_multi_card_asks_then_kind_resolves"],
-              "live": []},
+              "live": ["tests/live_behavior/test_consent_rates.py::test_b1_3_kind_selection_live"]},
     "B1-4":  {"name": "both / reject both (+ every card flips)",
               "regression": ["tests/regression/test_consent_journeys.py::test_b1_4_both_dispatches_both_and_flips_both"],
               "live": []},
@@ -20,7 +20,7 @@ CLASS_MAP: dict[str, dict] = {
               "live": []},
     "B1-6":  {"name": "hedged selector → re-confirm",
               "regression": ["tests/regression/test_consent_journeys.py::test_b1_6_hedged_all_reconfirms"],
-              "live": []},
+              "live": ["tests/live_behavior/test_consent_rates.py::test_b1_6_hedged_never_dispatches_live"]},
     "B1-7":  {"name": "no false all-selector / no wrong recipient",
               "regression": ["tests/regression/test_consent_journeys.py::test_b1_7_idiom_and_auxiliary_never_dispatch"],
               "live": []},
@@ -28,12 +28,23 @@ CLASS_MAP: dict[str, dict] = {
               "regression": ["tests/regression/test_consent_journeys.py::test_b1_8_offer_yes_delivers_by_code"],
               "live": []},
     "B1-9":  {"name": "wall-clock + first-run capture",
-              "regression": [],   # unit-covered (test_b1_tz_render); harness journey PENDING
+              "regression": ["tests/regression/test_consent_journeys.py::test_b1_9_tz_marker_until_set_then_wall_clock",
+                              "tests/test_b1_tz_render.py (unit matrix, absorbed by reference)"],
               "live": []},
     "B1-10": {"name": "long chat keeps pending",
-              "regression": [],   # PENDING — compaction journey
+              "regression": ["tests/regression/test_consent_journeys.py::test_b1_10_long_chat_keeps_pending_resolvable",
+                              "tests/test_a2_s1c_compaction_guard.py (keep-guard units, absorbed by reference)"],
               "live": []},
 }
+
+# DECLARED: the scattered step-2 graph journeys are ABSORBED BY REFERENCE (listed where they
+# live) rather than physically migrated — moving certified test files churns history for zero
+# behavior. New journeys land here; the map stays the honest index of both.
+ABSORBED_BY_REFERENCE = [
+    "tests/test_b1_step2_consume.py (graph-level consume journeys: I2/I3, drift, gates)",
+    "tests/test_b1_brief_deterministic.py (graph-level HWM ainvoke/astream)",
+    "tests/test_a2_batch31_edit_fixes.py (graph-level edit journeys)",
+]
 
 
 def coverage() -> str:
