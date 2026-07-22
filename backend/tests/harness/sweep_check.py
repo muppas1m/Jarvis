@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -42,12 +43,15 @@ def trigger_state(root: Path = _ROOT) -> dict[str, str]:
 
 def record(root: Path = _ROOT, receipt: Path = _RECEIPT) -> None:
     receipt.parent.mkdir(exist_ok=True)
-    head = ""
-    try:
-        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
-                              text=True, cwd=root).stdout.strip()
-    except Exception:  # noqa: BLE001 — the hash record is the load-bearing part
-        pass
+    # F-1: the container has no .git — the HOST passes GIT_HEAD via env (the Makefile);
+    # the subprocess path stays as the host-side fallback. An empty head is a defect.
+    head = os.environ.get("GIT_HEAD", "").strip()
+    if not head:
+        try:
+            head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                                  text=True, cwd=root).stdout.strip()
+        except Exception:  # noqa: BLE001 — the hash record is the load-bearing part
+            pass
     receipt.write_text(json.dumps({
         "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_head": head,

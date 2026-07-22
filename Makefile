@@ -51,10 +51,10 @@ architecture:
 harness:  ## the two-tier harness at default N
 	docker compose exec -T backend python -m pytest tests/regression tests/live_behavior -q
 
-harness-sweep:  ## elevated-N sweep + the full live judge boundary (pre-cert gate); records the receipt ONLY when green
+harness-sweep:  ## the SELF-SUFFICIENT pre-cert gate: tiers @N=6 (incl. the judge boundary, now live-tier) + the absorbed graph journeys; records the receipt ONLY when green
 	docker compose exec -T -e HARNESS_N=6 backend python -m pytest tests/regression tests/live_behavior -q
-	docker compose exec -T backend python -m pytest tests/test_decision_judge_live.py -q
-	docker compose exec -T backend python -m tests.harness.sweep_check record
+	docker compose exec -T backend python -m pytest tests/test_b1_step2_consume.py tests/test_b1_brief_deterministic.py tests/test_a2_batch31_edit_fixes.py -q
+	docker compose exec -T -e GIT_HEAD=$$(git rev-parse --short HEAD) backend python -m tests.harness.sweep_check record
 
 sweep-check:  ## FAILS when a consent-adjacent surface changed without a green sweep
 	docker compose exec -T backend python -m tests.harness.sweep_check check

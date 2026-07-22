@@ -44,3 +44,11 @@ classes assert rates. `HARNESS_N` scales the sample (default 3 so the tier rides
 - **Absorbed by reference:** the scattered graph-level journeys (step-2 consume, brief HWM,
   edit fixes) are indexed in `ledger_map.ABSORBED_BY_REFERENCE` where they live — declared,
   not silently migrated.
+
+## Post-operation rulings (2026-07-22)
+- **The gate is self-sufficient (F-2, ruled):** `make harness-sweep` runs both tiers AND the
+  absorbed graph-journey files — a consent regression in the absorbed areas cannot slide the gate.
+- **The judge boundary lives in the live tier (F-3, ruled):** `test_decision_judge_live.py` moved
+  to `tests/live_behavior/` — it no longer taxes `make test` (~90 real calls/run); sweep-check
+  enforces it runs before any consent-surface push.
+- **The receipt names its commit (F-1):** the host passes `GIT_HEAD` into the container.
